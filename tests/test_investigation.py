@@ -4,7 +4,11 @@ import asyncio
 
 import pytest
 
-from conftest import FINAL, ScriptedProvider
+from conftest import (
+    DSML_TOOL_CALL,
+    FINAL,
+    ScriptedProvider,
+)
 
 from conclave import investigation
 from conclave.budget import RunBudget
@@ -528,6 +532,40 @@ def test_rounds_are_bounded(
     assert "ROUND 1" in output
     assert "ROUND 2" in output
     assert "ROUND 3" not in output
+
+    assert (
+        "[investigation budget exhausted -> final]"
+        in output
+    )
+
+
+def test_unreadable_backend_does_not_abort_the_run(
+    repo,
+    capsys,
+):
+    """Regression: a backend that only emits tool-call markup.
+
+    Reproduces the real failure where opencode returned DSML tool-call
+    markup instead of JSON and the run died with "Expected JSON".
+    """
+
+    provider = ScriptedProvider(
+        default=DSML_TOOL_CALL
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert "continuing with an empty state" in output
+
+    assert "coordinator reply was unreadable" in output
 
     assert (
         "[investigation budget exhausted -> final]"

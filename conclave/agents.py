@@ -107,10 +107,40 @@ and missing evidence.
 }
 
 
+JSON_ONLY_RULE = (
+    "Reply with exactly one JSON object and "
+    "nothing else. Never emit tool-call "
+    "markup, XML tags or function-call "
+    "syntax such as DSML, antml, invoke or "
+    "parameter elements. The Python runtime "
+    "owns all tools; you cannot call tools."
+)
+
+
+class ModelOutputError(RuntimeError):
+    """Raised when a model reply is not the JSON object we asked for.
+
+    `text` keeps the raw reply so a caller can retry with it, or report
+    what the model actually said instead of only the parse failure.
+    """
+
+    def __init__(
+        self,
+        text: str,
+    ):
+        self.text = text
+
+        super().__init__(
+            "Expected JSON, got:\n" + text
+        )
+
+
 def extract_json(
     text: str,
 ) -> dict[str, Any]:
-    text = text.strip()
+    raw = text.strip()
+
+    text = raw
 
     if text.startswith("```"):
         lines = text.splitlines()[1:]
@@ -127,9 +157,9 @@ def extract_json(
         ).strip()
 
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         start = text.find("{")
         end = text.rfind("}")
 
@@ -137,37 +167,81 @@ def extract_json(
             start >= 0
             and end > start
         ):
-            return json.loads(
-                text[
-                    start : end + 1
-                ]
-            )
+            try:
+                parsed = json.loads(
+                    text[
+                        start : end + 1
+                    ]
+                )
 
-        raise RuntimeError(
-            "Expected JSON, got:\n"
-            + text
-        )
+            except json.JSONDecodeError:
+                raise ModelOutputError(
+                    raw
+                ) from exc
+
+        else:
+            raise ModelOutputError(
+                raw
+            ) from exc
+
+    if not isinstance(parsed, dict):
+        raise ModelOutputError(raw)
+
+    return parsed
 
 
 async def complete_json(
     provider: ModelProvider,
     system: str,
     user: str,
+    retries: int = 1,
 ) -> dict[str, Any]:
-    text = await provider.complete(
-        [
-            {
-                "role": "system",
-                "content": system,
-            },
-            {
-                "role": "user",
-                "content": user,
-            },
-        ]
-    )
+    messages = [
+        {
+            "role": "system",
+            "content": f"{system}\n\n{JSON_ONLY_RULE}",
+        },
+        {
+            "role": "user",
+            "content": user,
+        },
+    ]
 
-    return extract_json(text)
+    attempt = 0
+
+    while True:
+        text = await provider.complete(
+            messages
+        )
+
+        try:
+            return extract_json(text)
+
+        except ModelOutputError as exc:
+            if attempt >= retries:
+                raise
+
+            attempt += 1
+
+            messages = messages[
+                :2
+            ] + [
+                {
+                    "role": "assistant",
+                    "content": text,
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{JSON_ONLY_RULE}\n\n"
+                        "Your previous reply was "
+                        "rejected:\n"
+                        f"{exc.text[:1000]}\n\n"
+                        "Reply again with only "
+                        "the JSON object."
+                    ),
+                },
+            ]
 
 
 @dataclass
@@ -341,12 +415,18 @@ class ToolAgentRuntime:
                 )
             )
 
-            action = extract_json(
-                response
-            )
+            try:
+                action = extract_json(
+                    response
+                )
 
-            kind = action.get(
-                "type"
+            except ModelOutputError:
+                action = None
+
+            kind = (
+                action.get("type")
+                if action is not None
+                else None
             )
 
             if kind == "final":
@@ -430,6 +510,11 @@ class ToolAgentRuntime:
                         private,
                     )
                 )
+
+            elif kind is None:
+                label = "FORMAT ERROR"
+
+                observation = JSON_ONLY_RULE
 
             else:
                 raise RuntimeError(
@@ -749,4 +834,5 @@ Rules:
 - Return findings and open_leads as lists,
   empty when there are none.
 - Do not invent tool results.
+- {JSON_ONLY_RULE}
 """.strip()

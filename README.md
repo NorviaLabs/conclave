@@ -158,3 +158,9 @@ lines, so a loop attempt is visible instead of silent.
 - Identical (agent, task) pairs are never delegated twice.
 - If the budget runs out, a final answer is forced from the state gathered so
   far.
+- A reply that is not a single JSON object — including tool-call markup such as
+  `DSML`/`antml` — is retried once with a correction that repeats the rule and
+  shows the rejected reply. If it still fails, the run degrades instead of
+  aborting: state initialization continues with an empty state, the coordinator
+  stops investigating, and a failed state update keeps the previous state.
+  A reply that contains both markup and JSON is recovered without a retry.

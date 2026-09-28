@@ -4,7 +4,10 @@ import json
 
 from typing import Any
 
-from .agents import complete_json
+from .agents import (
+    ModelOutputError,
+    complete_json,
+)
 from .config import MAX_DELEGATIONS_PER_ROUND, MAX_ROUNDS
 from .providers import ModelProvider
 
@@ -59,14 +62,15 @@ async def initialize_state(
     provider: ModelProvider,
     question: str,
 ) -> dict[str, Any]:
-    state = await complete_json(
-        provider,
-        """
+    try:
+        state = await complete_json(
+            provider,
+            """
 You initialize structured investigation state.
 
 Return JSON only.
 """.strip(),
-        f"""
+            f"""
 Question:
 
 {question}
@@ -113,11 +117,20 @@ Return:
   "investigations": []
 }}
 """.strip(),
-    )
+        )
 
-    return normalize_state(
-        state
-    )
+        return normalize_state(
+            state
+        )
+
+    except ModelOutputError:
+        print(
+            "\n[state initialization was "
+            "unreadable; continuing with an "
+            "empty state]\n"
+        )
+
+        return normalize_state({})
 
 
 async def decide_next(
@@ -126,14 +139,15 @@ async def decide_next(
     state: dict[str, Any],
     round_number: int,
 ) -> dict[str, Any]:
-    return await complete_json(
-        provider,
-        """
+    try:
+        return await complete_json(
+            provider,
+            """
 You coordinate a multi-agent investigation.
 
 Return JSON only.
 """.strip(),
-        f"""
+            f"""
 Original question:
 
 {question}
@@ -208,7 +222,22 @@ Finish:
   "answer": "evidence-grounded final answer"
 }}
 """.strip(),
-    )
+        )
+
+    except ModelOutputError:
+        print(
+            "\n[coordinator reply was unreadable; "
+            "stopping the investigation and answering "
+            "from the state gathered so far]\n"
+        )
+
+        return {
+            "status": "delegate",
+            "reason": (
+                "coordinator reply was unreadable"
+            ),
+            "delegations": [],
+        }
 
 
 async def update_state(
@@ -218,14 +247,15 @@ async def update_state(
     round_number: int,
     results: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    updated = await complete_json(
-        provider,
-        """
+    try:
+        updated = await complete_json(
+            provider,
+            """
 You maintain canonical investigation state.
 
 Return JSON only.
 """.strip(),
-        f"""
+            f"""
 Question:
 
 {question}
@@ -291,11 +321,21 @@ hypotheses
 open_questions
 investigations
 """.strip(),
-    )
+        )
 
-    return normalize_state(
-        updated
-    )
+        return normalize_state(
+            updated
+        )
+
+    except ModelOutputError:
+        print(
+            "\n[state update was unreadable; "
+            "keeping the previous state]\n"
+        )
+
+        return normalize_state(
+            previous_state
+        )
 
 
 async def force_final(

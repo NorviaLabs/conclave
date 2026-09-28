@@ -34,6 +34,17 @@ FINAL = {
 }
 
 
+DSML_TOOL_CALL = (
+    "<\uff5cDSML\uff5ccalls>\n"
+    '<\uff5cDSML\uff5cinvoke name="bash">\n'
+    '<\uff5cDSML\uff5cparameter name="command">'
+    "ls -la\n"
+    "</\uff5cDSML\uff5cparameter>\n"
+    "</\uff5cDSML\uff5cinvoke>\n"
+    "</\uff5cDSML\uff5ccalls>"
+)
+
+
 class ScriptedProvider(ModelProvider):
     """Replays queued JSON actions, one queue per agent name.
 
@@ -85,9 +96,20 @@ class ScriptedProvider(ModelProvider):
             return json.dumps(self._default)
 
         if len(queue) > 1:
-            return json.dumps(queue.pop(0))
+            return self.render(queue.pop(0))
 
-        return json.dumps(queue[0])
+        return self.render(queue[0])
+
+    def render(
+        self,
+        item,
+    ) -> str:
+        """Dicts become JSON actions; strings pass through verbatim."""
+
+        if isinstance(item, str):
+            return item
+
+        return json.dumps(item)
 
 
 class CannedProvider(ModelProvider):

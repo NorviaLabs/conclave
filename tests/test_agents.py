@@ -6,6 +6,7 @@ import json
 import pytest
 
 from conftest import (
+    DSML_TOOL_CALL,
     FINAL,
     CannedProvider,
     FailingProvider,
@@ -15,7 +16,9 @@ from conftest import (
 from conclave import agents
 from conclave.agents import (
     AGENTS,
+    JSON_ONLY_RULE,
     AgentResult,
+    ModelOutputError,
     PrivateState,
     as_list,
     complete_json,
@@ -66,8 +69,41 @@ def test_extract_json_fenced_garbage_raises():
 
 
 def test_extract_json_broken_body_raises():
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(ModelOutputError):
         extract_json("{not json}")
+
+
+def test_extract_json_rejects_non_objects():
+    for text in ['[1, 2]', '"text"', "5", "true"]:
+        with pytest.raises(ModelOutputError):
+            extract_json(text)
+
+
+def test_extract_json_rejects_tool_call_markup():
+    with pytest.raises(
+        ModelOutputError,
+        match="Expected JSON",
+    ) as error:
+        extract_json(DSML_TOOL_CALL)
+
+    assert error.value.text == DSML_TOOL_CALL
+
+
+def test_extract_json_finds_json_after_markup():
+    text = (
+        DSML_TOOL_CALL
+        + '\n{"type": "final", "content": "ok"}'
+    )
+
+    assert extract_json(text) == {
+        "type": "final",
+        "content": "ok",
+    }
+
+
+def test_extract_json_reports_unparseable_braces():
+    with pytest.raises(ModelOutputError):
+        extract_json("before {broken json} after")
 
 
 def test_complete_json_sends_system_and_user():
@@ -84,9 +120,81 @@ def test_complete_json_sends_system_and_user():
     messages = provider.calls[0]
 
     assert messages[0]["role"] == "system"
-    assert messages[0]["content"] == "system text"
+    assert messages[0]["content"].startswith(
+        "system text"
+    )
+    assert JSON_ONLY_RULE in messages[0]["content"]
     assert messages[1]["role"] == "user"
     assert messages[1]["content"] == "user text"
+
+
+def test_complete_json_retries_unreadable_replies():
+    provider = ScriptedProvider(
+        {
+            "coordinator": [
+                DSML_TOOL_CALL,
+                '{"ok": true}',
+            ]
+        }
+    )
+
+    assert asyncio.run(
+        complete_json(
+            provider,
+            "system text",
+            "user text",
+        )
+    ) == {"ok": True}
+
+    assert len(provider.prompts) == 2
+
+    correction = provider.prompts[1][1]
+
+    assert "previous reply was rejected" in correction
+    assert JSON_ONLY_RULE in correction
+
+
+def test_complete_json_gives_up_after_retries():
+    provider = ScriptedProvider(
+        {
+            "coordinator": [
+                DSML_TOOL_CALL,
+                DSML_TOOL_CALL,
+            ]
+        }
+    )
+
+    with pytest.raises(ModelOutputError):
+        asyncio.run(
+            complete_json(
+                provider,
+                "system text",
+                "user text",
+                retries=1,
+            )
+        )
+
+    assert len(provider.prompts) == 2
+
+
+def test_complete_json_can_skip_retries():
+    provider = ScriptedProvider(
+        {
+            "coordinator": [DSML_TOOL_CALL]
+        }
+    )
+
+    with pytest.raises(ModelOutputError):
+        asyncio.run(
+            complete_json(
+                provider,
+                "system text",
+                "user text",
+                retries=0,
+            )
+        )
+
+    assert len(provider.prompts) == 1
 
 
 def test_as_list_passes_lists_through():
@@ -387,6 +495,53 @@ def test_run_rejects_unknown_action(runtime):
                 "task",
             )
         )
+
+
+def test_run_recovers_from_tool_call_markup(runtime):
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                DSML_TOOL_CALL,
+                FINAL,
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        runtime(provider).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert result.content == "researcher summary"
+    assert result.private.checked == []
+
+    assert any(
+        "FORMAT ERROR" in prompt
+        and JSON_ONLY_RULE in prompt
+        for _, prompt in provider.prompts
+    )
+
+
+def test_run_gives_up_after_format_errors(runtime):
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [DSML_TOOL_CALL]
+        }
+    )
+
+    result = asyncio.run(
+        runtime(provider).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert (
+        "Tool-step budget exhausted"
+        in result.content
+    )
 
 
 def test_run_reports_step_budget_exhaustion(runtime):

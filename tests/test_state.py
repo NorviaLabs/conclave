@@ -268,3 +268,94 @@ def test_complete_json_round_trip():
             "u",
         )
     ) == {"status": "delegate"}
+
+
+UNREADABLE = (
+    '<\uff5cDSML\uff5cinvoke name="bash">'
+    "</\uff5cDSML\uff5cinvoke>"
+)
+
+
+def test_initialize_state_falls_back_to_empty(
+    capsys,
+):
+    provider = CannedProvider(UNREADABLE)
+
+    state = asyncio.run(
+        initialize_state(
+            provider,
+            "why?",
+        )
+    )
+
+    assert state == EMPTY_STATE
+    assert state is not EMPTY_STATE
+
+    assert "continuing with an empty state" in (
+        capsys.readouterr().out
+    )
+
+
+def test_decide_next_stops_when_unreadable(capsys):
+    provider = CannedProvider(UNREADABLE)
+
+    decision = asyncio.run(
+        decide_next(
+            provider,
+            "why?",
+            EMPTY_STATE,
+            1,
+        )
+    )
+
+    assert decision["status"] == "delegate"
+    assert decision["delegations"] == []
+
+    assert "stopping the investigation" in (
+        capsys.readouterr().out
+    )
+
+
+def test_update_state_keeps_previous_state(capsys):
+    provider = CannedProvider(UNREADABLE)
+
+    previous = {
+        "facts": [{"id": "F1"}],
+        "evidence": [],
+        "hypotheses": [],
+        "open_questions": [],
+        "investigations": [],
+    }
+
+    updated = asyncio.run(
+        update_state(
+            provider,
+            "why?",
+            previous,
+            1,
+            [],
+        )
+    )
+
+    assert updated == previous
+
+    assert "keeping the previous state" in (
+        capsys.readouterr().out
+    )
+
+
+def test_initialize_state_retries_before_falling_back(
+    capsys,
+):
+    provider = CannedProvider(UNREADABLE)
+
+    asyncio.run(
+        initialize_state(
+            provider,
+            "why?",
+        )
+    )
+
+    assert len(provider.calls) == 2
+
+    capsys.readouterr()
