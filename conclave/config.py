@@ -1,0 +1,8 @@
+"""Tunable limits for the investigation runtime."""
+
+MAX_ROUNDS = 8
+MAX_DELEGATIONS = 15
+MAX_DELEGATIONS_PER_ROUND = 3
+MAX_TOOL_STEPS = 8
+TIMEOUT_SECONDS = 300
+MAX_TOOL_OUTPUT_CHARS = 20_000
