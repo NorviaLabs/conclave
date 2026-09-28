@@ -5,8 +5,13 @@ import json
 
 from typing import Any
 
-from .agents import AGENTS, ToolAgentRuntime
-from .config import MAX_DELEGATIONS, MAX_ROUNDS
+from .agents import (
+    AGENTS,
+    AgentResult,
+    ToolAgentRuntime,
+)
+from .budget import RunBudget
+from .config import MAX_ROUNDS
 from .providers import ModelProvider
 from .registry import ToolRegistry
 from .state import (
@@ -31,9 +36,12 @@ async def run_investigation(
     tools: ToolRegistry,
     question: str,
 ) -> None:
+    budget = RunBudget()
+
     runtime = ToolAgentRuntime(
         provider,
         tools,
+        budget,
     )
 
     state = await initialize_state(
@@ -48,8 +56,6 @@ async def run_investigation(
     seen_tasks: set[
         tuple[str, str]
     ] = set()
-
-    total_delegations = 0
 
     for round_number in range(
         1,
@@ -113,10 +119,12 @@ async def run_investigation(
             "delegations",
             [],
         ):
-            if (
-                total_delegations
-                >= MAX_DELEGATIONS
-            ):
+            if budget.remaining == 0:
+                print(
+                    "  x  delegation budget "
+                    "exhausted"
+                )
+
                 break
 
             agent_name = (
@@ -153,11 +161,22 @@ async def run_investigation(
             if key in seen_tasks:
                 continue
 
+            refusal = budget.reserve(
+                agent_name,
+                1,
+                (),
+            )
+
+            if refusal:
+                print(
+                    f"  x  {refusal}"
+                )
+
+                continue
+
             seen_tasks.add(
                 key
             )
-
-            total_delegations += 1
 
             valid.append(
                 delegation
@@ -241,16 +260,55 @@ async def run_investigation(
                 )
 
             except Exception as exc:
-                result = (
-                    f"Agent failed: {exc}"
+                result = AgentResult(
+                    content=(
+                        "Agent failed: "
+                        f"{exc}"
+                    )
                 )
 
                 status = "failed"
 
             print(
                 f"\n[{name}]\n"
-                f"{result}"
+                f"{result.content}"
             )
+
+            for note in result.private.notes:
+                print(
+                    f"  note: {note}"
+                )
+
+            for record in result.nested:
+                print(
+                    f"  nested: "
+                    f"{record['delegated_by']} "
+                    f"-> {record['agent']} "
+                    f"[{record['status']}] "
+                    f"{record['task'][:70]}"
+                )
+
+                if record["reason"]:
+                    print(
+                        f"    {record['reason']}"
+                    )
+
+            nested_summary = [
+                {
+                    "agent": record["agent"],
+                    "delegated_by": (
+                        record["delegated_by"]
+                    ),
+                    "task": record["task"],
+                    "status": (
+                        record["status"]
+                    ),
+                    "reason": (
+                        record["reason"]
+                    ),
+                }
+                for record in result.nested
+            ]
 
             return {
                 "agent": name,
@@ -276,7 +334,17 @@ async def run_investigation(
                     )
                 ),
                 "status": status,
-                "result": result,
+                "result": result.content,
+                "findings": result.findings,
+                "open_leads": (
+                    result.open_leads
+                ),
+                "checked": (
+                    result.private.checked
+                ),
+                "nested_delegations": (
+                    nested_summary
+                ),
             }
 
         results = await asyncio.gather(

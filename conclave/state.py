@@ -166,6 +166,10 @@ architect
 critic
     challenges conclusions and assumptions
 
+Specialists may delegate limited follow-up work to
+each other while they run. They report what they
+delegated, including refusals.
+
 
 Choose investigations that reduce the most
 important remaining uncertainty.
@@ -265,6 +269,18 @@ Rules:
 - Record completed and failed investigations.
 - Do not invent paths, commits, URLs,
   issues, PRs or claims.
+
+- Results may include "findings" (claims with
+  provenance), "open_leads", "checked" (what the
+  specialist already inspected) and
+  "nested_delegations" (follow-up work a
+  specialist delegated, including refusals).
+- Treat delegated findings as evidence with their
+  own provenance. Do not record refusals as
+  findings.
+- Do not propose work that "checked" already
+  covers.
+
 - Keep state compact.
 
 Return exactly these top-level keys:
