@@ -53,6 +53,29 @@ uv run main.py
 
 Exit codes: `0` success, `1` error, `130` interrupted.
 
+## Test
+
+```bash
+uv run pytest
+```
+
+The suite is fully offline: model backends are replaced by scripts of JSON
+actions, and `opencode`, `gh`, and HTTP calls are faked at the boundary, so no
+test needs a network, a login, or a running model. Coverage is enforced at 95%
+(`fail_under` in `pyproject.toml`) and currently reports 100% of statements in
+`conclave/`.
+
+| Test file | Covers |
+| --- | --- |
+| `tests/test_budget.py` | delegation caps, depth and cycle refusals, charging |
+| `tests/test_agents.py` | JSON handling, private state, tool use, nesting |
+| `tests/test_investigation.py` | the round loop, filtering, failure paths |
+| `tests/test_local_tools.py` | path containment, files, Git, GitHub, web |
+| `tests/test_providers.py` | OpenCode and Ollama backends, timeouts, failures |
+| `tests/test_registry.py` | tool registration, permissions, truncation |
+| `tests/test_state.py` | state normalization, prompts, summaries |
+| `tests/test_cli.py` | argument parsing, provider choice, exit codes |
+
 ## Layout
 
 | Module | Responsibility |

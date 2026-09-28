@@ -1,0 +1,535 @@
+"""Tests for the round loop that ties coordinator and agents together."""
+
+import asyncio
+
+import pytest
+
+from conftest import FINAL, ScriptedProvider
+
+from conclave import investigation
+from conclave.budget import RunBudget
+from conclave.investigation import run_investigation
+from conclave.registry import build_tool_registry
+
+
+INITIAL_STATE = {
+    "facts": [],
+    "evidence": [],
+    "hypotheses": [],
+    "open_questions": [],
+    "investigations": [],
+}
+
+
+def decide(
+    delegations,
+    reason="because",
+):
+    return {
+        "status": "delegate",
+        "reason": reason,
+        "delegations": delegations,
+    }
+
+
+def delegate_to(
+    agent,
+    task,
+    **extra,
+):
+    payload = {
+        "agent": agent,
+        "task": task,
+        "purpose": "remove uncertainty",
+    }
+
+    payload.update(extra)
+
+    return payload
+
+
+def coordinator(
+    *extra,
+):
+    return [INITIAL_STATE, *extra]
+
+
+def run(
+    provider,
+    repo,
+    monkeypatch=None,
+    rounds=None,
+):
+    if rounds is not None:
+        monkeypatch.setattr(
+            investigation,
+            "MAX_ROUNDS",
+            rounds,
+        )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why does retry double count?",
+        )
+    )
+
+
+def test_full_round_with_nested_delegation(
+    repo,
+    capsys,
+):
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            "investigate retries",
+                        )
+                    ]
+                ),
+                INITIAL_STATE,
+                {
+                    "status": "done",
+                    "answer": "END TO END OK",
+                },
+            ),
+            "repo-researcher": [
+                {
+                    "type": "note",
+                    "content": "private note marker",
+                },
+                {
+                    "type": "tool",
+                    "name": "git_status",
+                    "arguments": {},
+                },
+                {
+                    "type": "delegate",
+                    "agent": "web-researcher",
+                    "task": "look up retry semantics",
+                },
+                FINAL,
+            ],
+            "web-researcher": [FINAL],
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert "ROUND 1" in output
+    assert "Reason: because" in output
+    assert "-> repo-researcher: investigate retries" in output
+    assert "note: private note marker" in output
+
+    assert (
+        "nested: repo-researcher -> web-researcher "
+        "[completed]"
+        in output
+    )
+
+    assert "researcher summary" in output
+    assert "END TO END OK" in output
+
+    updates = [
+        prompt
+        for _, prompt in provider.prompts
+        if "New specialist results" in prompt
+    ]
+
+    assert len(updates) == 1
+
+    assert "nested_delegations" in updates[0]
+    assert "findings" in updates[0]
+    assert "git_status(" in updates[0]
+
+    assert "private note marker" not in updates[0]
+
+
+def test_nested_refusals_are_printed(
+    repo,
+    capsys,
+):
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            "deep dive",
+                        )
+                    ]
+                ),
+                INITIAL_STATE,
+                {
+                    "status": "done",
+                    "answer": "done",
+                },
+            ),
+            "repo-researcher": [
+                {
+                    "type": "delegate",
+                    "agent": "web-researcher",
+                    "task": "level two",
+                },
+                FINAL,
+            ],
+            "web-researcher": [
+                {
+                    "type": "delegate",
+                    "agent": "architect",
+                    "task": "level three",
+                },
+                FINAL,
+            ],
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert "[refused]" in output
+    assert "maximum depth" in output
+
+
+def test_invalid_decision_raises(
+    repo,
+):
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                {"status": "meditate"}
+            )
+        }
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Invalid coordinator decision",
+    ):
+        asyncio.run(
+            run_investigation(
+                provider,
+                build_tool_registry(repo),
+                "why?",
+            )
+        )
+
+
+def test_no_delegations_forces_a_final_answer(
+    repo,
+    capsys,
+):
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide([])
+            ),
+            "default": {
+                "type": "final",
+                "content": "forced answer",
+            },
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert (
+        "[investigation budget exhausted -> final]"
+        in output
+    )
+
+
+def test_invalid_delegations_are_filtered(
+    repo,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(
+        investigation,
+        "MAX_ROUNDS",
+        1,
+    )
+
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to("astrologer", "x"),
+                        delegate_to("critic", "   "),
+                        delegate_to("critic", "real work"),
+                        delegate_to("critic", "REAL WORK"),
+                        delegate_to("critic", "more work"),
+                    ]
+                )
+            ),
+            "critic": [FINAL],
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    critic_calls = [
+        prompt
+        for name, prompt in provider.prompts
+        if name == "critic"
+    ]
+
+    assert len(critic_calls) == 2
+
+    output = capsys.readouterr().out
+
+    assert "-> critic: real work" in output
+    assert "-> critic: more work" in output
+    assert "-> astrologer:" not in output
+
+    assert (
+        "[investigation budget exhausted -> final]"
+        in output
+    )
+
+
+def test_exhausted_budget_stops_the_round(
+    repo,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(
+        investigation,
+        "RunBudget",
+        lambda: RunBudget(max_delegations=0),
+    )
+
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            "work",
+                        )
+                    ]
+                ),
+                {
+                    "status": "done",
+                    "answer": "stopped",
+                },
+            )
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert (
+        "x  delegation budget exhausted"
+        in output
+    )
+
+    assert (
+        "[investigation budget exhausted -> final]"
+        in output
+    )
+
+
+def test_per_agent_refusal_is_printed(
+    repo,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(
+        investigation,
+        "RunBudget",
+        lambda: RunBudget(max_per_agent=0),
+    )
+
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            "work",
+                        )
+                    ]
+                )
+            )
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert "already ran 0/0" in output
+
+
+def test_failing_agent_is_recorded_and_reported(
+    repo,
+    capsys,
+):
+    class ExplodingAgent(ScriptedProvider):
+        async def complete(self, messages):
+            if self.agent_name(messages) == (
+                "repo-researcher"
+            ):
+                raise RuntimeError("agent exploded")
+
+            return await super().complete(
+                messages
+            )
+
+    provider = ExplodingAgent(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            "work",
+                        )
+                    ]
+                ),
+                INITIAL_STATE,
+                {
+                    "status": "done",
+                    "answer": "recovered",
+                },
+            )
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert "Agent failed: agent exploded" in output
+    assert "recovered" in output
+
+    updates = [
+        prompt
+        for _, prompt in provider.prompts
+        if "New specialist results" in prompt
+    ]
+
+    assert '"status": "failed"' in updates[0]
+
+
+def test_rounds_are_bounded(
+    repo,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(
+        investigation,
+        "MAX_ROUNDS",
+        2,
+    )
+
+    tasks = [f"task {i}" for i in range(4)]
+
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            tasks[0],
+                        )
+                    ]
+                ),
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            tasks[1],
+                        )
+                    ]
+                ),
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            tasks[2],
+                        )
+                    ]
+                ),
+            ),
+            "repo-researcher": [FINAL],
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert "ROUND 1" in output
+    assert "ROUND 2" in output
+    assert "ROUND 3" not in output
+
+    assert (
+        "[investigation budget exhausted -> final]"
+        in output
+    )
