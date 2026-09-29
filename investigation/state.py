@@ -1,15 +1,31 @@
-"""Structured investigation state and the steps that update it."""
+"""Structured investigation state and the steps that update it.
+
+The shape of this state — facts, evidence, hypotheses, open questions,
+investigations — is what makes this an *investigation* application. It is
+declared to the core as a `StoreSchema`, and the core only ever sees five
+named keys and how to merge them.
+"""
 
 import json
 
-from typing import Any
+from typing import (
+    Any,
+    Callable,
+)
 
-from .agents import (
+from conclave import (
     ModelOutputError,
+    RunBudget,
+    SharedStore,
+    StoreSchema,
+    Usage,
     complete_json,
 )
-from .config import MAX_DELEGATIONS_PER_ROUND, MAX_ROUNDS
-from .providers import ModelProvider
+
+from .config import (
+    MAX_DELEGATIONS_PER_ROUND,
+    MAX_ROUNDS,
+)
 
 
 # =============================================================================
@@ -24,6 +40,21 @@ EMPTY_STATE = {
     "open_questions": [],
     "investigations": [],
 }
+
+
+STATE_SCHEMA = StoreSchema(
+    keys=frozenset(EMPTY_STATE)
+)
+
+
+def make_store(
+    on_change: Any = None,
+) -> SharedStore:
+    return SharedStore(
+        STATE_SCHEMA,
+        EMPTY_STATE,
+        on_change=on_change,
+    )
 
 
 def state_json(
@@ -58,9 +89,27 @@ def normalize_state(
     }
 
 
+def charge_usage(
+    budget: RunBudget,
+) -> Callable[[Usage], None]:
+    """Charge coordinator calls to the same budget as agent work."""
+
+    def collect(
+        usage: Usage,
+    ) -> None:
+        budget.settle(
+            "tokens",
+            usage.total_tokens,
+        )
+
+    return collect
+
+
 async def initialize_state(
-    provider: ModelProvider,
+    provider: Any,
     question: str,
+    budget: RunBudget,
+    render: Any,
 ) -> dict[str, Any]:
     try:
         state = await complete_json(
@@ -117,6 +166,7 @@ Return:
   "investigations": []
 }}
 """.strip(),
+            on_usage=charge_usage(budget),
         )
 
         return normalize_state(
@@ -124,20 +174,21 @@ Return:
         )
 
     except ModelOutputError:
-        print(
-            "\n[state initialization was "
-            "unreadable; continuing with an "
-            "empty state]\n"
+        render.notice(
+            "state initialization was unreadable; "
+            "continuing with an empty state"
         )
 
         return normalize_state({})
 
 
 async def decide_next(
-    provider: ModelProvider,
+    provider: Any,
     question: str,
     state: dict[str, Any],
     round_number: int,
+    budget: RunBudget,
+    render: Any,
 ) -> dict[str, Any]:
     try:
         return await complete_json(
@@ -222,13 +273,14 @@ Finish:
   "answer": "evidence-grounded final answer"
 }}
 """.strip(),
+            on_usage=charge_usage(budget),
         )
 
     except ModelOutputError:
-        print(
-            "\n[coordinator reply was unreadable; "
+        render.notice(
+            "coordinator reply was unreadable; "
             "stopping the investigation and answering "
-            "from the state gathered so far]\n"
+            "from the state gathered so far"
         )
 
         return {
@@ -241,11 +293,13 @@ Finish:
 
 
 async def update_state(
-    provider: ModelProvider,
+    provider: Any,
     question: str,
     previous_state: dict[str, Any],
     round_number: int,
     results: list[dict[str, Any]],
+    budget: RunBudget,
+    render: Any,
 ) -> dict[str, Any]:
     try:
         updated = await complete_json(
@@ -321,6 +375,7 @@ hypotheses
 open_questions
 investigations
 """.strip(),
+            on_usage=charge_usage(budget),
         )
 
         return normalize_state(
@@ -328,9 +383,9 @@ investigations
         )
 
     except ModelOutputError:
-        print(
-            "\n[state update was unreadable; "
-            "keeping the previous state]\n"
+        render.notice(
+            "state update was unreadable; "
+            "keeping the previous state"
         )
 
         return normalize_state(
@@ -339,11 +394,11 @@ investigations
 
 
 async def force_final(
-    provider: ModelProvider,
+    provider: Any,
     question: str,
     state: dict[str, Any],
 ) -> str:
-    return await provider.complete(
+    completion = await provider.complete(
         [
             {
                 "role": "system",
@@ -375,54 +430,4 @@ Do not request more research.
         ]
     )
 
-
-def print_state_summary(
-    state: dict[str, Any],
-) -> None:
-    print(
-        "\n[shared state]"
-    )
-
-    for hypothesis in state.get(
-        "hypotheses",
-        [],
-    ):
-        print(
-            f"  {hypothesis.get('id', '?')} "
-            f"[{hypothesis.get('status', '?')}, "
-            f"{hypothesis.get('confidence', '?')}]: "
-            f"{hypothesis.get('claim', '')}"
-        )
-
-    open_questions = [
-        question
-        for question in state.get(
-            "open_questions",
-            [],
-        )
-        if question.get(
-            "status"
-        )
-        == "open"
-    ]
-
-    if open_questions:
-        print(
-            "  Open questions:"
-        )
-
-        for question in open_questions:
-            print(
-                f"    "
-                f"{question.get('id', '?')}: "
-                f"{question.get('question', '')}"
-            )
-
-    print(
-        f"  Facts="
-        f"{len(state.get('facts', []))} "
-        f"Evidence="
-        f"{len(state.get('evidence', []))} "
-        f"Investigations="
-        f"{len(state.get('investigations', []))}"
-    )
+    return completion.text

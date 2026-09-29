@@ -1,12 +1,19 @@
 # Conclave
 
-A small multi-agent runtime that investigates one question using repository,
-GitHub, and web evidence, and keeps its findings in structured state instead of
-a chat transcript.
+A framework for building multi-agent systems out of bounded agent runs, plus one
+opinionated application built on it.
 
-A coordinator model decides what to investigate each round, specialist agents
-gather evidence with sandboxed tools, and a separate step folds the results back
-into shared state (facts, evidence, hypotheses, open questions, investigations).
+The library (`conclave/`) supplies the loop and the guardrails: an agent run
+that cannot spin, a delegation budget that refuses instead of recursing, a
+capability gate that stops tools from changing the world without an approver, a
+caller-schema'd shared store, and an async stream of typed events instead of
+`print()` calls. It ships no agents, no tools and no domain vocabulary.
+
+The app (`investigation/`) is consumer number one: a coordinator model decides
+what to investigate each round, specialist agents gather repository, GitHub and
+web evidence with sandboxed tools, and a separate step folds the results into
+structured state (facts, evidence, hypotheses, open questions, investigations)
+rather than a chat transcript.
 
 ## Requirements
 
@@ -15,8 +22,8 @@ into shared state (facts, evidence, hypotheses, open questions, investigations).
 - One model backend:
   - `opencode` on `PATH` with an existing login (default backend), or
   - a local [Ollama](https://ollama.com/) server
-- Optional, per tool: `gh` (GitHub tools), network access (`web_search`,
-  `web_fetch`)
+- Optional, per tool: `ddgs` (`uv sync --extra tools`, for `web_search`), `gh`
+  (GitHub tools), network access (`web_fetch`)
 
 ## Install
 
@@ -36,12 +43,15 @@ uv run conclave "why does the retry path double-count failures?"
 # explicit repository, different backend
 uv run main.py --repo ~/code/my-project --provider ollama --model qwen3.6 "..."
 
+# bound the run: at most 40 tool calls, 5 minutes and 200k tokens
+uv run conclave --max-tool-calls 40 --max-seconds 300 --max-tokens 200000 "..."
+
 # with no question, it investigates the repository for one important
 # architectural weakness
 uv run main.py
 ```
 
-`python -m conclave ...` and `python main.py ...` work too.
+`python -m investigation ...` and `python main.py ...` work too.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -50,8 +60,67 @@ uv run main.py
 | `--provider` | `opencode` | `opencode` or `ollama` |
 | `--model` | provider default | Model name passed to the backend |
 | `--ollama-url` | `http://127.0.0.1:11434` | Ollama server |
+| `--approve-destructive` | off | Approve tools that declare `WRITE`; without it such calls are refused |
+| `--max-tool-calls` | unbounded | Tool calls allowed for the whole run |
+| `--max-seconds` | unbounded | Wall-clock seconds allowed for the whole run |
+| `--max-tokens` | unbounded | Tokens allowed, where the backend reports them |
+| `--max-cost` | unbounded | Cost dimension, respected but never filled by the bundled backends |
 
 Exit codes: `0` success, `1` error, `130` interrupted.
+
+None of the bundled tools declares `WRITE`, so `--approve-destructive` is only
+needed once you add a tool that does.
+
+## Using the library
+
+```python
+from conclave import AgentSpec, RunBudget, ToolAgentRuntime
+
+AGENTS = {
+    "writer": AgentSpec(
+        name="writer",
+        instructions="Draft the note.",
+        tools={"save_note"},
+    ),
+    "critic": AgentSpec(
+        name="critic",
+        instructions="Challenge the draft.",
+    ),
+}
+
+runtime = ToolAgentRuntime(
+    provider,          # any ModelProvider
+    tools,             # a ToolRegistry you filled
+    RunBudget(),       # delegation caps and work limits
+    AGENTS,            # who may be delegated to, injected not global
+)
+
+async for event in runtime.stream(AGENTS["writer"], "draft something"):
+    ...                # react: render it, log it, count it
+
+result = await runtime.run(AGENTS["critic"], "review it")
+print(result.content, result.findings, result.nested)
+```
+
+What the library gives you:
+
+- **One bounded agent run.** `ToolAgentRuntime.stream(spec, task)` yields typed
+  events and executes the JSON actions the model returns (`tool`, `note`,
+  `delegate`, `final`). `run()` drains that stream and returns the handoff.
+- **Guards.** A `RunBudget` counts delegations, tool calls, wall clock, tokens
+  and cost. Refusals come back to the model as text, so an agent finalises on
+  the evidence it has instead of crashing.
+- **A capability gate.** A tool that declares no capabilities — or declares
+  `WRITE` — is destructive: it needs an `Approver`, and with no approver it is
+  refused. Non-destructive calls are auto-approved, and every call still emits
+  `ToolCalled` with its declared capabilities.
+- **A shared store.** `StoreSchema(keys, merges)` plus `SharedStore`, with
+  versioned writes and `snapshot()` copies. Writes are the orchestrator's job in
+  v0; agents get a copy.
+- **`fan_out(items, worker, limit=...)`** when you want breadth. Nested
+  delegation is serial by design, so a run is a plain call tree.
+- **`conclave.tools`** — 14 bundled repository, Git, GitHub and web tools,
+  importable but outside the stability promise. Nothing in the core imports it.
 
 ## Test
 
@@ -62,41 +131,59 @@ uv run pytest
 The suite is fully offline: model backends are replaced by scripts of JSON
 actions, and `opencode`, `gh`, and HTTP calls are faked at the boundary, so no
 test needs a network, a login, or a running model. Coverage is enforced at 95%
-(`fail_under` in `pyproject.toml`) and currently reports 100% of statements in
-`conclave/`.
+(`fail_under` in `pyproject.toml`) and currently reports 100% of statements
+across `conclave/` and `investigation/`.
 
 | Test file | Covers |
 | --- | --- |
-| `tests/test_budget.py` | delegation caps, depth and cycle refusals, charging |
-| `tests/test_agents.py` | JSON handling, private state, tool use, nesting |
-| `tests/test_investigation.py` | the round loop, filtering, failure paths |
-| `tests/test_local_tools.py` | path containment, files, Git, GitHub, web |
-| `tests/test_providers.py` | OpenCode and Ollama backends, timeouts, failures |
+| `tests/test_package.py` | public surface, import hygiene, no domain vocabulary in the core |
+| `tests/test_framework.py` | a second, non-investigation system built only from the public API |
+| `tests/test_stream.py` | the event stream and the guards: budget, approval, truncation |
+| `tests/test_runtime.py` | JSON protocol, private state, runtime, delegation |
+| `tests/test_events.py` | the frozen event vocabulary |
+| `tests/test_store.py` | schema merges, versions, snapshot isolation |
+| `tests/test_approval.py` | capabilities, approvers, refusal text |
+| `tests/test_budget.py` | delegation caps, depth and cycle refusals, dimensions |
 | `tests/test_registry.py` | tool registration, permissions, truncation |
-| `tests/test_state.py` | state normalization, prompts, summaries |
-| `tests/test_cli.py` | argument parsing, provider choice, exit codes |
+| `tests/test_local_tools.py` | path containment, files, Git, GitHub, web |
+| `tests/test_providers.py` | OpenCode and Ollama backends, timeouts, usage |
+| `tests/test_state.py` | the app's state, prompts and store schema |
+| `tests/test_investigation.py` | the round loop, filtering, failure paths |
+| `tests/test_render.py` | the progress log, driven by events |
+| `tests/test_cli.py` | argument parsing, provider choice, budgets, exit codes |
 
 ## Layout
 
+Two importable namespaces in one distribution. Domain content cannot enter the
+core by accident, and a test enforces it.
+
 | Module | Responsibility |
 | --- | --- |
-| `conclave/config.py` | Round, delegation, tool-step and output limits |
-| `conclave/providers.py` | `ModelProvider` plus the OpenCode and Ollama backends |
-| `conclave/local_tools.py` | `LocalTools`: files, Git, GitHub and web access |
-| `conclave/registry.py` | `Tool`, `ToolRegistry`, `build_tool_registry` |
-| `conclave/budget.py` | `RunBudget`: delegation caps and recursion guards |
-| `conclave/agents.py` | Agent specs, JSON action parsing, `ToolAgentRuntime` |
-| `conclave/state.py` | Investigation state and the steps that update it |
-| `conclave/investigation.py` | The round loop that ties coordinator and agents together |
-| `conclave/cli.py` | Argument parsing, provider selection, process entry point |
+| `conclave/spec.py` | `AgentSpec`, `Tool`, `Capability`, `Finding` |
+| `conclave/config.py` | Core limits, and `RunConfig` for one run |
+| `conclave/providers.py` | `ModelProvider`, `Completion`, `Usage`, OpenCode, Ollama |
+| `conclave/registry.py` | `ToolRegistry`: describe, execute, truncate |
+| `conclave/approval.py` | The capability gate and the `Approver` contract |
+| `conclave/budget.py` | `RunBudget`: delegation caps and work dimensions |
+| `conclave/protocol.py` | The JSON action protocol, private state, `AgentResult` |
+| `conclave/events.py` | The frozen event vocabulary |
+| `conclave/store.py` | `StoreSchema` and `SharedStore` |
+| `conclave/runtime.py` | `ToolAgentRuntime` and `fan_out` |
+| `conclave/tools/` | The 14 bundled tools |
+| `investigation/agents.py` | The five specialists and their instructions |
+| `investigation/state.py` | Investigation state, its schema, and its model steps |
+| `investigation/loop.py` | The round loop |
+| `investigation/render.py` | Every byte the CLI prints |
+| `investigation/cli.py` | Argument parsing, provider selection, entry point |
 
-Dependencies point one way: `config` -> `providers` / `local_tools` / `budget` ->
-`registry` -> `agents` -> `state` -> `investigation` -> `cli`. Only
-`providers.py` and `cli.py` know which backend is in use; everything else
-depends on the `ModelProvider` interface. `main.py` is a thin entry point that
-calls `conclave.cli.run`.
+Dependencies point one way: the app imports the library, never the reverse.
+`conclave/__init__.py` does not import `conclave.tools`, so `import conclave`
+pulls no scraper and runs no subprocess. `main.py` is a thin entry point that
+calls `investigation.cli.run`.
 
 ## Agents
+
+The reference app's cast:
 
 | Agent | Tools |
 | --- | --- |
@@ -113,15 +200,15 @@ the observation back. A tool not listed in the agent's spec is refused.
 ### Agent-private state
 
 Each agent run owns a private scratchpad: `note` actions record short notes, and
-every tool call is appended to a checked ledger (both bounded by `MAX_NOTES` and
-`MAX_NOTE_CHARS`). The scratchpad is re-rendered into that agent's prompt on
-every step, so the agent remembers intent instead of just raw output, and it
-never crosses back into the shared state. Only the handoff does: the final
-action's `content`, `findings` (claim, provenance, confidence), `open_leads`,
-and the checked ledger.
+every tool call is appended to a checked ledger (both bounded by `RunConfig`
+`max_notes` and `max_note_chars`). The scratchpad is re-rendered into that
+agent's prompt on every step, so the agent remembers intent instead of just raw
+output, and it never crosses back into the shared state. Only the handoff does:
+the final action's `content`, `findings` (claim, provenance, confidence),
+`open_leads`, and the checked ledger.
 
 Delegated specialists cannot see the parent's notes, the parent's transcript, or
-the shared investigation state, so delegated tasks have to be self-contained.
+the shared state, so delegated tasks have to be self-contained.
 
 ### Nested delegation
 
@@ -131,30 +218,38 @@ While it runs, a specialist may delegate follow-up work to another specialist:
 {"type": "delegate", "agent": "web-researcher", "task": "...", "purpose": "..."}
 ```
 
-Nested delegation is awaited inline, so it adds depth but not parallel fan-out,
-and every delegation — top-level or nested — is charged to one run-scoped
-`RunBudget` (`conclave/budget.py`) that refuses work rather than looping:
+Nested delegation is awaited inline, so it adds depth but not parallel fan-out
+(rounds fan out instead, through `fan_out`), and every delegation — top-level or
+nested — is charged to one run-scoped `RunBudget` that refuses work rather than
+looping:
 
 | Guard | Effect |
 | --- | --- |
-| `MAX_DEPTH = 2` | coordinator (0) -> specialist (1) -> sub-specialist (2), no deeper |
+| `max_depth = 2` | coordinator (0) -> specialist (1) -> sub-specialist (2), no deeper |
 | Ancestor check | an agent already on the delegation path cannot be delegated to again |
-| Per-agent cap | one agent runs at most `MAX_DELEGATIONS_PER_AGENT` times per run |
-| Total cap | `MAX_DELEGATIONS` per run, shared by top-level and nested work |
+| Per-agent cap | one agent runs at most `max_per_agent` times per run |
+| Total cap | `max_delegations` per run, shared by top-level and nested work |
 
 Refusals are returned to the calling model as text ("Do not repeat this
-delegation"), are never charged to the budget, and are printed as `nested:`
+delegation"), are never charged to the budget, and are reported as `nested:`
 lines, so a loop attempt is visible instead of silent.
 
 ## Safety and limits
 
 - Every file path is resolved and checked against `--repo`; anything that
   escapes it raises instead of reading.
-- GitHub tools are read-only (`gh ... view` / `gh ... search`).
-- `web_fetch` allows only `http`/`https`.
-- Budgets in `conclave/config.py`: 8 rounds, 15 delegations total, 3 per round,
-  4 per agent, depth 2, 8 tool steps per agent, 300 s per model call, tool
-  output truncated at 20 000 characters.
+- GitHub tools are read-only (`gh ... view` / `gh ... search`), and `web_fetch`
+  allows only `http`/`https`.
+- Capabilities are declared per tool and never inferred from names. `WRITE`, or
+  no declaration at all, means destructive: refused unless an approver allows
+  it. The bundled tools declare `read`/`network`/`shell` and never `write`.
+- Core limits (`conclave/config.py`): 15 delegations, 4 per agent, depth 2, 8
+  tool steps per agent, 300 s per model call, 12 notes of 300 characters.
+- App limits (`investigation/config.py`): 8 rounds, at most 3 delegations per
+  round.
+- Token and cost dimensions are only enforced when the backend reports them:
+  Ollama reports counts, OpenCode reports none, and nothing invents a price
+  table.
 - Identical (agent, task) pairs are never delegated twice.
 - If the budget runs out, a final answer is forced from the state gathered so
   far.

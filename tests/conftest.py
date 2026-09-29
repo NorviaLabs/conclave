@@ -3,6 +3,9 @@
 No test needs a network, `opencode`, `gh` or a real model: the providers are
 replaced by scripts of JSON actions, and external processes and HTTP calls are
 faked at the boundary.
+
+The agent catalog here belongs to the tests, not to the library: the core
+must work with any catalog a caller hands it.
 """
 
 import json
@@ -13,11 +16,16 @@ from pathlib import Path
 
 import pytest
 
-from conclave.agents import ToolAgentRuntime
-from conclave.budget import RunBudget
-from conclave.local_tools import LocalTools
-from conclave.providers import ModelProvider
-from conclave.registry import build_tool_registry
+from conclave import (
+    AgentSpec,
+    Completion,
+    ModelProvider,
+    RunBudget,
+    ToolAgentRuntime,
+    Usage,
+)
+from conclave.tools import build_tool_registry
+from conclave.tools.local import LocalTools
 
 
 FINAL = {
@@ -45,6 +53,41 @@ DSML_TOOL_CALL = (
 )
 
 
+AGENTS = {
+    "repo-researcher": AgentSpec(
+        name="repo-researcher",
+        instructions=(
+            "Investigate the local repository."
+        ),
+        tools={
+            "list_files",
+            "read_file",
+            "search_files",
+            "git_status",
+            "git_log",
+            "git_diff",
+            "git_show",
+        },
+    ),
+    "web-researcher": AgentSpec(
+        name="web-researcher",
+        instructions=(
+            "Research current external information."
+        ),
+        tools={
+            "web_search",
+            "web_fetch",
+        },
+    ),
+    "critic": AgentSpec(
+        name="critic",
+        instructions=(
+            "Challenge hypotheses and conclusions."
+        ),
+    ),
+}
+
+
 class ScriptedProvider(ModelProvider):
     """Replays queued JSON actions, one queue per agent name.
 
@@ -56,6 +99,7 @@ class ScriptedProvider(ModelProvider):
         self,
         scripts=None,
         default=None,
+        usage: Usage | None = None,
     ):
         self.scripts = {
             name: list(actions)
@@ -63,6 +107,8 @@ class ScriptedProvider(ModelProvider):
         }
 
         self.prompts: list[tuple[str, str]] = []
+
+        self.usage = usage
 
         self._default = default or {
             "type": "final",
@@ -83,7 +129,7 @@ class ScriptedProvider(ModelProvider):
     async def complete(
         self,
         messages,
-    ) -> str:
+    ) -> Completion:
         name = self.agent_name(messages)
 
         self.prompts.append(
@@ -93,12 +139,21 @@ class ScriptedProvider(ModelProvider):
         queue = self.scripts.get(name)
 
         if not queue:
-            return json.dumps(self._default)
+            return Completion(
+                text=json.dumps(self._default),
+                usage=self.usage,
+            )
 
         if len(queue) > 1:
-            return self.render(queue.pop(0))
+            return Completion(
+                text=self.render(queue.pop(0)),
+                usage=self.usage,
+            )
 
-        return self.render(queue[0])
+        return Completion(
+            text=self.render(queue[0]),
+            usage=self.usage,
+        )
 
     def render(
         self,
@@ -125,10 +180,10 @@ class CannedProvider(ModelProvider):
     async def complete(
         self,
         messages,
-    ) -> str:
+    ) -> Completion:
         self.calls.append(list(messages))
 
-        return self.response
+        return Completion(text=self.response)
 
 
 class FailingProvider(ModelProvider):
@@ -143,7 +198,7 @@ class FailingProvider(ModelProvider):
     async def complete(
         self,
         messages,
-    ) -> str:
+    ) -> Completion:
         raise RuntimeError(self.message)
 
 
@@ -207,11 +262,15 @@ def runtime(tools):
     def build(
         provider,
         budget=None,
+        agents=None,
+        **kwargs,
     ) -> ToolAgentRuntime:
         return ToolAgentRuntime(
             provider,
             tools,
             budget or RunBudget(),
+            AGENTS if agents is None else agents,
+            **kwargs,
         )
 
     return build

@@ -7,7 +7,9 @@ import pytest
 
 from pathlib import Path
 
-from conclave import cli
+from conclave import approve_all
+
+from investigation import cli
 from conclave.providers import (
     OllamaProvider,
     OpenCodeProvider,
@@ -37,8 +39,16 @@ def captured_run(monkeypatch):
         provider,
         tools,
         question,
+        **kwargs,
     ):
-        calls.append((provider, tools, question))
+        calls.append(
+            {
+                "provider": provider,
+                "tools": tools,
+                "question": question,
+                **kwargs,
+            }
+        )
 
     monkeypatch.setattr(
         cli,
@@ -193,10 +203,16 @@ def test_main_runs_the_investigation(
 
     assert len(captured_run) == 1
 
-    _, tools, question = captured_run[0]
+    run = captured_run[0]
 
-    assert question == "why now"
-    assert "read_file" in tools.tools
+    assert run["question"] == "why now"
+    assert "read_file" in run["tools"].tools
+
+    # No limits and no approver were asked for, so nothing is bounded
+    # beyond the defaults and destructive calls stay refused.
+    assert run["budget"].tool_calls is None
+    assert run["approver"] is None
+    assert run["render"].stream is sys.stdout
 
     output = capsys.readouterr().out
 
@@ -219,7 +235,7 @@ def test_main_uses_the_default_question(
     asyncio.run(cli.main())
 
     assert "architectural weakness" in (
-        captured_run[0][2]
+        captured_run[0]["question"]
     )
 
 
@@ -288,3 +304,69 @@ def test_run_handles_errors(monkeypatch, capsys):
     assert "ERROR: kaboom" in (
         capsys.readouterr().err
     )
+
+
+def test_parse_args_reads_the_budget_flags():
+    args = cli.parse_args(
+        [
+            "--max-tool-calls",
+            "5",
+            "--max-seconds",
+            "2.5",
+            "--max-tokens",
+            "1000",
+            "--max-cost",
+            "0.25",
+            "--approve-destructive",
+        ]
+    )
+
+    budget = cli.make_budget(args)
+
+    assert budget.tool_calls == 5
+    assert budget.wall_clock_seconds == 2.5
+    assert budget.tokens == 1000
+    assert budget.cost_usd == 0.25
+
+    assert cli.make_approver(args) is approve_all
+
+
+def test_the_defaults_leave_every_dimension_unbounded():
+    args = cli.parse_args([])
+
+    budget = cli.make_budget(args)
+
+    assert budget.limit("tool_calls") is None
+    assert budget.limit("wall_clock_seconds") is None
+    assert budget.limit("tokens") is None
+    assert budget.limit("cost_usd") is None
+
+    # Without an approver, a destructive call is refused.
+    assert cli.make_approver(args) is None
+
+
+def test_the_cli_passes_its_limits_to_the_run(
+    monkeypatch,
+    captured_run,
+    repo,
+):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "conclave",
+            "why",
+            "--repo",
+            str(repo),
+            "--max-tool-calls",
+            "3",
+            "--approve-destructive",
+        ],
+    )
+
+    asyncio.run(cli.main())
+
+    run = captured_run[0]
+
+    assert run["budget"].tool_calls == 3
+    assert run["approver"] is approve_all

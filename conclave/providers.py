@@ -1,4 +1,9 @@
-"""Model backends used by the agent runtime."""
+"""Model backends used by the agent runtime.
+
+`complete` returns a `Completion`: the text, plus a usage record when the
+backend can measure one. Backends that cannot measure tokens return
+`usage=None`, and the budget skips that dimension instead of guessing.
+"""
 
 import asyncio
 import json
@@ -6,6 +11,7 @@ import os
 import urllib.request
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import TIMEOUT_SECONDS
@@ -16,12 +22,38 @@ from .config import TIMEOUT_SECONDS
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class Usage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+    @property
+    def total_tokens(self) -> int | None:
+        if (
+            self.input_tokens is None
+            and self.output_tokens is None
+        ):
+            return None
+
+        return (
+            self.input_tokens or 0
+        ) + (
+            self.output_tokens or 0
+        )
+
+
+@dataclass(frozen=True)
+class Completion:
+    text: str
+    usage: Usage | None = None
+
+
 class ModelProvider(ABC):
     @abstractmethod
     async def complete(
         self,
         messages: list[dict[str, str]],
-    ) -> str:
+    ) -> Completion:
         raise NotImplementedError
 
 
@@ -31,20 +63,25 @@ class OpenCodeProvider(ModelProvider):
 
     OpenCode is used only as a model backend.
     Its own tools are disabled.
+
+    OpenCode reports no token usage, so completions
+    from this backend carry `usage=None`.
     """
 
     def __init__(
         self,
         cwd: Path,
         model: str | None = None,
+        timeout: float = TIMEOUT_SECONDS,
     ):
         self.cwd = cwd
         self.model = model
+        self.timeout = timeout
 
     async def complete(
         self,
         messages: list[dict[str, str]],
-    ) -> str:
+    ) -> Completion:
         prompt = "\n\n".join(
             f"{message['role'].upper()}:\n"
             f"{message['content']}"
@@ -101,7 +138,7 @@ class OpenCodeProvider(ModelProvider):
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=TIMEOUT_SECONDS,
+                timeout=self.timeout,
             )
 
         except asyncio.TimeoutError:
@@ -118,7 +155,9 @@ class OpenCodeProvider(ModelProvider):
                 or "OpenCode failed"
             )
 
-        return stdout.decode().strip()
+        return Completion(
+            text=stdout.decode().strip()
+        )
 
 
 class OllamaProvider(ModelProvider):
@@ -133,14 +172,16 @@ class OllamaProvider(ModelProvider):
         self,
         model: str,
         base_url: str = "http://127.0.0.1:11434",
+        timeout: float = TIMEOUT_SECONDS,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
 
     async def complete(
         self,
         messages: list[dict[str, str]],
-    ) -> str:
+    ) -> Completion:
         payload = json.dumps(
             {
                 "model": self.model,
@@ -149,7 +190,7 @@ class OllamaProvider(ModelProvider):
             }
         ).encode()
 
-        def request() -> str:
+        def request() -> Completion:
             req = urllib.request.Request(
                 f"{self.base_url}/api/chat",
                 data=payload,
@@ -161,14 +202,34 @@ class OllamaProvider(ModelProvider):
 
             with urllib.request.urlopen(
                 req,
-                timeout=TIMEOUT_SECONDS,
+                timeout=self.timeout,
             ) as response:
                 data = json.loads(
                     response.read().decode()
                 )
 
-                return data["message"]["content"]
+                return Completion(
+                    text=data["message"][
+                        "content"
+                    ],
+                    usage=read_usage(data),
+                )
 
         return await asyncio.to_thread(
             request
         )
+
+
+def read_usage(
+    data: dict,
+) -> Usage:
+    """Ollama reports token counts; keep them instead of dropping them."""
+
+    return Usage(
+        input_tokens=data.get(
+            "prompt_eval_count"
+        ),
+        output_tokens=data.get(
+            "eval_count"
+        ),
+    )

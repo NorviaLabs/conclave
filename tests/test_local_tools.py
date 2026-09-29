@@ -9,8 +9,8 @@ import pytest
 
 from pathlib import Path
 
-from conclave import local_tools
-from conclave.local_tools import LocalTools
+from conclave.tools import local as local_tools
+from conclave.tools.local import LocalTools
 
 
 class FakeResponse:

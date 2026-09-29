@@ -10,10 +10,10 @@ from conftest import (
     ScriptedProvider,
 )
 
-from conclave import investigation
+from investigation import loop as investigation
 from conclave.budget import RunBudget
-from conclave.investigation import run_investigation
-from conclave.registry import build_tool_registry
+from investigation import run_investigation
+from conclave.tools import build_tool_registry
 
 
 INITIAL_STATE = {

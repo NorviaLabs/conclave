@@ -24,21 +24,26 @@ wheels = [
 name = "conclave"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
+
+[package.optional-dependencies]
+tools = [
     { name = "ddgs" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "ddgs" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ddgs", specifier = ">=9.16.0" }]
+requires-dist = [{ name = "ddgs", marker = "extra == 'tools'", specifier = ">=9.16.0" }]
+provides-extras = ["tools"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ddgs", specifier = ">=9.16.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
 ]

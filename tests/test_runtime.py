@@ -1,4 +1,4 @@
-"""Tests for agent specs, JSON handling, private state and the runtime."""
+"""Tests for the JSON action protocol and the agent runtime."""
 
 import asyncio
 import json
@@ -6,6 +6,7 @@ import json
 import pytest
 
 from conftest import (
+    AGENTS,
     DSML_TOOL_CALL,
     FINAL,
     CannedProvider,
@@ -13,9 +14,10 @@ from conftest import (
     ScriptedProvider,
 )
 
-from conclave import agents
-from conclave.agents import (
-    AGENTS,
+from conclave import ToolAgentRuntime
+from conclave.budget import RunBudget
+from conclave.config import RunConfig
+from conclave.protocol import (
     JSON_ONLY_RULE,
     AgentResult,
     ModelOutputError,
@@ -24,8 +26,11 @@ from conclave.agents import (
     complete_json,
     extract_json,
 )
-from conclave.budget import RunBudget
-from conclave.registry import Tool, ToolRegistry
+from conclave.spec import (
+    Capability,
+    Tool,
+)
+from conclave.registry import ToolRegistry
 
 
 # =============================================================================
@@ -240,10 +245,10 @@ def test_private_state_ignores_empty_notes():
     assert private.notes == []
 
 
-def test_private_state_refuses_when_full(monkeypatch):
-    monkeypatch.setattr(agents, "MAX_NOTES", 1)
-
-    private = PrivateState()
+def test_private_state_refuses_when_full():
+    private = PrivateState(
+        RunConfig(max_notes=1)
+    )
 
     assert private.note("first") == (
         "Note 1/1 recorded."
@@ -255,23 +260,19 @@ def test_private_state_refuses_when_full(monkeypatch):
     assert private.notes == ["first"]
 
 
-def test_private_state_truncates_long_notes(monkeypatch):
-    monkeypatch.setattr(
-        agents,
-        "MAX_NOTE_CHARS",
-        5,
+def test_private_state_truncates_long_notes():
+    private = PrivateState(
+        RunConfig(max_note_chars=5)
     )
-
-    private = PrivateState()
     private.note("0123456789")
 
     assert private.notes == ["01234"]
 
 
-def test_private_state_keeps_recent_checks(monkeypatch):
-    monkeypatch.setattr(agents, "MAX_NOTES", 2)
-
-    private = PrivateState()
+def test_private_state_keeps_recent_checks():
+    private = PrivateState(
+        RunConfig(max_notes=2)
+    )
 
     for index in range(3):
         private.check(f"tool-{index}")
@@ -435,6 +436,7 @@ def test_run_reports_tool_errors(runtime):
             "d",
             {},
             broken,
+            frozenset({Capability.READ}),
         )
     )
 
@@ -451,12 +453,11 @@ def test_run_reports_tool_errors(runtime):
         }
     )
 
-    from conclave.agents import ToolAgentRuntime
-
     runner = ToolAgentRuntime(
         provider,
         tools,
         RunBudget(),
+        AGENTS,
     )
 
     result = asyncio.run(
@@ -723,7 +724,7 @@ def test_run_refuses_deep_delegation(runtime):
             "web-researcher": [
                 {
                     "type": "delegate",
-                    "agent": "architect",
+                    "agent": "critic",
                     "task": "level three",
                 },
                 FINAL,
@@ -908,3 +909,54 @@ def test_run_reports_provider_failure(runtime):
                 "task",
             )
         )
+
+
+def test_complete_json_can_report_usage():
+    provider = CannedProvider('{"ok": true}')
+
+    seen = []
+
+    assert asyncio.run(
+        complete_json(
+            provider,
+            "s",
+            "u",
+            on_usage=seen.append,
+        )
+    ) == {"ok": True}
+
+    # CannedProvider reports no usage, so nothing is charged.
+    assert seen == []
+
+
+def test_complete_json_charges_every_attempt():
+    from conclave import Usage
+
+    provider = ScriptedProvider(
+        {
+            "coordinator": [
+                DSML_TOOL_CALL,
+                '{"ok": true}',
+            ]
+        },
+        usage=Usage(
+            input_tokens=1,
+            output_tokens=2,
+        ),
+    )
+
+    seen = []
+
+    asyncio.run(
+        complete_json(
+            provider,
+            "s",
+            "u",
+            on_usage=seen.append,
+        )
+    )
+
+    assert [
+        usage.total_tokens
+        for usage in seen
+    ] == [3, 3]

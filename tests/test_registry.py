@@ -5,11 +5,9 @@ import asyncio
 import pytest
 
 from conclave.config import MAX_TOOL_OUTPUT_CHARS
-from conclave.registry import (
-    Tool,
-    ToolRegistry,
-    build_tool_registry,
-)
+from conclave.registry import ToolRegistry
+from conclave.spec import Tool
+from conclave.tools import build_tool_registry
 
 
 EXPECTED_TOOLS = {
@@ -176,3 +174,38 @@ def test_execute_keeps_short_output():
         )
         == "short"
     )
+
+
+def test_bundled_tools_declare_their_capabilities(repo):
+    """No bundled tool may be destructive: the app ships no approver."""
+
+    registry = build_tool_registry(repo)
+
+    for name, registered in registry.tools.items():
+        assert registered.capabilities, name
+        assert not registered.destructive, name
+
+        assert (
+            registry.capabilities(name)
+            == registered.capabilities
+        )
+
+
+def test_capabilities_of_an_unknown_tool_are_empty(repo):
+    registry = build_tool_registry(repo)
+
+    assert registry.capabilities("nope") == (
+        frozenset()
+    )
+
+
+def test_the_registry_can_name_a_tool(repo):
+    registry = build_tool_registry(repo)
+
+    assert registry.tool("read_file").name == (
+        "read_file"
+    )
+
+    assert registry.tool("nope") is None
+    assert registry.tool(["read_file"]) is None
+

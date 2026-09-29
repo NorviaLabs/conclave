@@ -1,19 +1,25 @@
 """Tests for structured investigation state and its model steps."""
 
 import asyncio
+import io
 import json
+
+import pytest
 
 from conftest import CannedProvider
 
-from conclave import state as state_module
-from conclave.agents import complete_json
-from conclave.state import (
+from conclave import RunBudget
+from conclave.protocol import complete_json
+from investigation.render import Renderer
+from investigation.state import (
     EMPTY_STATE,
+    STATE_SCHEMA,
+    charge_usage,
     decide_next,
     force_final,
     initialize_state,
+    make_store,
     normalize_state,
-    print_state_summary,
     state_json,
     update_state,
 )
@@ -41,6 +47,26 @@ INITIAL = json.dumps(
         "investigations": [],
     }
 )
+
+
+UNREADABLE = (
+    '<\uff5cDSML\uff5cinvoke name="bash">'
+    "</\uff5cDSML\uff5cinvoke>"
+)
+
+
+@pytest.fixture
+def render():
+    return Renderer(io.StringIO())
+
+
+@pytest.fixture
+def budget():
+    return RunBudget()
+
+
+def output(render) -> str:
+    return render.stream.getvalue()
 
 
 def test_state_json_is_indented():
@@ -76,13 +102,71 @@ def test_normalize_state_keeps_lists():
     )["facts"] == [{"id": "F1"}]
 
 
-def test_initialize_state_normalizes():
+# =============================================================================
+# The application's own store schema
+# =============================================================================
+
+
+def test_state_schema_declares_the_investigation_keys():
+    assert STATE_SCHEMA.keys == frozenset(
+        EMPTY_STATE
+    )
+
+
+def test_store_starts_empty_and_merges():
+    store = make_store()
+
+    assert store.snapshot() == EMPTY_STATE
+
+    asyncio.run(
+        store.merge(
+            {"facts": [{"id": "F1"}]}
+        )
+    )
+
+    assert store.snapshot()["facts"] == [
+        {"id": "F1"}
+    ]
+
+    assert store.version == 1
+
+
+def test_store_reports_what_changed():
+    seen = []
+
+    store = make_store(
+        on_change=seen.append
+    )
+
+    asyncio.run(
+        store.merge(
+            {"facts": [{"id": "F1"}]},
+            writer="coordinator",
+        )
+    )
+
+    assert seen[0].keys == ("facts",)
+    assert seen[0].writer == "coordinator"
+    assert seen[0].version == 1
+
+
+# =============================================================================
+# Model steps
+# =============================================================================
+
+
+def test_initialize_state_normalizes(
+    budget,
+    render,
+):
     provider = CannedProvider(INITIAL)
 
     state = asyncio.run(
         initialize_state(
             provider,
             "why?",
+            budget,
+            render,
         )
     )
 
@@ -95,7 +179,10 @@ def test_initialize_state_normalizes():
     assert "hypotheses" in prompt
 
 
-def test_decide_next_describes_budget_and_agents():
+def test_decide_next_describes_budget_and_agents(
+    budget,
+    render,
+):
     provider = CannedProvider(
         '{"status": "done", "answer": "yes"}'
     )
@@ -106,6 +193,8 @@ def test_decide_next_describes_budget_and_agents():
             "why?",
             EMPTY_STATE,
             2,
+            budget,
+            render,
         )
     )
 
@@ -119,13 +208,10 @@ def test_decide_next_describes_budget_and_agents():
     assert "Round:" in prompt
 
 
-def test_update_state_normalizes(monkeypatch):
-    monkeypatch.setattr(
-        state_module,
-        "MAX_ROUNDS",
-        8,
-    )
-
+def test_update_state_normalizes(
+    budget,
+    render,
+):
     provider = CannedProvider(
         json.dumps(
             {
@@ -151,6 +237,8 @@ def test_update_state_normalizes(monkeypatch):
                     "result": "summary",
                 }
             ],
+            budget,
+            render,
         )
     )
 
@@ -184,8 +272,163 @@ def test_force_final_returns_text():
     )
 
 
-def test_print_state_summary(capsys):
-    print_state_summary(
+def test_complete_json_round_trip():
+    provider = CannedProvider(
+        '{"status": "delegate"}'
+    )
+
+    assert asyncio.run(
+        complete_json(
+            provider,
+            "s",
+            "u",
+        )
+    ) == {"status": "delegate"}
+
+
+# =============================================================================
+# Unreadable model replies
+# =============================================================================
+
+
+def test_initialize_state_falls_back_to_empty(
+    budget,
+    render,
+):
+    provider = CannedProvider(UNREADABLE)
+
+    state = asyncio.run(
+        initialize_state(
+            provider,
+            "why?",
+            budget,
+            render,
+        )
+    )
+
+    assert state == EMPTY_STATE
+    assert state is not EMPTY_STATE
+
+    assert "continuing with an empty state" in (
+        output(render)
+    )
+
+
+def test_decide_next_stops_when_unreadable(
+    budget,
+    render,
+):
+    provider = CannedProvider(UNREADABLE)
+
+    decision = asyncio.run(
+        decide_next(
+            provider,
+            "why?",
+            EMPTY_STATE,
+            1,
+            budget,
+            render,
+        )
+    )
+
+    assert decision["status"] == "delegate"
+    assert decision["delegations"] == []
+
+    assert "stopping the investigation" in (
+        output(render)
+    )
+
+
+def test_update_state_keeps_previous_state(
+    budget,
+    render,
+):
+    provider = CannedProvider(UNREADABLE)
+
+    previous = {
+        "facts": [{"id": "F1"}],
+        "evidence": [],
+        "hypotheses": [],
+        "open_questions": [],
+        "investigations": [],
+    }
+
+    updated = asyncio.run(
+        update_state(
+            provider,
+            "why?",
+            previous,
+            1,
+            [],
+            budget,
+            render,
+        )
+    )
+
+    assert updated == previous
+
+    assert "keeping the previous state" in (
+        output(render)
+    )
+
+
+def test_initialize_state_retries_before_falling_back(
+    budget,
+    render,
+):
+    provider = CannedProvider(UNREADABLE)
+
+    asyncio.run(
+        initialize_state(
+            provider,
+            "why?",
+            budget,
+            render,
+        )
+    )
+
+    assert len(provider.calls) == 2
+
+
+# =============================================================================
+# Budget accounting for coordinator calls
+# =============================================================================
+
+
+def test_charge_usage_settles_tokens(
+    budget,
+    render,
+):
+    from conclave import Usage
+
+    asyncio.run(
+        initialize_state(
+            CannedProvider(INITIAL),
+            "why?",
+            budget,
+            render,
+        )
+    )
+
+    charger = charge_usage(budget)
+
+    charger(
+        Usage(
+            input_tokens=3,
+            output_tokens=4,
+        )
+    )
+
+    assert budget.spent_on("tokens") == 7
+
+
+# =============================================================================
+# The progress log
+# =============================================================================
+
+
+def test_state_summary(render):
+    render.state_summary(
         {
             "facts": [{"id": "F1"}],
             "evidence": [{"id": "E1"}],
@@ -213,17 +456,25 @@ def test_print_state_summary(capsys):
         }
     )
 
-    output = capsys.readouterr().out
+    printed = output(render)
 
-    assert "H1 [supported, 0.8]: retry double counts" in output
-    assert "Open questions:" in output
-    assert "Q1: is it shared?" in output
-    assert "Q2" not in output
-    assert "Facts=1 Evidence=1 Investigations=1" in output
+    assert (
+        "H1 [supported, 0.8]: retry double counts"
+        in printed
+    )
+
+    assert "Open questions:" in printed
+    assert "Q1: is it shared?" in printed
+    assert "Q2" not in printed
+
+    assert (
+        "Facts=1 Evidence=1 Investigations=1"
+        in printed
+    )
 
 
-def test_print_state_summary_without_questions(capsys):
-    print_state_summary(
+def test_state_summary_without_questions(render):
+    render.state_summary(
         {
             "hypotheses": [],
             "open_questions": [
@@ -236,126 +487,23 @@ def test_print_state_summary_without_questions(capsys):
         }
     )
 
-    output = capsys.readouterr().out
+    printed = output(render)
 
-    assert "[shared state]" in output
-    assert "Open questions:" not in output
-    assert "Facts=0 Evidence=0 Investigations=0" in output
+    assert "[shared state]" in printed
+    assert "Open questions:" not in printed
+
+    assert (
+        "Facts=0 Evidence=0 Investigations=0"
+        in printed
+    )
 
 
-def test_print_state_summary_tolerates_garbage(capsys):
-    print_state_summary(
+def test_state_summary_tolerates_garbage(render):
+    render.state_summary(
         {
             "hypotheses": [{}],
             "open_questions": [{"status": "open"}],
         }
     )
 
-    output = capsys.readouterr().out
-
-    assert "? [?, ?]" in output
-
-
-def test_complete_json_round_trip():
-    provider = CannedProvider(
-        '{"status": "delegate"}'
-    )
-
-    assert asyncio.run(
-        complete_json(
-            provider,
-            "s",
-            "u",
-        )
-    ) == {"status": "delegate"}
-
-
-UNREADABLE = (
-    '<\uff5cDSML\uff5cinvoke name="bash">'
-    "</\uff5cDSML\uff5cinvoke>"
-)
-
-
-def test_initialize_state_falls_back_to_empty(
-    capsys,
-):
-    provider = CannedProvider(UNREADABLE)
-
-    state = asyncio.run(
-        initialize_state(
-            provider,
-            "why?",
-        )
-    )
-
-    assert state == EMPTY_STATE
-    assert state is not EMPTY_STATE
-
-    assert "continuing with an empty state" in (
-        capsys.readouterr().out
-    )
-
-
-def test_decide_next_stops_when_unreadable(capsys):
-    provider = CannedProvider(UNREADABLE)
-
-    decision = asyncio.run(
-        decide_next(
-            provider,
-            "why?",
-            EMPTY_STATE,
-            1,
-        )
-    )
-
-    assert decision["status"] == "delegate"
-    assert decision["delegations"] == []
-
-    assert "stopping the investigation" in (
-        capsys.readouterr().out
-    )
-
-
-def test_update_state_keeps_previous_state(capsys):
-    provider = CannedProvider(UNREADABLE)
-
-    previous = {
-        "facts": [{"id": "F1"}],
-        "evidence": [],
-        "hypotheses": [],
-        "open_questions": [],
-        "investigations": [],
-    }
-
-    updated = asyncio.run(
-        update_state(
-            provider,
-            "why?",
-            previous,
-            1,
-            [],
-        )
-    )
-
-    assert updated == previous
-
-    assert "keeping the previous state" in (
-        capsys.readouterr().out
-    )
-
-
-def test_initialize_state_retries_before_falling_back(
-    capsys,
-):
-    provider = CannedProvider(UNREADABLE)
-
-    asyncio.run(
-        initialize_state(
-            provider,
-            "why?",
-        )
-    )
-
-    assert len(provider.calls) == 2
-
-    capsys.readouterr()
+    assert "? [?, ?]" in output(render)

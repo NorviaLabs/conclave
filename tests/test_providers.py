@@ -114,7 +114,7 @@ def test_opencode_commands_and_config(monkeypatch):
                 },
             ]
         )
-    ) == "answer"
+    ).text == "answer"
 
     command = captured["command"]
 
@@ -241,18 +241,15 @@ def test_opencode_times_out_and_kills(monkeypatch):
         fake_exec,
     )
 
-    monkeypatch.setattr(
-        providers,
-        "TIMEOUT_SECONDS",
-        0.01,
-    )
-
     with pytest.raises(
         RuntimeError,
         match="timed out",
     ):
         asyncio.run(
-            OpenCodeProvider(Path(".")).complete(
+            OpenCodeProvider(
+                Path("."),
+                timeout=0.01,
+            ).complete(
                 [
                     {
                         "role": "user",
@@ -312,7 +309,11 @@ def test_ollama_posts_chat_payload(monkeypatch):
         )
     )
 
-    assert answer == "local answer"
+    assert answer.text == "local answer"
+
+    # Ollama did not report counts in this payload, so the budget will
+    # simply skip the token dimension instead of guessing.
+    assert answer.usage.total_tokens is None
 
     assert captured["url"].endswith(
         "/api/chat"
@@ -332,3 +333,49 @@ def test_ollama_posts_chat_payload(monkeypatch):
     assert captured["timeout"] == (
         providers.TIMEOUT_SECONDS
     )
+
+
+def test_ollama_keeps_reported_token_counts(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        return FakeResponse(
+            json.dumps(
+                {
+                    "message": {
+                        "content": "local answer"
+                    },
+                    "prompt_eval_count": 10,
+                    "eval_count": 5,
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr(
+        providers.urllib.request,
+        "urlopen",
+        fake_urlopen,
+    )
+
+    answer = asyncio.run(
+        providers.OllamaProvider(
+            model="qwen3.6"
+        ).complete([])
+    )
+
+    assert answer.usage.input_tokens == 10
+    assert answer.usage.output_tokens == 5
+    assert answer.usage.total_tokens == 15
+
+
+def test_usage_total_needs_one_known_side():
+    from conclave import Usage
+
+    assert Usage().total_tokens is None
+    assert Usage(input_tokens=2).total_tokens == 2
+    assert Usage(output_tokens=3).total_tokens == 3
+
+
+def test_read_usage_tolerates_missing_counts():
+    usage = providers.read_usage({})
+
+    assert usage.input_tokens is None
+    assert usage.total_tokens is None

@@ -1,25 +1,29 @@
 [project]
 name = "conclave"
 version = "0.1.0"
-description = "A small multi-agent runtime that investigates a question using repository, GitHub and web evidence."
+description = "A framework for building bounded multi-agent systems, plus the investigation app built on it."
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = [
+dependencies = []
+
+[project.optional-dependencies]
+tools = [
     "ddgs>=9.16.0",
 ]
 
 [project.scripts]
-conclave = "conclave.cli:run"
+conclave = "investigation.cli:run"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["conclave"]
+packages = ["conclave", "investigation"]
 
 [dependency-groups]
 dev = [
+    "ddgs>=9.16.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
 ]
@@ -27,10 +31,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
-addopts = "--cov=conclave --cov-report=term-missing"
+addopts = "--cov=conclave --cov=investigation --cov-report=term-missing"
 
 [tool.coverage.run]
-source = ["conclave"]
+source = ["conclave", "investigation"]
 
 [tool.coverage.report]
 fail_under = 95
