@@ -106,6 +106,11 @@ def test_importing_the_core_does_not_pull_the_bundled_tools():
                 "import sys",
                 "import conclave",
                 "assert 'conclave.tools' not in sys.modules",
+                (
+                    "assert not any(name == 'investigation' "
+                    "or name.startswith('investigation.') "
+                    "for name in sys.modules)"
+                ),
                 "print('ok')",
             ]
         )
@@ -160,9 +165,11 @@ def test_console_entry_point_targets_the_app():
     }
 
     assert (
-        scripts["conclave"]
+        scripts["investigation"]
         == "investigation.cli:run"
     )
+
+    assert "conclave" not in scripts
 
 
 def test_the_library_contains_no_investigation_domain():

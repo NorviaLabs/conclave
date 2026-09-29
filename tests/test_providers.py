@@ -11,6 +11,7 @@ from pathlib import Path
 
 from conclave import providers
 from conclave.providers import (
+    CodexProvider,
     ModelProvider,
     OllamaProvider,
     OpenCodeProvider,
@@ -32,7 +33,8 @@ class FakeProcess:
         self.killed = False
         self.calls = 0
 
-    async def communicate(self):
+    async def communicate(self, input=None):
+        self.input = input
         self.calls += 1
 
         if self.hang and self.calls == 1:
@@ -72,6 +74,117 @@ def test_model_provider_is_abstract():
         Bare()
 
 
+def codex_events(*events):
+    return "\n".join(json.dumps(event) for event in events).encode()
+
+
+@pytest.mark.parametrize("model", [None, "gpt-5.2-codex"])
+def test_codex_command_and_completion(monkeypatch, model):
+    captured = {}
+    process = FakeProcess(stdout=codex_events(
+        {"type": "thread.started", "thread_id": "t"},
+        {"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"ok": true}'}},
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10}},
+    ))
+
+    async def fake_exec(*command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(CodexProvider(model, TIMEOUT).complete([
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello\x00world"},
+    ]))
+    assert result.text == '{"ok": true}'
+    assert result.usage.total_tokens == 110  # Cached tokens are part of input.
+    command = captured["command"]
+    assert command[:3] == ("codex", "exec", "--json")
+    assert command[-1] == "-"
+    assert 'forced_login_method="chatgpt"' in command
+    assert 'model_provider="openai"' in command
+    assert "--ignore-user-config" in command
+    assert "--ignore-rules" in command
+    assert "--ephemeral" in command
+    assert "read-only" in command
+    assert 'web_search="disabled"' in command
+    for feature in ("shell_tool", "unified_exec", "multi_agent", "apps", "plugins", "hooks"):
+        index = command.index(feature)
+        assert command[index - 1] == "--disable"
+    if model:
+        assert command[command.index("--model") + 1] == model
+    else:
+        assert "--model" not in command
+    assert process.input == b"SYSTEM:\nsys\n\nUSER:\nhello\x00world"
+    assert captured["stdin"] == asyncio.subprocess.PIPE
+    assert not Path(captured["cwd"]).exists()
+
+
+@pytest.mark.parametrize("events,message", [
+    ([], "no assistant message"),
+    ([{"type": "error", "message": "login required"}], "login required"),
+    ([{"type": "turn.failed", "error": {"message": "quota"}}], "quota"),
+])
+def test_codex_event_failures(monkeypatch, events, message):
+    async def fake_exec(*command, **kwargs):
+        return FakeProcess(stdout=codex_events(*events))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
+
+
+@pytest.mark.parametrize("stderr,message", [(b"login required", "login required"), (b"", "Codex failed")])
+def test_codex_process_failure(monkeypatch, stderr, message):
+    async def fake_exec(*command, **kwargs):
+        return FakeProcess(stderr=stderr, returncode=1)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "turn.completed"},
+    {"type": "turn.completed", "usage": None},
+])
+def test_codex_unreported_usage(monkeypatch, event):
+    async def fake_exec(*command, **kwargs):
+        return FakeProcess(stdout=codex_events(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "answer"}},
+            event,
+        ))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
+    assert result.usage is None
+
+
+def test_codex_timeout_reaps_process(monkeypatch):
+    process = FakeProcess(hang=True)
+    async def fake_exec(*command, **kwargs):
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(RuntimeError, match="timed out"):
+        asyncio.run(CodexProvider(None, 0.001).complete([]))
+    assert process.killed
+    assert process.calls == 2
+
+
+def test_codex_cancellation_reaps_process(monkeypatch):
+    process = FakeProcess(hang=True)
+    async def fake_exec(*command, **kwargs):
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    async def cancel_call():
+        task = asyncio.create_task(CodexProvider(None, TIMEOUT).complete([]))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        await task
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(cancel_call())
+    assert process.killed
+    assert process.calls == 2
+
+
 def test_model_provider_complete_raises():
     with pytest.raises(NotImplementedError):
         asyncio.run(
@@ -82,7 +195,11 @@ def test_model_provider_complete_raises():
         )
 
 
-def test_opencode_commands_and_config(monkeypatch):
+@pytest.mark.parametrize(
+    "model",
+    ["fast-model", "openai/gpt-5.2-codex"],
+)
+def test_opencode_commands_and_config(monkeypatch, model):
     captured = {}
 
     async def fake_exec(*command, **kwargs):
@@ -100,7 +217,7 @@ def test_opencode_commands_and_config(monkeypatch):
 
     provider = OpenCodeProvider(
         Path("/tmp/repo"),
-        model="fast-model",
+        model=model,
         timeout=TIMEOUT,
     )
 
@@ -129,7 +246,7 @@ def test_opencode_commands_and_config(monkeypatch):
         "--model",
     )
 
-    assert command[5] == "fast-model"
+    assert command[5] == model
 
     assert "SYSTEM:\nsys" in command[-1]
     assert "USER:\nusr" in command[-1]

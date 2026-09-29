@@ -271,6 +271,33 @@ def test_no_delegations_forces_a_final_answer(
     )
 
 
+def test_per_run_limits_reach_coordinator_and_bound_delegations(repo, capsys):
+    provider = ScriptedProvider({
+        "coordinator": coordinator(
+            decide([
+                delegate_to("critic", "first"),
+                delegate_to("critic", "second"),
+                delegate_to("critic", "third"),
+            ]),
+            INITIAL_STATE,
+        ),
+        "critic": [FINAL],
+    })
+    budget = make_budget(max_delegations=50, max_per_agent=10)
+    asyncio.run(run_investigation(
+        provider, build_tools(repo), "why?",
+        budget=budget, max_rounds=1, max_delegations_per_round=1,
+    ))
+    assert budget.used == 1
+    decisions = [prompt for _, prompt in provider.prompts if "Round:" in prompt]
+    assert "1/1" in decisions[0]
+    assert "Use at most 1" in decisions[0]
+    output = capsys.readouterr().out
+    assert "-> critic: first" in output
+    assert "-> critic: second" not in output
+    assert "ROUND 2" not in output
+
+
 def test_invalid_delegations_are_filtered(
     repo,
     monkeypatch,

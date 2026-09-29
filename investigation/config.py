@@ -46,10 +46,12 @@ def make_budget(**overrides) -> RunBudget:
     """
 
     return RunBudget(
-        max_delegations=15,
-        max_per_agent=4,
-        max_depth=2,
-        **overrides,
+        **{
+            "max_delegations": 15,
+            "max_per_agent": 4,
+            "max_depth": 2,
+            **overrides,
+        }
     )
 
 

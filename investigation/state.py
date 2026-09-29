@@ -226,6 +226,9 @@ async def decide_next(
     round_number: int,
     budget: RunBudget,
     render: Any,
+    *,
+    max_rounds: int = MAX_ROUNDS,
+    max_delegations_per_round: int = MAX_DELEGATIONS_PER_ROUND,
 ) -> dict[str, Any]:
     try:
         return await complete_json(
@@ -243,7 +246,7 @@ Original question:
 
 Round:
 
-{round_number}/{MAX_ROUNDS}
+{round_number}/{max_rounds}
 
 
 Current state:
@@ -283,7 +286,7 @@ important remaining uncertainty.
 
 Do not repeat completed work.
 
-Use at most {MAX_DELEGATIONS_PER_ROUND}
+Use at most {max_delegations_per_round}
 independent delegations in this round.
 
 Finish when remaining uncertainty is not

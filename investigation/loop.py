@@ -28,6 +28,7 @@ from conclave import (
 
 from .agents import AGENTS
 from .config import (
+    MAX_DELEGATIONS_PER_ROUND,
     MAX_ROUNDS,
     RUN_CONFIG,
     make_budget,
@@ -50,9 +51,13 @@ async def run_investigation(
     budget: RunBudget | None = None,
     approver: Approver | None = None,
     config: RunConfig = RUN_CONFIG,
+    max_rounds: int | None = None,
+    max_delegations_per_round: int = MAX_DELEGATIONS_PER_ROUND,
     render: Renderer | None = None,
 ) -> dict[str, Any]:
     """Investigate a question, printing progress, returning final state."""
+
+    max_rounds = MAX_ROUNDS if max_rounds is None else max_rounds
 
     budget = (
         budget
@@ -101,7 +106,7 @@ async def run_investigation(
 
     for round_number in range(
         1,
-        MAX_ROUNDS + 1,
+        max_rounds + 1,
     ):
         render.round_header(
             round_number
@@ -114,6 +119,8 @@ async def run_investigation(
             round_number,
             budget,
             render,
+            max_rounds=max_rounds,
+            max_delegations_per_round=max_delegations_per_round,
         )
 
         if decision.get("status") == "done":
@@ -154,6 +161,9 @@ async def run_investigation(
             "delegations",
             [],
         ):
+            if len(valid) >= max_delegations_per_round:
+                break
+
             if budget.remaining == 0:
                 render.skipped(
                     "delegation budget exhausted"

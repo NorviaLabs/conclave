@@ -8,6 +8,7 @@ backend can measure one. Backends that cannot measure tokens return
 import asyncio
 import json
 import os
+import tempfile
 import urllib.request
 
 from abc import ABC, abstractmethod
@@ -163,6 +164,89 @@ class OpenCodeProvider(ModelProvider):
         return Completion(
             text=stdout.decode().strip()
         )
+
+
+class CodexProvider(ModelProvider):
+    """Use the Codex CLI's ChatGPT login without exposing credentials.
+
+    Each completion is an isolated, ephemeral model call. Codex's native
+    tools are disabled: the caller's runtime owns all tool execution.
+    """
+
+    def __init__(self, model: str | None, timeout: float):
+        self.model = model
+        self.timeout = timeout
+
+    async def complete(self, messages: list[dict[str, str]]) -> Completion:
+        prompt = "\n\n".join(
+            f"{message['role'].upper()}:\n{message['content']}"
+            for message in messages
+        )
+        command = [
+            "codex", "exec", "--json", "--ephemeral",
+            "--ignore-user-config", "--ignore-rules",
+            "--skip-git-repo-check", "--sandbox", "read-only",
+            "--color", "never",
+            "-c", 'model_provider="openai"',
+            "-c", 'forced_login_method="chatgpt"',
+            "-c", 'approval_policy="never"',
+            "-c", 'web_search="disabled"',
+        ]
+        for feature in (
+            "shell_tool", "unified_exec", "apply_patch_freeform",
+            "view_image", "multi_agent", "js_repl", "apps", "plugins",
+            "hooks", "codex_hooks", "memories", "memory_tool",
+            "browser_use", "computer_use", "image_generation",
+        ):
+            command.extend(["--disable", feature])
+        if self.model:
+            command.extend(["--model", self.model])
+        command.append("-")
+
+        # Never load a caller repository's config, instructions, or MCP servers.
+        with tempfile.TemporaryDirectory(prefix="conclave-codex-") as cwd:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=cwd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(prompt.encode()), timeout=self.timeout,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                process.kill()
+                await process.communicate()
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise RuntimeError("Codex model call timed out") from exc
+
+        if process.returncode != 0:
+            raise RuntimeError(stderr.decode().strip() or "Codex failed")
+
+        text = None
+        usage = None
+        for line in stdout.decode().splitlines():
+            event = json.loads(line)
+            if event["type"] == "item.completed":
+                item = event["item"]
+                if item["type"] == "agent_message":
+                    text = item["text"]
+            elif event["type"] == "turn.completed":
+                counts = event.get("usage")
+                if counts is not None:
+                    usage = Usage(
+                        input_tokens=counts.get("input_tokens"),
+                        output_tokens=counts.get("output_tokens"),
+                    )
+            elif event["type"] in {"error", "turn.failed"}:
+                raise RuntimeError(f"Codex failed: {event}")
+
+        if text is None:
+            raise RuntimeError("Codex returned no assistant message")
+        return Completion(text=text, usage=usage)
 
 
 class OllamaProvider(ModelProvider):

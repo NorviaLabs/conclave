@@ -12,7 +12,7 @@ tools = [
 ]
 
 [project.scripts]
-conclave = "investigation.cli:run"
+investigation = "investigation.cli:run"
 
 [build-system]
 requires = ["hatchling"]

@@ -20,7 +20,10 @@ rather than a chat transcript.
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
 - One model backend:
-  - `opencode` on `PATH` with an existing login (default backend), or
+  - a current [Codex CLI](https://developers.openai.com/codex/cli/) on `PATH`
+    logged in with ChatGPT Plus/Pro, or
+  - `opencode` on `PATH` with an existing login (default backend; supports
+    ChatGPT Plus/Pro subscriptions), or
   - a local [Ollama](https://ollama.com/) server
 - Optional, per tool: `ddgs` (`uv sync --extra tools`, for `web_search`), `gh`
   (GitHub tools), network access (`web_fetch`)
@@ -31,33 +34,39 @@ rather than a chat transcript.
 uv sync
 ```
 
-## Run
+## Run the investigation application
+
+Conclave is a library, not an application runner. The `investigation` command
+belongs to the application built on top of it; all flags below, including
+`--repo`, are that application's interface. There is no `conclave` command.
 
 ```bash
 # ask a specific question about a repository
-uv run main.py "why does the retry path double-count failures?"
+uv run investigation "why does the retry path double-count failures?"
 
-# or, once installed by `uv sync`
-uv run conclave "why does the retry path double-count failures?"
+# or run the application module directly
+uv run python -m investigation "why does the retry path double-count failures?"
 
 # explicit repository, different backend
-uv run main.py --repo ~/code/my-project --provider ollama --model qwen3.6 "..."
+uv run investigation --repo ~/code/my-project --provider ollama --model qwen3.6 "..."
 
 # bound the run: at most 40 tool calls, 5 minutes and 200k tokens
-uv run conclave --max-tool-calls 40 --max-seconds 300 --max-tokens 200000 "..."
+uv run investigation --max-tool-calls 40 --max-seconds 300 --max-tokens 200000 "..."
 
 # with no question, it investigates the repository for one important
 # architectural weakness
-uv run main.py
+uv run investigation
 ```
 
-`python -m investigation ...` and `python main.py ...` work too.
+`python main.py ...` remains a compatibility entry point for the investigation
+application. Existing users should run `uv sync` to replace the old `conclave`
+console script, then use `investigation` instead.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `question` | a built-in repository review prompt | What to investigate |
 | `--repo` | `.` | Repository the tools are scoped to |
-| `--provider` | `opencode` | `opencode` or `ollama` |
+| `--provider` | `opencode` | `codex`, `opencode` or `ollama` |
 | `--model` | provider default | Model name passed to the backend |
 | `--ollama-url` | `http://127.0.0.1:11434` | Ollama server |
 | `--approve-destructive` | off | Approve tools that declare `WRITE`; without it such calls are refused |
@@ -65,11 +74,98 @@ uv run main.py
 | `--max-seconds` | unbounded | Wall-clock seconds allowed for the whole run |
 | `--max-tokens` | unbounded | Tokens allowed, where the backend reports them |
 | `--max-cost` | unbounded | Cost dimension, respected but never filled by the bundled backends |
+| `--max-rounds` | 8 | Investigation rounds |
+| `--max-delegations` | 15 | Total delegations, including nested work |
+| `--max-per-agent` | 4 | Delegations per specialist across the run |
+| `--max-depth` | 2 | Maximum delegation depth (top-level specialists are depth 1) |
+| `--max-delegations-per-round` | 3 | Maximum independent delegations accepted each round |
+| `--fan-out-limit` | 3 | Concurrent specialist runs within a round |
+| `--max-tool-steps` | 12 | Action steps per agent run (including notes and delegations) |
+| `--max-notes` | 12 | Private notes and checked-ledger entries per agent |
+| `--max-note-chars` | 300 | Characters per private note or checked-ledger entry |
+| `--max-tool-output-chars` | 20000 | Characters per tool output or delegated handoff in prompts |
+| `--model-timeout` | 300 | Seconds allowed per model call |
+
+For a larger repository, raise the independent limits together, for example:
+
+```bash
+uv run investigation --repo ~/code/large-project \
+  --max-rounds 16 --max-delegations 60 --max-per-agent 12 \
+  --max-tool-steps 30 --max-tool-output-chars 40000 \
+  --max-delegations-per-round 5 --fan-out-limit 3 \
+  --model-timeout 600 "Investigate the architecture"
+```
+
+Overrides apply only to that invocation; they never change the application
+defaults. Raising one limit does not raise others or guarantee completion.
+Concurrency is separate from the number of tasks accepted per round. Structural
+delegation and overall spending limits accept zero to disallow spending; rounds,
+steps, scratchpad sizes, output sizes, concurrency and model timeouts must be
+positive. Floating-point limits must be finite.
+
+Other multi-agent applications can expose their own CLI overrides and pass
+`RunConfig` and `RunBudget` to Conclave in the same way. These flags belong to
+Investigation, not to a framework-wide argument parser.
 
 Exit codes: `0` success, `1` error, `130` interrupted.
 
 None of the bundled tools declares `WRITE`, so `--approve-destructive` is only
 needed once you add a tool that does.
+
+### Use a ChatGPT subscription
+
+#### Codex (no OpenCode required)
+
+Install a current Codex CLI, then sign in with your ChatGPT subscription:
+
+```bash
+codex login
+codex login status
+uv run investigation --provider codex --repo ~/code/my-project "Investigate the architecture"
+# Optional: override the Codex default with a model available to your account
+uv run investigation --provider codex --model gpt-5.2-codex --max-delegations 30 "Investigate the retry path"
+```
+
+Select the ChatGPT browser login, not `--with-api-key`. This backend requires
+ChatGPT authentication and does not fall back to separately billed API access.
+Codex owns credentials and refresh; Conclave never reads them. Models and usage
+limits depend on your subscription. Upgrade Codex if it does not support
+`exec --ignore-user-config --ignore-rules --ephemeral`.
+
+`CodexProvider(model=None, timeout=300)` is also available from `conclave` for
+other applications. Model names are passed through unchanged. Calls use stdin
+and a fresh temporary directory, ignore user configuration and project rules,
+disable native shell, search, plugin and delegation tools, and use a read-only
+sandbox. Conclave remains responsible for agent tools and approval. Codex JSONL
+events supply the final assistant text and token usage when available; cached
+input tokens are already included in input usage and are not counted twice.
+No dollar cost is inferred from subscription usage.
+
+#### OpenCode (existing alternative)
+
+Use the existing OpenCode backend, not an OpenAI API key. In OpenCode, run
+`/connect`, select **OpenAI**, then **ChatGPT Plus/Pro**, and complete the
+browser login. OpenCode owns authentication and credential refresh; Conclave
+does not read or store your subscription credentials.
+
+List the available OpenAI models and pass one of the returned IDs unchanged:
+
+```bash
+opencode models openai
+uv run investigation --provider opencode --model 'openai/<model-id>' "Investigate the retry path"
+```
+
+Replace `openai/<model-id>` with an ID from the list that is available to your
+subscription. Subscription model availability and usage limits are controlled
+by OpenAI; a ChatGPT subscription is not API credit. Choosing the API-key login
+method instead uses separately billed API access.
+
+OpenAI authentication stays inside the backend, not the runtime: `--model` is
+passed through to OpenCode, which also supports other providers. Ollama and
+custom `ModelProvider` implementations remain unchanged.
+OpenCode's own tools remain disabled; Conclave owns tool execution and approval.
+This backend reports no token usage to Conclave, so `--max-tokens` cannot meter
+subscription calls (use tool-call and wall-clock limits instead).
 
 ## Using the library
 
@@ -188,7 +284,7 @@ across `conclave/` and `investigation/`.
 | `tests/test_budget.py` | delegation caps, depth and cycle refusals, dimensions |
 | `tests/test_registry.py` | tool registration, permissions, truncation |
 | `tests/test_local_tools.py` | path containment, files, Git, GitHub, web |
-| `tests/test_providers.py` | OpenCode and Ollama backends, timeouts, usage |
+| `tests/test_providers.py` | Codex, OpenCode and Ollama backends, timeouts, usage |
 | `tests/test_state.py` | the app's state, prompts and store schema |
 | `tests/test_investigation.py` | the round loop, filtering, failure paths |
 | `tests/test_render.py` | the progress log, driven by events |
@@ -203,7 +299,7 @@ core by accident, and a test enforces it.
 | --- | --- |
 | `conclave/spec.py` | `AgentSpec`, `Tool`, `Capability` |
 | `conclave/config.py` | `RunConfig`: the limits one run needs, all required |
-| `conclave/providers.py` | `ModelProvider`, `Completion`, `Usage`, OpenCode, Ollama |
+| `conclave/providers.py` | `ModelProvider`, `Completion`, `Usage`, Codex, OpenCode, Ollama |
 | `conclave/registry.py` | `ToolRegistry`: describe, execute, truncate |
 | `conclave/approval.py` | The capability gate and the `Approver` contract |
 | `conclave/budget.py` | `RunBudget`: delegation caps and work dimensions |
@@ -291,12 +387,12 @@ lines, so a loop attempt is visible instead of silent.
 - Capabilities are declared per tool and never inferred from names. `WRITE`, or
   no declaration at all, means destructive: refused unless an approver allows
   it. The bundled tools declare `read`/`network`/`shell` and never `write`.
-- Every limit is stated by the application, never inherited
+- Every limit has an application-owned, CLI-overridable default
   (`investigation/config.py`): 15 delegations, 4 per agent, depth 2, 12 tool
   steps per agent, 300 s per model call, 12 notes of 300 characters, 8 rounds,
   at most 3 delegations per round. The library has no opinion on any of them.
 - Token and cost dimensions are only enforced when the backend reports them:
-  Ollama reports counts, OpenCode reports none, and nothing invents a price
+  Codex and Ollama report counts, OpenCode reports none, and nothing invents a price
   table.
 - Identical (agent, task) pairs are never delegated twice.
 - If the budget runs out, a final answer is forced from the state gathered so

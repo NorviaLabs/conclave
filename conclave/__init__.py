@@ -69,6 +69,7 @@ from .protocol import (
     report_usage,
 )
 from .providers import (
+    CodexProvider,
     Completion,
     ModelProvider,
     OllamaProvider,
@@ -110,6 +111,7 @@ __all__ = [
     "Approver",
     "BudgetExceeded",
     "Capability",
+    "CodexProvider",
     "Completion",
     "DIMENSION_LABELS",
     "Delegation",

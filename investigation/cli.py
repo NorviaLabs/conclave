@@ -8,21 +8,27 @@ to `run_investigation`.
 
 import argparse
 import asyncio
+import math
 import sys
 
+from dataclasses import fields, replace
 from pathlib import Path
 
 from conclave import (
     Approver,
+    CodexProvider,
     ModelProvider,
     OllamaProvider,
     OpenCodeProvider,
     RunBudget,
+    RunConfig,
     approve_all,
 )
 from conclave.tools import build_tool_registry
 
 from .config import (
+    MAX_DELEGATIONS_PER_ROUND,
+    MAX_ROUNDS,
     RUN_CONFIG,
     TIMEOUT_SECONDS,
     make_budget as app_budget,
@@ -40,6 +46,34 @@ evidence where useful.
 DEFAULT_OLLAMA_MODEL = "qwen3.6"
 
 
+def nonnegative_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return number
+
+
+def positive_int(value: str) -> int:
+    number = nonnegative_int(value)
+    if number == 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return number
+
+
+def nonnegative_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError("must be finite and nonnegative")
+    return number
+
+
+def positive_float(value: str) -> float:
+    number = nonnegative_float(value)
+    if number == 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return number
+
+
 # =============================================================================
 # CLI / provider selection
 # =============================================================================
@@ -49,6 +83,7 @@ def parse_args(
     argv: list[str] | None = None,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        prog="investigation",
         description=(
             "Investigate a question with a "
             "team of agents."
@@ -68,6 +103,7 @@ def parse_args(
     parser.add_argument(
         "--provider",
         choices=[
+            "codex",
             "opencode",
             "ollama",
         ],
@@ -98,40 +134,88 @@ def parse_args(
 
     parser.add_argument(
         "--max-tool-calls",
-        type=int,
+        type=nonnegative_int,
         default=None,
     )
 
     parser.add_argument(
         "--max-seconds",
-        type=float,
+        type=nonnegative_float,
         default=None,
     )
 
     parser.add_argument(
         "--max-tokens",
-        type=int,
+        type=nonnegative_int,
         default=None,
     )
 
     parser.add_argument(
         "--max-cost",
-        type=float,
+        type=nonnegative_float,
         default=None,
     )
 
+    limits = parser.add_argument_group("investigation limits")
+    for name, default in (
+        ("max_rounds", MAX_ROUNDS),
+        ("max_delegations_per_round", MAX_DELEGATIONS_PER_ROUND),
+    ):
+        limits.add_argument(
+            "--" + name.replace("_", "-"),
+            type=positive_int,
+            default=default,
+            help=f"default: {default}",
+        )
+
+    defaults = app_budget()
+    for name in ("max_delegations", "max_per_agent", "max_depth"):
+        default = getattr(defaults, name)
+        limits.add_argument(
+            "--" + name.replace("_", "-"),
+            type=nonnegative_int,
+            default=default,
+            help=f"default: {default}",
+        )
+
+    for field in fields(RunConfig):
+        default = getattr(RUN_CONFIG, field.name)
+        limits.add_argument(
+            "--" + field.name.replace("_", "-"),
+            type=positive_int,
+            default=default,
+            help=f"default: {default}",
+        )
+
+    limits.add_argument(
+        "--model-timeout",
+        type=positive_float,
+        default=TIMEOUT_SECONDS,
+        help=f"seconds per model call (default: {TIMEOUT_SECONDS})",
+    )
+
     return parser.parse_args(argv)
+
+
+def make_run_config(args: argparse.Namespace) -> RunConfig:
+    return replace(
+        RUN_CONFIG,
+        **{field.name: getattr(args, field.name) for field in fields(RunConfig)},
+    )
 
 
 def make_provider(
     args: argparse.Namespace,
     repo: Path,
 ) -> ModelProvider:
+    if args.provider == "codex":
+        return CodexProvider(model=args.model, timeout=args.model_timeout)
+
     if args.provider == "opencode":
         return OpenCodeProvider(
             repo,
             model=args.model,
-            timeout=TIMEOUT_SECONDS,
+            timeout=args.model_timeout,
         )
 
     return OllamaProvider(
@@ -139,7 +223,7 @@ def make_provider(
             args.model
             or DEFAULT_OLLAMA_MODEL
         ),
-        timeout=TIMEOUT_SECONDS,
+        timeout=args.model_timeout,
         base_url=args.ollama_url,
     )
 
@@ -150,6 +234,9 @@ def make_budget(
     """The app's delegation shape, with only the flags that were set."""
 
     return app_budget(
+        max_delegations=args.max_delegations,
+        max_per_agent=args.max_per_agent,
+        max_depth=args.max_depth,
         tool_calls=args.max_tool_calls,
         wall_clock_seconds=args.max_seconds,
         tokens=args.max_tokens,
@@ -194,6 +281,7 @@ async def main() -> None:
     )
 
     budget = make_budget(args)
+    config = make_run_config(args)
 
     render = Renderer()
 
@@ -210,11 +298,14 @@ async def main() -> None:
         build_tool_registry(
             repo,
             max_output_chars=(
-                RUN_CONFIG.max_tool_output_chars
+                config.max_tool_output_chars
             ),
         ),
         question,
         budget=budget,
+        config=config,
+        max_rounds=args.max_rounds,
+        max_delegations_per_round=args.max_delegations_per_round,
         approver=make_approver(args),
         render=render,
     )

@@ -13,6 +13,7 @@ from conclave import approve_all
 
 from investigation import cli
 from conclave.providers import (
+    CodexProvider,
     OllamaProvider,
     OpenCodeProvider,
 )
@@ -65,7 +66,7 @@ def test_parse_args_defaults(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["conclave"],
+        ["investigation"],
     )
 
     args = cli.parse_args()
@@ -84,7 +85,7 @@ def test_parse_args_overrides(monkeypatch):
         sys,
         "argv",
         [
-            "conclave",
+            "investigation",
             "why",
             "now",
             "--repo",
@@ -113,21 +114,35 @@ def test_parse_args_rejects_unknown_provider(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["conclave", "--provider", "claude"],
+        ["investigation", "--provider", "claude"],
     )
 
     with pytest.raises(SystemExit):
         cli.parse_args()
 
 
-def test_make_provider_opencode(monkeypatch):
+def test_help_belongs_to_the_application(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.parse_args(["--help"])
+
+    assert exit_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: investigation " in output
+    assert "--repo" in output
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["fast", "openai/gpt-5.2-codex"],
+)
+def test_make_provider_opencode(monkeypatch, model):
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "conclave",
+            "investigation",
             "--model",
-            "fast",
+            model,
         ],
     )
 
@@ -137,7 +152,7 @@ def test_make_provider_opencode(monkeypatch):
     )
 
     assert isinstance(provider, OpenCodeProvider)
-    assert provider.model == "fast"
+    assert provider.model == model
     assert provider.cwd == Path("/repo")
 
 
@@ -146,7 +161,7 @@ def test_make_provider_ollama(monkeypatch):
         sys,
         "argv",
         [
-            "conclave",
+            "investigation",
             "--provider",
             "ollama",
             "--model",
@@ -166,13 +181,24 @@ def test_make_provider_ollama(monkeypatch):
     assert provider.base_url == "http://host:9"
 
 
+@pytest.mark.parametrize("model", [None, "gpt-5.2-codex"])
+def test_make_provider_codex(model):
+    argv = ["--provider", "codex", "--model-timeout", "42"]
+    if model:
+        argv.extend(["--model", model])
+    provider = cli.make_provider(cli.parse_args(argv), Path("."))
+    assert isinstance(provider, CodexProvider)
+    assert provider.model == model
+    assert provider.timeout == 42
+
+
 def test_make_provider_ollama_default_model(
     monkeypatch,
 ):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["conclave", "--provider", "ollama"],
+        ["investigation", "--provider", "ollama"],
     )
 
     provider = cli.make_provider(
@@ -193,7 +219,7 @@ def test_main_runs_the_investigation(
         sys,
         "argv",
         [
-            "conclave",
+            "investigation",
             "why",
             "now",
             "--repo",
@@ -231,7 +257,7 @@ def test_main_uses_the_default_question(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["conclave", "--repo", str(repo)],
+        ["investigation", "--repo", str(repo)],
     )
 
     asyncio.run(cli.main())
@@ -248,7 +274,7 @@ def test_main_rejects_a_missing_repository(
         sys,
         "argv",
         [
-            "conclave",
+            "investigation",
             "--repo",
             "/definitely/not/here",
         ],
@@ -356,7 +382,7 @@ def test_the_cli_passes_its_limits_to_the_run(
         sys,
         "argv",
         [
-            "conclave",
+            "investigation",
             "why",
             "--repo",
             str(repo),
@@ -372,3 +398,62 @@ def test_the_cli_passes_its_limits_to_the_run(
 
     assert run["budget"].tool_calls == 3
     assert run["approver"] is approve_all
+
+
+def test_cli_passes_all_application_overrides(monkeypatch, captured_run, repo):
+    overrides = {
+        "max-rounds": "16",
+        "max-delegations-per-round": "5",
+        "max-delegations": "60",
+        "max-per-agent": "12",
+        "max-depth": "4",
+        "max-tool-steps": "30",
+        "max-notes": "24",
+        "max-note-chars": "600",
+        "max-tool-output-chars": "40000",
+        "fan-out-limit": "2",
+        "model-timeout": "600",
+    }
+    argv = ["investigation", "--repo", str(repo)]
+    for name, value in overrides.items():
+        argv.extend(["--" + name, value])
+    monkeypatch.setattr(sys, "argv", argv)
+
+    asyncio.run(cli.main())
+    run = captured_run[0]
+    assert run["provider"].timeout == 600
+    assert run["max_rounds"] == 16
+    assert run["max_delegations_per_round"] == 5
+    assert run["tools"].max_output_chars == 40000
+    for name in ("max_delegations", "max_per_agent", "max_depth"):
+        assert getattr(run["budget"], name) == int(overrides[name.replace("_", "-")])
+    for name in (
+        "max_tool_steps", "max_notes", "max_note_chars",
+        "max_tool_output_chars", "fan_out_limit",
+    ):
+        assert getattr(run["config"], name) == int(overrides[name.replace("_", "-")])
+
+    # A subsequent run gets the original defaults, not the last run's overrides.
+    defaults = cli.parse_args([])
+    assert cli.make_run_config(defaults) == cli.RUN_CONFIG
+    assert cli.make_budget(defaults).max_delegations == 15
+    ollama = cli.make_provider(
+        cli.parse_args(["--provider", "ollama", "--model-timeout", "42"]), repo
+    )
+    assert ollama.timeout == 42
+
+
+@pytest.mark.parametrize("flag,value", [
+    ("--max-rounds", "0"),
+    ("--fan-out-limit", "0"),
+    ("--max-notes", "-1"),
+    ("--max-delegations", "-1"),
+    ("--model-timeout", "0"),
+    ("--model-timeout", "nan"),
+    ("--max-seconds", "inf"),
+    ("--max-cost", "-0.1"),
+])
+def test_cli_rejects_invalid_limits(flag, value):
+    with pytest.raises(SystemExit) as exc:
+        cli.parse_args([flag, value])
+    assert exc.value.code == 2
