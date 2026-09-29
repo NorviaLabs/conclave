@@ -229,7 +229,13 @@ async def run_investigation(
                 state,
                 render,
             ),
-            limit=config.fan_out_limit,
+            # ``None`` means no application-level concurrency cap.  The
+            # framework's fan_out API requires a concrete semaphore limit.
+            limit=(
+                config.fan_out_limit
+                if config.fan_out_limit is not None
+                else max(1, len(valid))
+            ),
         )
 
         state = await update_state(

@@ -128,11 +128,12 @@ def delegation_budget(
     for name in AGENTS:
         used = budget.per_agent.get(name, 0)
 
-        state = (
-            "exhausted"
-            if used >= budget.max_per_agent
-            else f"{budget.max_per_agent - used} left"
-        )
+        if budget.max_per_agent is None:
+            state = "unbounded"
+        elif used >= budget.max_per_agent:
+            state = "exhausted"
+        else:
+            state = f"{budget.max_per_agent - used} left"
 
         lines.append(
             f"  {name}: {used}/"
