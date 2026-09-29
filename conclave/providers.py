@@ -82,10 +82,17 @@ class OpenCodeProvider(ModelProvider):
         self,
         messages: list[dict[str, str]],
     ) -> Completion:
-        prompt = "\n\n".join(
-            f"{message['role'].upper()}:\n"
-            f"{message['content']}"
-            for message in messages
+        # argv cannot carry a NUL byte, so a prompt that somehow contains
+        # one would fail here rather than at the model. Drop them: the
+        # alternative is losing the whole run to an unrepresentable
+        # character.
+        prompt = (
+            "\n\n".join(
+                f"{message['role'].upper()}:\n"
+                f"{message['content']}"
+                for message in messages
+            )
+            .replace("\x00", "")
         )
 
         command = [

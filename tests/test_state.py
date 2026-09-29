@@ -507,3 +507,90 @@ def test_state_summary_tolerates_garbage(render):
     )
 
     assert "? [?, ?]" in output(render)
+
+
+# =============================================================================
+# Telling the coordinator what it can still afford
+# =============================================================================
+
+
+def test_delegation_budget_reports_each_agent(budget):
+    from investigation.state import (
+        delegation_budget,
+    )
+
+    budget.used = 1
+    budget.per_agent = {"repo-researcher": 1}
+
+    text = delegation_budget(budget)
+
+    assert "1/15 delegations used" in text
+    assert "Per-agent limit 4" in text
+    assert "repo-researcher: 1/4 (3 left)" in text
+    assert "web-researcher: 0/4 (4 left)" in text
+
+
+def test_delegation_budget_names_an_exhausted_agent(
+    budget,
+):
+    from investigation.state import (
+        delegation_budget,
+    )
+
+    budget.per_agent = {"repo-researcher": 4}
+
+    assert (
+        "repo-researcher: 4/4 (exhausted)"
+        in delegation_budget(budget)
+    )
+
+
+def test_the_coordinator_is_told_the_agent_budget(
+    budget,
+    render,
+):
+    from investigation.state import (
+        delegation_budget,
+    )
+
+    budget.per_agent = {"repo-researcher": 4}
+
+    provider = CannedProvider(
+        '{"status": "done", "answer": "yes"}'
+    )
+
+    asyncio.run(
+        decide_next(
+            provider,
+            "why?",
+            EMPTY_STATE,
+            2,
+            budget,
+            render,
+        )
+    )
+
+    prompt = provider.calls[0][-1]["content"]
+
+    assert "Delegation budget left:" in prompt
+
+    assert (
+        delegation_budget(budget) in prompt
+    )
+
+
+def test_the_final_answer_forbids_tool_markup():
+    provider = CannedProvider("answer")
+
+    asyncio.run(
+        force_final(
+            provider,
+            "why?",
+            EMPTY_STATE,
+        )
+    )
+
+    system = provider.calls[0][0]["content"]
+
+    assert "Write the answer as prose" in system
+    assert "never emit tool-call markup" in system

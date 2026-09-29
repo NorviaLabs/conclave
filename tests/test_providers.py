@@ -379,3 +379,36 @@ def test_read_usage_tolerates_missing_counts():
 
     assert usage.input_tokens is None
     assert usage.total_tokens is None
+
+
+def test_opencode_drops_null_bytes_from_the_prompt(
+    monkeypatch,
+):
+    """argv cannot carry a NUL byte, so the prompt cannot either."""
+
+    captured = {}
+
+    async def fake_exec(*command, **kwargs):
+        captured["prompt"] = command[-1]
+
+        return FakeProcess(stdout=b"ok")
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_exec,
+    )
+
+    asyncio.run(
+        OpenCodeProvider(Path("/tmp/repo")).complete(
+            [
+                {
+                    "role": "user",
+                    "content": "before\x00after",
+                }
+            ]
+        )
+    )
+
+    assert "\x00" not in captured["prompt"]
+    assert "beforeafter" in captured["prompt"]

@@ -22,6 +22,7 @@ from conclave import (
     complete_json,
 )
 
+from .agents import AGENTS
 from .config import (
     MAX_DELEGATIONS_PER_ROUND,
     MAX_ROUNDS,
@@ -103,6 +104,42 @@ def charge_usage(
         )
 
     return collect
+
+
+def delegation_budget(
+    budget: RunBudget,
+) -> str:
+    """Tell the coordinator what it can still afford.
+
+    Without this it keeps asking for the agent that already ran its
+    maximum, one wasted round at a time.
+    """
+
+    lines = [
+        f"{budget.used}/{budget.max_delegations} "
+        "delegations used in this run.",
+        "",
+        (
+            "Per-agent limit "
+            f"{budget.max_per_agent}. Used so far:"
+        ),
+    ]
+
+    for name in AGENTS:
+        used = budget.per_agent.get(name, 0)
+
+        state = (
+            "exhausted"
+            if used >= budget.max_per_agent
+            else f"{budget.max_per_agent - used} left"
+        )
+
+        lines.append(
+            f"  {name}: {used}/"
+            f"{budget.max_per_agent} ({state})"
+        )
+
+    return "\n".join(lines)
 
 
 async def initialize_state(
@@ -212,6 +249,11 @@ Round:
 Current state:
 
 {state_json(state)}
+
+
+Delegation budget left:
+
+{delegation_budget(budget)}
 
 
 Available specialists:
@@ -407,6 +449,11 @@ Answer from the supplied investigation state.
 
 Distinguish evidence, inference,
 and unresolved uncertainty.
+
+Write the answer as prose. The Python runtime owns
+all tools: never emit tool-call markup (DSML, antml,
+invoke or parameter elements), and do not ask to run
+commands.
 """.strip(),
             },
             {

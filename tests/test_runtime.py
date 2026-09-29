@@ -477,25 +477,36 @@ def test_run_reports_tool_errors(runtime):
     )
 
 
-def test_run_rejects_unknown_action(runtime):
+def test_run_corrects_an_unknown_action(runtime):
+    """A misspelled action must not throw away the agent's work."""
+
     provider = ScriptedProvider(
         {
             "repo-researcher": [
-                {"type": "sing"}
+                {"type": "read_file", "path": "a.py"},
+                FINAL,
             ]
         }
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="Invalid agent action",
-    ):
-        asyncio.run(
-            runtime(provider).run(
-                AGENTS["repo-researcher"],
-                "task",
-            )
+    result = asyncio.run(
+        runtime(provider).run(
+            AGENTS["repo-researcher"],
+            "task",
         )
+    )
+
+    assert result.content == "researcher summary"
+
+    assert any(
+        "No such action type: 'read_file'" in prompt
+        and (
+            "Valid types are tool, note, "
+            "delegate and final"
+        )
+        in prompt
+        for _, prompt in provider.prompts
+    )
 
 
 def test_run_recovers_from_tool_call_markup(runtime):

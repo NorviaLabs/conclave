@@ -245,13 +245,69 @@ def test_search_files_skips_unreadable_files(
 
     monkeypatch.setattr(
         Path,
-        "read_text",
+        "read_bytes",
         unreadable,
     )
 
     assert asyncio.run(
         local.search_files("retry")
     ) == "No matches"
+
+
+def test_search_files_skips_binary_files(
+    local,
+):
+    """A NUL byte cannot survive a subprocess argv, so it never enters
+    a prompt: binary files are skipped rather than decoded."""
+
+    (local.repo / "blob.bin").write_bytes(
+        b"retry\x00retry"
+    )
+
+    results = asyncio.run(
+        local.search_files("retry")
+    )
+
+    assert "blob.bin" not in results
+    assert "a.py" in results
+
+
+def test_read_text_or_none_reads_text(local):
+    from conclave.tools.local import (
+        read_text_or_none,
+    )
+
+    assert read_text_or_none(
+        local.repo / "a.py"
+    ).startswith("def retry()")
+
+
+def test_read_text_or_none_rejects_binary(local):
+    from conclave.tools.local import (
+        read_text_or_none,
+    )
+
+    binary = local.repo / "blob.bin"
+    binary.write_bytes(b"\x00\x01\x02")
+
+    assert read_text_or_none(binary) is None
+
+
+def test_read_file_refuses_binary_files(local):
+    (local.repo / "blob.bin").write_bytes(
+        b"\x00\x01\x02"
+    )
+
+    result = asyncio.run(
+        local.read_file("blob.bin")
+    )
+
+    assert result.startswith(
+        "Binary file, not readable as text"
+    )
+
+    assert "\x00" not in result
+    assert "Do not read it again" in result
 
 
 # =============================================================================

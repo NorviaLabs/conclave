@@ -238,6 +238,10 @@ lines, so a loop attempt is visible instead of silent.
 
 - Every file path is resolved and checked against `--repo`; anything that
   escapes it raises instead of reading.
+- Binary files are refused rather than decoded: `read_file` answers with a
+  "Binary file" notice and `search_files` skips them. A NUL byte is valid
+  UTF-8 but cannot survive a subprocess argument, so a decoded binary used to
+  take down a whole agent run at the model boundary.
 - GitHub tools are read-only (`gh ... view` / `gh ... search`), and `web_fetch`
   allows only `http`/`https`.
 - Capabilities are declared per tool and never inferred from names. `WRITE`, or
@@ -259,3 +263,6 @@ lines, so a loop attempt is visible instead of silent.
   aborting: state initialization continues with an empty state, the coordinator
   stops investigating, and a failed state update keeps the previous state.
   A reply that contains both markup and JSON is recovered without a retry.
+- An action type the runtime does not recognise (`read_file` instead of
+  `tool`) costs one step and comes back with the list of valid types; it does
+  not discard what the agent has already done.

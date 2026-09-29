@@ -12,6 +12,34 @@ from urllib.parse import urlparse
 
 
 # =============================================================================
+# Reading text out of a repository
+# =============================================================================
+
+
+def read_text_or_none(
+    path: Path,
+) -> str | None:
+    """Read a text file, or answer None for a binary one.
+
+    A NUL byte is valid UTF-8, so `read_text(errors="replace")` hands it
+    straight back. That matters more than it looks: a NUL byte cannot
+    survive a `subprocess` argument, so a binary file read into a prompt
+    used to kill the whole agent run at the model boundary instead of
+    costing one tool call.
+    """
+
+    data = path.read_bytes()
+
+    if b"\x00" in data:
+        return None
+
+    return data.decode(
+        "utf-8",
+        errors="replace",
+    )
+
+
+# =============================================================================
 # Local tools
 # =============================================================================
 
@@ -111,9 +139,19 @@ class LocalTools:
         if not file_path.is_file():
             return f"Not a file: {path}"
 
-        lines = file_path.read_text(
-            errors="replace"
-        ).splitlines()
+        text = read_text_or_none(
+            file_path
+        )
+
+        if text is None:
+            return (
+                f"Binary file, not readable as "
+                f"text: {path} "
+                f"({file_path.stat().st_size} "
+                "bytes). Do not read it again."
+            )
+
+        lines = text.splitlines()
 
         start = max(
             1,
@@ -171,11 +209,14 @@ class LocalTools:
                 continue
 
             try:
-                text = file_path.read_text(
-                    errors="replace"
+                text = read_text_or_none(
+                    file_path
                 )
 
             except OSError:
+                continue
+
+            if text is None:
                 continue
 
             for (

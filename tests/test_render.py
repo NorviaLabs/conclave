@@ -176,7 +176,9 @@ def test_tool_called_reports_truncation():
     assert "(truncated)" in out(render)
 
 
-def test_tool_called_reports_failure():
+def test_tool_called_reports_the_reason_it_failed():
+    """A bare "failed" is not a diagnosis; the tool's message is."""
+
     render = make()
 
     render.handle(
@@ -187,14 +189,24 @@ def test_tool_called_reports_failure():
             arguments={},
             capabilities=frozenset(),
             approval=Approval.NOT_REQUIRED,
-            observation="Tool error: boom",
-            output_chars=17,
+            observation=(
+                "Tool error: gh is not authenticated\n"
+                "more detail"
+            ),
+            output_chars=45,
             truncated=False,
             ok=False,
         )
     )
 
-    assert "-> failed" in out(render)
+    printed = out(render)
+
+    assert (
+        "! writer read_file: Tool error: "
+        "gh is not authenticated" in printed
+    )
+
+    assert "more detail" not in printed
 
 
 def test_tool_denied_is_reported():

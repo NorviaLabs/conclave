@@ -571,3 +571,116 @@ def test_unreadable_backend_does_not_abort_the_run(
         "[investigation budget exhausted -> final]"
         in output
     )
+
+
+def test_a_binary_file_in_the_repo_does_not_break_a_round(
+    repo,
+    capsys,
+):
+    """Regression: a NUL byte used to kill the agent run.
+
+    The tool bus now refuses binary files, so a repository containing one
+    costs a tool call at most — and no NUL ever reaches a prompt.
+    """
+
+    (repo / "blob.bin").write_bytes(
+        b"retry\x00retry\x00"
+    )
+
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            "search for retries",
+                        )
+                    ]
+                ),
+                INITIAL_STATE,
+                {
+                    "status": "done",
+                    "answer": "SURVIVED",
+                },
+            ),
+            "repo-researcher": [
+                {
+                    "type": "tool",
+                    "name": "search_files",
+                    "arguments": {"query": "retry"},
+                },
+                {
+                    "type": "tool",
+                    "name": "read_file",
+                    "arguments": {"path": "blob.bin"},
+                },
+                FINAL,
+            ],
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why does retry double count?",
+        )
+    )
+
+    assert "SURVIVED" in capsys.readouterr().out
+
+    # The invariant that was violated: no prompt ever carried a NUL.
+    for _, prompt in provider.prompts:
+        assert "\x00" not in prompt
+
+    assert any(
+        "Binary file, not readable as text"
+        in prompt
+        for _, prompt in provider.prompts
+    )
+
+
+def test_an_invented_action_costs_a_step_not_the_run(
+    repo,
+    capsys,
+):
+    provider = ScriptedProvider(
+        {
+            "coordinator": coordinator(
+                decide(
+                    [
+                        delegate_to(
+                            "repo-researcher",
+                            "investigate retries",
+                        )
+                    ]
+                ),
+                INITIAL_STATE,
+                {
+                    "status": "done",
+                    "answer": "RECOVERED",
+                },
+            ),
+            "repo-researcher": [
+                {
+                    "type": "read_file",
+                    "path": "a.py",
+                },
+                FINAL,
+            ],
+        }
+    )
+
+    asyncio.run(
+        run_investigation(
+            provider,
+            build_tool_registry(repo),
+            "why does retry double count?",
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert "RECOVERED" in output
+    assert "Agent failed" not in output

@@ -214,11 +214,17 @@ class Renderer:
         self,
         event: ToolCalled,
     ) -> None:
-        outcome = (
-            f"{event.output_chars} chars"
-            if event.ok
-            else "failed"
-        )
+        if not event.ok:
+            # A bare "failed" leaves the reader with nothing to act on;
+            # the tool's own message is the whole diagnosis.
+            self.write(
+                f"  ! {event.agent} {event.tool}: "
+                f"{event.observation.splitlines()[0]}"
+            )
+
+            return
+
+        outcome = f"{event.output_chars} chars"
 
         if event.truncated:
             outcome += " (truncated)"

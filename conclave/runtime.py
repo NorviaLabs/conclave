@@ -441,9 +441,17 @@ class ToolAgentRuntime:
                 observation = JSON_ONLY_RULE
 
             else:
-                raise RuntimeError(
-                    "Invalid agent action: "
-                    f"{action}"
+                # A misspelled or invented action type is a bad reply, not
+                # a reason to throw away everything the agent has done so
+                # far. It costs one step and the model gets corrected.
+                label = "FORMAT ERROR"
+
+                observation = (
+                    f"No such action type: "
+                    f"{kind!r}. Valid types are "
+                    "tool, note, delegate and "
+                    "final.\n\n"
+                    + JSON_ONLY_RULE
                 )
 
             messages.append(
