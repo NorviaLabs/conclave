@@ -21,11 +21,38 @@ from conclave import (
     Completion,
     ModelProvider,
     RunBudget,
+    RunConfig,
     ToolAgentRuntime,
     Usage,
 )
 from conclave.tools import build_tool_registry
 from conclave.tools.local import LocalTools
+
+
+# The test suite is a caller like any other, so it states its own limits
+# rather than borrowing the library's — the library has none.
+CONFIG = RunConfig(
+    max_tool_steps=8,
+    max_notes=12,
+    max_note_chars=300,
+    max_tool_output_chars=20_000,
+    fan_out_limit=4,
+)
+
+TIMEOUT = 300.0
+
+
+def make_budget(**overrides) -> RunBudget:
+    """A run budget with the caps spelled out."""
+
+    return RunBudget(
+        **{
+            "max_delegations": 15,
+            "max_per_agent": 4,
+            "max_depth": 2,
+            **overrides,
+        }
+    )
 
 
 FINAL = {
@@ -252,23 +279,34 @@ def local(repo: Path) -> LocalTools:
     return LocalTools(repo)
 
 
+def build_tools(repo: Path):
+    """The bundled tools, sized like the rest of the suite."""
+
+    return build_tool_registry(
+        repo,
+        max_output_chars=CONFIG.max_tool_output_chars,
+    )
+
+
 @pytest.fixture
 def tools(repo: Path):
-    return build_tool_registry(repo)
+    return build_tools(repo)
 
 
 @pytest.fixture
 def runtime(tools):
     def build(
         provider,
-        budget=None,
+        run_budget=None,
         agents=None,
         **kwargs,
     ) -> ToolAgentRuntime:
+        kwargs.setdefault("config", CONFIG)
+
         return ToolAgentRuntime(
             provider,
             tools,
-            budget or RunBudget(),
+            run_budget or make_budget(),
             AGENTS if agents is None else agents,
             **kwargs,
         )

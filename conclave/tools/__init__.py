@@ -12,9 +12,6 @@ none of them needs an approver to run.
 from pathlib import Path
 from typing import Any
 
-from ..config import (
-    MAX_TOOL_OUTPUT_CHARS,
-)
 from ..registry import ToolRegistry
 from ..spec import (
     Capability,
@@ -57,9 +54,7 @@ NETWORK_ONLY = frozenset(
 
 def build_tool_registry(
     repo: Path,
-    max_output_chars: int = (
-        MAX_TOOL_OUTPUT_CHARS
-    ),
+    max_output_chars: int,
 ) -> ToolRegistry:
     local = LocalTools(repo)
 

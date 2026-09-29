@@ -4,7 +4,11 @@ import asyncio
 
 import pytest
 
-from conclave.config import MAX_TOOL_OUTPUT_CHARS
+from conftest import (
+    CONFIG,
+    build_tools,
+)
+
 from conclave.registry import ToolRegistry
 from conclave.spec import Tool
 from conclave.tools import build_tool_registry
@@ -28,7 +32,7 @@ EXPECTED_TOOLS = {
 
 
 def test_build_tool_registry_registers_every_tool(repo):
-    registry = build_tool_registry(repo)
+    registry = build_tools(repo)
 
     assert set(registry.tools) == EXPECTED_TOOLS
 
@@ -38,7 +42,7 @@ def test_build_tool_registry_registers_every_tool(repo):
 
 
 def test_describe_filters_by_permission(repo):
-    registry = build_tool_registry(repo)
+    registry = build_tools(repo)
 
     described = registry.describe(
         {"read_file", "git_status"}
@@ -57,13 +61,15 @@ def test_describe_filters_by_permission(repo):
 
 
 def test_describe_is_empty_without_permission(repo):
-    registry = build_tool_registry(repo)
+    registry = build_tools(repo)
 
     assert registry.describe(set()) == []
 
 
 def test_register_overwrites_by_name():
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        max_output_chars=CONFIG.max_tool_output_chars
+    )
 
     async def first() -> str:
         return "first"
@@ -90,7 +96,9 @@ def test_register_overwrites_by_name():
 
 
 def test_execute_unknown_tool_raises():
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        max_output_chars=CONFIG.max_tool_output_chars
+    )
 
     with pytest.raises(
         RuntimeError,
@@ -102,7 +110,9 @@ def test_execute_unknown_tool_raises():
 
 
 def test_execute_passes_arguments():
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        max_output_chars=CONFIG.max_tool_output_chars
+    )
 
     seen = {}
 
@@ -133,11 +143,13 @@ def test_execute_passes_arguments():
 
 
 def test_execute_truncates_long_output():
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        max_output_chars=CONFIG.max_tool_output_chars
+    )
 
     async def big() -> str:
         return "x" * (
-            MAX_TOOL_OUTPUT_CHARS + 50
+            CONFIG.max_tool_output_chars + 50
         )
 
     registry.register(
@@ -153,13 +165,15 @@ def test_execute_truncates_long_output():
     )
 
     assert len(result) == (
-        MAX_TOOL_OUTPUT_CHARS
+        CONFIG.max_tool_output_chars
         + len("\n...[truncated]")
     )
 
 
 def test_execute_keeps_short_output():
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        max_output_chars=CONFIG.max_tool_output_chars
+    )
 
     async def small() -> str:
         return "short"
@@ -179,7 +193,7 @@ def test_execute_keeps_short_output():
 def test_bundled_tools_declare_their_capabilities(repo):
     """No bundled tool may be destructive: the app ships no approver."""
 
-    registry = build_tool_registry(repo)
+    registry = build_tools(repo)
 
     for name, registered in registry.tools.items():
         assert registered.capabilities, name
@@ -192,7 +206,7 @@ def test_bundled_tools_declare_their_capabilities(repo):
 
 
 def test_capabilities_of_an_unknown_tool_are_empty(repo):
-    registry = build_tool_registry(repo)
+    registry = build_tools(repo)
 
     assert registry.capabilities("nope") == (
         frozenset()
@@ -200,7 +214,7 @@ def test_capabilities_of_an_unknown_tool_are_empty(repo):
 
 
 def test_the_registry_can_name_a_tool(repo):
-    registry = build_tool_registry(repo)
+    registry = build_tools(repo)
 
     assert registry.tool("read_file").name == (
         "read_file"

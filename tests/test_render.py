@@ -2,6 +2,11 @@
 
 import io
 
+from conftest import (
+    CONFIG,
+    make_budget,
+)
+
 from conclave import (
     AgentFinished,
     Approval,
@@ -10,7 +15,10 @@ from conclave import (
     ToolCalled,
     ToolDenied,
 )
-from conclave.protocol import AgentResult
+from conclave.protocol import (
+    AgentResult,
+    PrivateState,
+)
 from investigation.render import Renderer
 
 
@@ -31,6 +39,7 @@ def finished(
 ) -> AgentFinished:
     result = AgentResult(
         content=content,
+        private=PrivateState(CONFIG),
         nested=nested or [],
     )
 
@@ -311,7 +320,7 @@ def test_unrelated_events_are_ignored():
         RunStarted(
             run_id="r1",
             task="t",
-            config=RunConfig(),
+            config=CONFIG,
         )
     )
 
@@ -326,7 +335,7 @@ def test_unrelated_events_are_ignored():
 def test_budget_plan_is_silent_when_unbounded():
     render = make()
 
-    render.budget_plan(RunBudget())
+    render.budget_plan(make_budget())
 
     assert out(render) == ""
 
@@ -335,7 +344,7 @@ def test_budget_plan_lists_the_active_dimensions():
     render = make()
 
     render.budget_plan(
-        RunBudget(
+        make_budget(
             tool_calls=5,
             tokens=1000,
         )

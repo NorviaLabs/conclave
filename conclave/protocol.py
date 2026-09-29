@@ -14,10 +14,7 @@ from dataclasses import (
 )
 from typing import Any
 
-from .config import (
-    DEFAULT_CONFIG,
-    RunConfig,
-)
+from .config import RunConfig
 from .providers import (
     ModelProvider,
     Usage,
@@ -195,9 +192,12 @@ class PrivateState:
     Notes and the checked ledger stay with the
     agent that made them. Only the final handoff
     crosses back to the coordinator.
+
+    The scratchpad bounds come from the run's config: how much an agent
+    may jot down is a limit somebody chose.
     """
 
-    config: RunConfig = DEFAULT_CONFIG
+    config: RunConfig
 
     notes: list[str] = field(
         default_factory=list
@@ -278,18 +278,19 @@ class PrivateState:
 
 @dataclass
 class AgentResult:
+    """What an agent hands back.
+
+    `content` is prose. `data` is everything else the agent put in its
+    final action, passed through untouched: the shape of a handoff is the
+    caller's business, so the runtime neither names those fields nor
+    inspects them.
+    """
+
     content: str
+    private: PrivateState
 
-    findings: list[Any] = field(
-        default_factory=list
-    )
-
-    open_leads: list[Any] = field(
-        default_factory=list
-    )
-
-    private: PrivateState = field(
-        default_factory=PrivateState
+    data: dict[str, Any] = field(
+        default_factory=dict
     )
 
     nested: list[

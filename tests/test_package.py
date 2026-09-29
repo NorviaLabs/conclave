@@ -1,23 +1,48 @@
 """Tests for the package entry points and the configuration defaults."""
 
+import dataclasses
 import importlib
 import importlib.metadata
 import subprocess
 import sys
 
-from conclave import config
+from conclave import (
+    RunBudget,
+    RunConfig,
+)
 
 
-def test_core_limits_are_positive():
-    assert config.MAX_DELEGATIONS > 0
-    assert config.MAX_DELEGATIONS_PER_AGENT > 0
-    assert config.MAX_DEPTH >= 1
-    assert config.MAX_TOOL_STEPS > 0
-    assert config.TIMEOUT_SECONDS > 0
-    assert config.MAX_TOOL_OUTPUT_CHARS > 0
-    assert config.MAX_NOTES > 0
-    assert config.MAX_NOTE_CHARS > 0
-    assert config.FAN_OUT_LIMIT > 0
+def test_the_core_ships_no_numbers():
+    """The whole point: a library that will not answer for you."""
+
+    for field in dataclasses.fields(RunConfig):
+        assert (
+            field.default is dataclasses.MISSING
+        ), f"{field.name} has a default"
+
+        assert (
+            field.default_factory
+            is dataclasses.MISSING
+        ), f"{field.name} has a factory"
+
+    for field in dataclasses.fields(RunBudget):
+        if field.name in {
+            "tool_calls",
+            "wall_clock_seconds",
+            "tokens",
+            "cost_usd",
+        }:
+            # None means unmetered: an absence, not a chosen number.
+            assert field.default is None
+
+            continue
+
+        if field.name in {"used", "per_agent", "spent"}:
+            continue
+
+        assert (
+            field.default is dataclasses.MISSING
+        ), f"{field.name} has a default"
 
 
 def test_application_limits_are_positive():
@@ -29,32 +54,31 @@ def test_application_limits_are_positive():
     assert application.MAX_DELEGATIONS_PER_ROUND > 0
 
 
-def test_agent_cap_fits_inside_the_run_cap():
-    assert (
-        config.MAX_DELEGATIONS_PER_AGENT
-        <= config.MAX_DELEGATIONS
-    )
+def test_the_application_states_its_own_numbers():
+    from investigation import config
 
-
-def test_run_config_defaults_come_from_the_constants():
-    default = config.RunConfig()
-
-    assert default is not config.DEFAULT_CONFIG
+    budget = config.make_budget()
 
     assert (
-        default.max_tool_steps
-        == config.MAX_TOOL_STEPS
+        budget.max_per_agent
+        <= budget.max_delegations
     )
 
-    assert (
-        default.max_delegation_report_chars
-        == config.MAX_TOOL_OUTPUT_CHARS
+    assert config.RUN_CONFIG.max_tool_steps > 0
+    assert config.TIMEOUT_SECONDS > 0
+
+
+def test_a_run_config_carries_what_the_caller_chose():
+    config = RunConfig(
+        max_tool_steps=3,
+        max_notes=2,
+        max_note_chars=10,
+        max_tool_output_chars=20,
+        fan_out_limit=1,
     )
 
-    assert (
-        default.fan_out_limit
-        == config.FAN_OUT_LIMIT
-    )
+    assert config.max_tool_steps == 3
+    assert config.fan_out_limit == 1
 
 
 def test_package_imports_cleanly():
@@ -104,7 +128,8 @@ def test_everything_imports_without_the_optional_scraper():
                 (
                     "conclave.tools."
                     "build_tool_registry("
-                    "pathlib.Path('.'))"
+                    "pathlib.Path('.'), "
+                    "max_output_chars=20_000)"
                 ),
                 "print('ok')",
             ]

@@ -7,6 +7,8 @@ import pytest
 
 from pathlib import Path
 
+from conftest import make_budget
+
 from conclave import approve_all
 
 from investigation import cli

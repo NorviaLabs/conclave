@@ -14,8 +14,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import TIMEOUT_SECONDS
-
 
 # =============================================================================
 # Model providers
@@ -71,8 +69,8 @@ class OpenCodeProvider(ModelProvider):
     def __init__(
         self,
         cwd: Path,
-        model: str | None = None,
-        timeout: float = TIMEOUT_SECONDS,
+        model: str | None,
+        timeout: float,
     ):
         self.cwd = cwd
         self.model = model
@@ -178,8 +176,8 @@ class OllamaProvider(ModelProvider):
     def __init__(
         self,
         model: str,
+        timeout: float,
         base_url: str = "http://127.0.0.1:11434",
-        timeout: float = TIMEOUT_SECONDS,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")

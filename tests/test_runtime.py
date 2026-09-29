@@ -7,16 +7,18 @@ import pytest
 
 from conftest import (
     AGENTS,
+    CONFIG,
     DSML_TOOL_CALL,
     FINAL,
     CannedProvider,
     FailingProvider,
     ScriptedProvider,
+    make_budget,
 )
 
+from dataclasses import replace
+
 from conclave import ToolAgentRuntime
-from conclave.budget import RunBudget
-from conclave.config import RunConfig
 from conclave.protocol import (
     JSON_ONLY_RULE,
     AgentResult,
@@ -220,7 +222,7 @@ def test_as_list_rejects_everything_else(value):
 
 
 def test_private_state_records_notes():
-    private = PrivateState()
+    private = PrivateState(CONFIG)
 
     assert private.note("  checked   retry.py ") == (
         "Note 1/12 recorded."
@@ -236,7 +238,7 @@ def test_private_state_records_notes():
 
 
 def test_private_state_ignores_empty_notes():
-    private = PrivateState()
+    private = PrivateState(CONFIG)
 
     assert private.note("   ") == (
         "Note ignored: it was empty."
@@ -247,7 +249,7 @@ def test_private_state_ignores_empty_notes():
 
 def test_private_state_refuses_when_full():
     private = PrivateState(
-        RunConfig(max_notes=1)
+        replace(CONFIG, max_notes=1)
     )
 
     assert private.note("first") == (
@@ -262,7 +264,7 @@ def test_private_state_refuses_when_full():
 
 def test_private_state_truncates_long_notes():
     private = PrivateState(
-        RunConfig(max_note_chars=5)
+        replace(CONFIG, max_note_chars=5)
     )
     private.note("0123456789")
 
@@ -271,7 +273,7 @@ def test_private_state_truncates_long_notes():
 
 def test_private_state_keeps_recent_checks():
     private = PrivateState(
-        RunConfig(max_notes=2)
+        replace(CONFIG, max_notes=2)
     )
 
     for index in range(3):
@@ -284,11 +286,11 @@ def test_private_state_keeps_recent_checks():
 
 
 def test_private_state_render_is_empty_by_default():
-    assert PrivateState().render() == "(empty)"
+    assert PrivateState(CONFIG).render() == "(empty)"
 
 
 def test_private_state_render_includes_checked():
-    private = PrivateState()
+    private = PrivateState(CONFIG)
     private.note("a note")
     private.check("list_files({})")
 
@@ -325,8 +327,18 @@ def test_run_returns_handoff(runtime):
 
     assert isinstance(result, AgentResult)
     assert result.content == "researcher summary"
-    assert result.findings == FINAL["findings"]
-    assert result.open_leads == FINAL["open_leads"]
+
+    # The handoff is passed through, not understood.
+    assert (
+        result.data["findings"]
+        == FINAL["findings"]
+    )
+
+    assert (
+        result.data["open_leads"]
+        == FINAL["open_leads"]
+    )
+
     assert result.private.notes == ["n"]
     assert result.nested == []
 
@@ -356,8 +368,7 @@ def test_run_defaults_missing_handoff_fields(runtime):
     )
 
     assert result.content == "legacy"
-    assert result.findings == []
-    assert result.open_leads == []
+    assert result.data == {}
 
 
 def test_run_records_checked_ledger(runtime):
@@ -428,7 +439,9 @@ def test_run_reports_tool_errors(runtime):
     async def broken(**kwargs) -> str:
         raise RuntimeError("tool exploded")
 
-    tools = ToolRegistry()
+    tools = ToolRegistry(
+        max_output_chars=CONFIG.max_tool_output_chars
+    )
 
     tools.register(
         Tool(
@@ -456,8 +469,9 @@ def test_run_reports_tool_errors(runtime):
     runner = ToolAgentRuntime(
         provider,
         tools,
-        RunBudget(),
+        make_budget(),
         AGENTS,
+        config=CONFIG,
     )
 
     result = asyncio.run(
@@ -605,7 +619,7 @@ def test_run_nests_and_propagates_handoff(runtime):
         }
     )
 
-    budget = RunBudget()
+    budget = make_budget()
 
     result = asyncio.run(
         runtime(provider, budget).run(
@@ -624,8 +638,14 @@ def test_run_nests_and_propagates_handoff(runtime):
     assert record["delegated_by"] == "repo-researcher"
     assert record["status"] == "completed"
     assert record["depth"] == 2
-    assert record["findings"] == FINAL["findings"]
-    assert record["open_leads"] == FINAL["open_leads"]
+    assert record["content"] == (
+        FINAL["content"]
+    )
+
+    assert (
+        record["data"]["findings"]
+        == FINAL["findings"]
+    )
     assert "nested" not in record
 
     assert any(
@@ -649,7 +669,7 @@ def test_run_refuses_unknown_specialist(runtime):
         }
     )
 
-    budget = RunBudget()
+    budget = make_budget()
 
     result = asyncio.run(
         runtime(provider, budget).run(
@@ -705,7 +725,7 @@ def test_run_refuses_empty_task(runtime):
         }
     )
 
-    budget = RunBudget()
+    budget = make_budget()
 
     result = asyncio.run(
         runtime(provider, budget).run(
@@ -743,7 +763,7 @@ def test_run_refuses_deep_delegation(runtime):
         }
     )
 
-    budget = RunBudget()
+    budget = make_budget()
 
     result = asyncio.run(
         runtime(provider, budget).run(
@@ -813,7 +833,7 @@ def test_run_refuses_when_budget_is_spent(runtime):
     result = asyncio.run(
         runtime(
             provider,
-            RunBudget(max_delegations=0),
+            make_budget(max_delegations=0),
         ).run(
             AGENTS["repo-researcher"],
             "task",
@@ -879,13 +899,13 @@ def test_run_advertises_delegation_only_below_max_depth(runtime):
     shallow = runner.system_prompt(
         AGENTS["critic"],
         1,
-        PrivateState(),
+        PrivateState(CONFIG),
     )
 
     deep = runner.system_prompt(
         AGENTS["critic"],
         2,
-        PrivateState(),
+        PrivateState(CONFIG),
     )
 
     assert '"type": "delegate"' in shallow
@@ -902,7 +922,7 @@ def test_run_prompt_lists_only_allowed_tools(runtime):
     prompt = runner.system_prompt(
         AGENTS["repo-researcher"],
         1,
-        PrivateState(),
+        PrivateState(CONFIG),
     )
 
     assert "list_files" in prompt

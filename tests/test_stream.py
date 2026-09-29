@@ -2,11 +2,15 @@
 
 import asyncio
 
+from dataclasses import replace
+
 from conftest import (
     AGENTS,
+    CONFIG,
     DSML_TOOL_CALL,
     FINAL,
     ScriptedProvider,
+    make_budget,
 )
 
 from conclave import (
@@ -25,9 +29,6 @@ from conclave import (
     ToolRegistry,
     Usage,
 )
-from conclave.config import (
-    MAX_TOOL_OUTPUT_CHARS,
-)
 from conclave.spec import (
     Capability,
     Tool,
@@ -45,12 +46,10 @@ def with_tool(
     name: str,
     func,
     *capabilities: Capability,
-    max_output_chars=None,
+    max_output_chars=CONFIG.max_tool_output_chars,
 ) -> ToolRegistry:
     registry = ToolRegistry(
         max_output_chars=max_output_chars
-        if max_output_chars is not None
-        else MAX_TOOL_OUTPUT_CHARS
     )
 
     registry.register(
@@ -105,7 +104,7 @@ def test_the_stream_wraps_the_run(runtime):
     ]
 
     assert events[0].task == "task"
-    assert events[0].config == RunConfig()
+    assert events[0].config == replace(CONFIG, )
     assert events[-1].result.content == (
         "researcher summary"
     )
@@ -214,7 +213,7 @@ def test_a_refused_note_is_reported(runtime):
     events = collect(
         runtime(
             provider,
-            config=RunConfig(max_notes=0),
+            config=replace(CONFIG, max_notes=0),
         ).stream(
             AGENTS["repo-researcher"],
             "task",
@@ -416,8 +415,9 @@ def test_tool_events_report_approval_and_size(runtime):
                 small,
                 Capability.READ,
             ),
-            RunBudget(),
+            make_budget(),
             AGENTS,
+            config=CONFIG,
         ).stream(
             spec_for("repo-researcher"),
             "task",
@@ -463,8 +463,9 @@ def test_a_truncated_result_is_flagged(runtime):
                 Capability.READ,
                 max_output_chars=10,
             ),
-            RunBudget(),
+            make_budget(),
             AGENTS,
+            config=CONFIG,
         ).stream(
             spec_for("repo-researcher"),
             "task",
@@ -513,8 +514,9 @@ def test_a_broken_tool_is_reported_not_raised(runtime):
                 broken,
                 Capability.READ,
             ),
-            RunBudget(),
+            make_budget(),
             AGENTS,
+            config=CONFIG,
         ).stream(
             spec_for("repo-researcher"),
             "task",
@@ -592,8 +594,9 @@ def test_a_destructive_tool_needs_an_approver(runtime):
         ToolAgentRuntime(
             provider,
             with_tool("write_file", write),
-            RunBudget(),
+            make_budget(),
             AGENTS,
+            config=CONFIG,
         ).stream(
             spec_for("repo-researcher"),
             "task",
@@ -650,8 +653,9 @@ def test_an_approver_can_allow_a_destructive_tool(runtime):
                 write,
                 Capability.WRITE,
             ),
-            RunBudget(),
+            make_budget(),
             AGENTS,
+            config=CONFIG,
             approver=approver,
         ).stream(
             spec_for("repo-researcher"),
@@ -724,7 +728,7 @@ def test_a_spent_tool_budget_denies_the_call(runtime):
     events = collect(
         runtime(
             provider,
-            RunBudget(tool_calls=0),
+            make_budget(tool_calls=0),
         ).stream(
             AGENTS["repo-researcher"],
             "task",
@@ -759,7 +763,7 @@ def test_a_spent_wall_clock_stops_the_run(runtime):
     events = collect(
         runtime(
             provider,
-            RunBudget(wall_clock_seconds=0.0),
+            make_budget(wall_clock_seconds=0.0),
         ).stream(
             AGENTS["repo-researcher"],
             "task",
@@ -793,7 +797,7 @@ def test_reported_usage_is_settled(runtime):
         ),
     )
 
-    budget = RunBudget(tokens=100)
+    budget = make_budget(tokens=100)
 
     result = asyncio.run(
         runtime(
@@ -823,7 +827,7 @@ def test_a_spent_token_budget_is_reported(runtime):
     events = collect(
         runtime(
             provider,
-            RunBudget(tokens=10),
+            make_budget(tokens=10),
         ).stream(
             AGENTS["repo-researcher"],
             "task",
@@ -839,7 +843,7 @@ def test_a_spent_token_budget_is_reported(runtime):
 
 
 def test_unmeasurable_usage_is_not_charged(runtime):
-    budget = RunBudget(tokens=100)
+    budget = make_budget(tokens=100)
 
     asyncio.run(
         runtime(

@@ -8,7 +8,24 @@ inside the limits you set.
 `conclave.tools` is deliberately not imported here: importing the core never
 pulls a network dependency or shells out to anything.
 
-    runtime = ToolAgentRuntime(provider, tools, RunBudget(), agents)
+    config = RunConfig(
+        max_tool_steps=8,
+        max_notes=12,
+        max_note_chars=300,
+        max_tool_output_chars=20_000,
+        fan_out_limit=3,
+    )
+
+    budget = RunBudget(
+        max_delegations=15,
+        max_per_agent=4,
+        max_depth=2,
+    )
+
+    runtime = ToolAgentRuntime(
+        provider, tools, budget, agents, config=config
+    )
+
     async for event in runtime.stream(AGENTS["researcher"], task):
         print(event)
 """
@@ -26,10 +43,7 @@ from .budget import (
     DIMENSION_LABELS,
     RunBudget,
 )
-from .config import (
-    DEFAULT_CONFIG,
-    RunConfig,
-)
+from .config import RunConfig
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -72,7 +86,6 @@ from .runtime import (
 from .spec import (
     AgentSpec,
     Capability,
-    Finding,
     Tool,
     ToolFunc,
 )
@@ -98,11 +111,9 @@ __all__ = [
     "BudgetExceeded",
     "Capability",
     "Completion",
-    "DEFAULT_CONFIG",
     "DIMENSION_LABELS",
     "Delegation",
     "Event",
-    "Finding",
     "JSON_ONLY_RULE",
     "MergeFunc",
     "MergeResult",

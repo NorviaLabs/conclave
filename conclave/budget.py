@@ -12,17 +12,16 @@ Two kinds of accounting live side by side:
 - work that can only be measured afterwards (tokens, cost, wall clock) is
   `settle`d with the actual amount, which reports the overspend instead of
   pretending it could be avoided.
+
+The structural caps have no defaults: how many agents a system has, how
+deep it nests and how often one agent may repeat are properties of the
+system, not of the framework. The measurement dimensions default to None,
+which means unmetered rather than a chosen number.
 """
 
 from dataclasses import (
     dataclass,
     field,
-)
-
-from .config import (
-    MAX_DELEGATIONS,
-    MAX_DELEGATIONS_PER_AGENT,
-    MAX_DEPTH,
 )
 
 
@@ -36,15 +35,9 @@ DIMENSION_LABELS = {
 
 @dataclass
 class RunBudget:
-    max_delegations: int = (
-        MAX_DELEGATIONS
-    )
-
-    max_per_agent: int = (
-        MAX_DELEGATIONS_PER_AGENT
-    )
-
-    max_depth: int = MAX_DEPTH
+    max_delegations: int
+    max_per_agent: int
+    max_depth: int
 
     tool_calls: int | None = None
     wall_clock_seconds: float | None = None

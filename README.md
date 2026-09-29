@@ -74,12 +74,20 @@ needed once you add a tool that does.
 ## Using the library
 
 ```python
-from conclave import AgentSpec, RunBudget, ToolAgentRuntime
+from conclave import (
+    AgentSpec,
+    RunBudget,
+    RunConfig,
+    ToolAgentRuntime,
+)
 
 AGENTS = {
     "writer": AgentSpec(
         name="writer",
-        instructions="Draft the note.",
+        instructions=(
+            "Draft the note. Finish with a final action "
+            "carrying content and a `title` field."
+        ),
         tools={"save_note"},
     ),
     "critic": AgentSpec(
@@ -88,19 +96,49 @@ AGENTS = {
     ),
 }
 
+config = RunConfig(
+    max_tool_steps=8,
+    max_notes=12,
+    max_note_chars=300,
+    max_tool_output_chars=20_000,
+    fan_out_limit=4,
+)
+
+budget = RunBudget(
+    max_delegations=15,
+    max_per_agent=4,
+    max_depth=2,
+)
+
 runtime = ToolAgentRuntime(
     provider,          # any ModelProvider
     tools,             # a ToolRegistry you filled
-    RunBudget(),       # delegation caps and work limits
+    budget,            # delegation caps and work limits
     AGENTS,            # who may be delegated to, injected not global
+    config=config,     # required: the library ships no numbers
 )
 
 async for event in runtime.stream(AGENTS["writer"], "draft something"):
     ...                # react: render it, log it, count it
 
 result = await runtime.run(AGENTS["critic"], "review it")
-print(result.content, result.findings, result.nested)
+print(result.content, result.data["title"], result.nested)
 ```
+
+### There are no defaults in the core
+
+Every limit in that snippet is spelled out, and that is deliberate. `RunConfig`,
+`RunBudget`, `ToolRegistry(max_output_chars=...)`, the provider `timeout=` and
+`fan_out(limit=...)` all require their numbers. A library that guesses answers
+"how many agents does this system have?" and "how much text is too much?" on
+your behalf, and those answers are only visible in the library's source.
+
+The one thing that stays optional is a *measurement*: `RunBudget`'s `tool_calls`,
+`wall_clock_seconds`, `tokens` and `cost_usd` default to `None`, which means
+unmetered. That is an absence, not a chosen number.
+
+The reference application is a caller like any other, so its numbers live in
+`investigation/config.py` — including why `max_tool_steps` is 12 and not 8.
 
 What the library gives you:
 
@@ -110,6 +148,10 @@ What the library gives you:
 - **Guards.** A `RunBudget` counts delegations, tool calls, wall clock, tokens
   and cost. Refusals come back to the model as text, so an agent finalises on
   the evidence it has instead of crashing.
+- **A handoff you define.** `AgentResult` carries `content` (prose) plus `data`,
+  which holds every other field the agent put in its final action, untouched.
+  The runtime never inspects them: `findings` and `open_leads` are names *this
+  application* chose, declared in `investigation/agents.py`.
 - **A capability gate.** A tool that declares no capabilities — or declares
   `WRITE` — is destructive: it needs an `Approver`, and with no approver it is
   refused. Non-destructive calls are auto-approved, and every call still emits
@@ -159,8 +201,8 @@ core by accident, and a test enforces it.
 
 | Module | Responsibility |
 | --- | --- |
-| `conclave/spec.py` | `AgentSpec`, `Tool`, `Capability`, `Finding` |
-| `conclave/config.py` | Core limits, and `RunConfig` for one run |
+| `conclave/spec.py` | `AgentSpec`, `Tool`, `Capability` |
+| `conclave/config.py` | `RunConfig`: the limits one run needs, all required |
 | `conclave/providers.py` | `ModelProvider`, `Completion`, `Usage`, OpenCode, Ollama |
 | `conclave/registry.py` | `ToolRegistry`: describe, execute, truncate |
 | `conclave/approval.py` | The capability gate and the `Approver` contract |
@@ -170,7 +212,8 @@ core by accident, and a test enforces it.
 | `conclave/store.py` | `StoreSchema` and `SharedStore` |
 | `conclave/runtime.py` | `ToolAgentRuntime` and `fan_out` |
 | `conclave/tools/` | The 14 bundled tools |
-| `investigation/agents.py` | The five specialists and their instructions |
+| `investigation/agents.py` | The five specialists, their instructions and the handoff schema |
+| `investigation/config.py` | Every number this application chose |
 | `investigation/state.py` | Investigation state, its schema, and its model steps |
 | `investigation/loop.py` | The round loop |
 | `investigation/render.py` | Every byte the CLI prints |
@@ -204,8 +247,9 @@ every tool call is appended to a checked ledger (both bounded by `RunConfig`
 `max_notes` and `max_note_chars`). The scratchpad is re-rendered into that
 agent's prompt on every step, so the agent remembers intent instead of just raw
 output, and it never crosses back into the shared state. Only the handoff does:
-the final action's `content`, `findings` (claim, provenance, confidence),
-`open_leads`, and the checked ledger.
+the final action's `content`, whatever extra fields the agent was asked for
+(in this application, `findings` with their provenance and `open_leads`), and
+the checked ledger.
 
 Delegated specialists cannot see the parent's notes, the parent's transcript, or
 the shared state, so delegated tasks have to be self-contained.
@@ -247,10 +291,10 @@ lines, so a loop attempt is visible instead of silent.
 - Capabilities are declared per tool and never inferred from names. `WRITE`, or
   no declaration at all, means destructive: refused unless an approver allows
   it. The bundled tools declare `read`/`network`/`shell` and never `write`.
-- Core limits (`conclave/config.py`): 15 delegations, 4 per agent, depth 2, 8
-  tool steps per agent, 300 s per model call, 12 notes of 300 characters.
-- App limits (`investigation/config.py`): 8 rounds, at most 3 delegations per
-  round.
+- Every limit is stated by the application, never inherited
+  (`investigation/config.py`): 15 delegations, 4 per agent, depth 2, 12 tool
+  steps per agent, 300 s per model call, 12 notes of 300 characters, 8 rounds,
+  at most 3 delegations per round. The library has no opinion on any of them.
 - Token and cost dimensions are only enforced when the backend reports them:
   Ollama reports counts, OpenCode reports none, and nothing invents a price
   table.

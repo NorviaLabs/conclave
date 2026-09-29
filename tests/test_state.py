@@ -6,7 +6,10 @@ import json
 
 import pytest
 
-from conftest import CannedProvider
+from conftest import (
+    CannedProvider,
+    make_budget,
+)
 
 from conclave import RunBudget
 from conclave.protocol import complete_json
@@ -62,7 +65,7 @@ def render():
 
 @pytest.fixture
 def budget():
-    return RunBudget()
+    return make_budget()
 
 
 def output(render) -> str:
@@ -520,7 +523,10 @@ def test_delegation_budget_reports_each_agent(budget):
     )
 
     budget.used = 1
-    budget.per_agent = {"repo-researcher": 1}
+
+    budget.per_agent = {
+        "repo-researcher": 1
+    }
 
     text = delegation_budget(budget)
 
@@ -537,7 +543,9 @@ def test_delegation_budget_names_an_exhausted_agent(
         delegation_budget,
     )
 
-    budget.per_agent = {"repo-researcher": 4}
+    budget.per_agent = {
+        "repo-researcher": 4
+    }
 
     assert (
         "repo-researcher: 4/4 (exhausted)"
@@ -553,7 +561,9 @@ def test_the_coordinator_is_told_the_agent_budget(
         delegation_budget,
     )
 
-    budget.per_agent = {"repo-researcher": 4}
+    budget.per_agent = {
+        "repo-researcher": 4
+    }
 
     provider = CannedProvider(
         '{"status": "done", "answer": "yes"}'

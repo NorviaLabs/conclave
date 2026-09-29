@@ -9,9 +9,15 @@ library would not be a framework.
 import asyncio
 import json
 
+from dataclasses import replace
+
 from pathlib import Path
 
-from conftest import ScriptedProvider
+from conftest import (
+    CONFIG,
+    ScriptedProvider,
+    make_budget,
+)
 
 from conclave import (
     AgentFinished,
@@ -78,7 +84,9 @@ def build_tools(
 
         return f"saved {len(text)} characters"
 
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        max_output_chars=CONFIG.max_tool_output_chars
+    )
 
     registry.register(
         Tool(
@@ -148,8 +156,9 @@ def test_a_destructive_tool_is_refused_when_nobody_approves():
     runtime = ToolAgentRuntime(
         scripted,
         build_tools(saved),
-        RunBudget(),
+        make_budget(),
         SPECS,
+        config=CONFIG,
     )
 
     events = collect(
@@ -205,8 +214,9 @@ def test_an_approved_tool_runs_and_reports_its_approval():
     runtime = ToolAgentRuntime(
         provider(),
         build_tools(saved),
-        RunBudget(),
+        make_budget(),
         SPECS,
+        config=CONFIG,
         approver=approve_all,
     )
 
@@ -243,8 +253,9 @@ def test_a_tool_message_keeps_the_runtime_quiet():
     runtime = ToolAgentRuntime(
         provider(),
         build_tools(saved),
-        RunBudget(),
+        make_budget(),
         SPECS,
+        config=CONFIG,
         approver=approve_all,
     )
 
@@ -266,8 +277,9 @@ def test_the_orchestrator_owns_the_store():
     writer = ToolAgentRuntime(
         provider(),
         build_tools([]),
-        RunBudget(),
+        make_budget(),
         SPECS,
+        config=CONFIG,
         approver=approve_all,
     )
 
@@ -285,8 +297,9 @@ def test_the_orchestrator_owns_the_store():
             }
         ),
         build_tools([]),
-        RunBudget(),
+        make_budget(),
         SPECS,
+        config=CONFIG,
     )
 
     async def main():
@@ -358,8 +371,9 @@ def test_fan_out_runs_several_agents_at_once():
     runtime = ToolAgentRuntime(
         provider(),
         build_tools([]),
-        RunBudget(),
+        make_budget(),
         SPECS,
+        config=CONFIG,
         approver=approve_all,
     )
 
@@ -452,15 +466,13 @@ def test_a_run_can_be_bounded_from_outside():
     runtime = ToolAgentRuntime(
         provider(),
         build_tools([]),
-        RunBudget(
+        make_budget(
             tool_calls=1,
             tokens=10,
         ),
         SPECS,
         approver=approve_all,
-        config=RunConfig(
-            max_tool_steps=3,
-        ),
+        config=replace(CONFIG, max_tool_steps=3),
     )
 
     events = collect(
@@ -506,11 +518,16 @@ def test_the_specialists_are_the_callers_choice():
                 ]
             }
         ),
-        ToolRegistry(),
-        RunBudget(),
+        ToolRegistry(
+            max_output_chars=(
+                CONFIG.max_tool_output_chars
+            )
+        ),
+        make_budget(),
         {
             "translator": translator,
         },
+        config=CONFIG,
     )
 
     events = collect(
@@ -543,9 +560,14 @@ def test_a_core_run_never_touches_this_repository():
                 ]
             }
         ),
-        ToolRegistry(),
-        RunBudget(),
+        ToolRegistry(
+            max_output_chars=(
+                CONFIG.max_tool_output_chars
+            )
+        ),
+        make_budget(),
         SPECS,
+        config=CONFIG,
     )
 
     assert Path(".").exists()
@@ -581,9 +603,14 @@ def test_the_run_envelope_surrounds_the_root_agent_only():
                 ],
             }
         ),
-        ToolRegistry(),
-        RunBudget(),
+        ToolRegistry(
+            max_output_chars=(
+                CONFIG.max_tool_output_chars
+            )
+        ),
+        make_budget(),
         SPECS,
+        config=CONFIG,
     )
 
     events = collect(

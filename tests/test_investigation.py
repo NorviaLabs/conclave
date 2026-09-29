@@ -6,14 +6,14 @@ import pytest
 
 from conftest import (
     DSML_TOOL_CALL,
+    build_tools,
     FINAL,
     ScriptedProvider,
+    make_budget,
 )
 
 from investigation import loop as investigation
-from conclave.budget import RunBudget
 from investigation import run_investigation
-from conclave.tools import build_tool_registry
 
 
 INITIAL_STATE = {
@@ -74,7 +74,7 @@ def run(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why does retry double count?",
         )
     )
@@ -125,7 +125,7 @@ def test_full_round_with_nested_delegation(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -204,7 +204,7 @@ def test_nested_refusals_are_printed(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -233,7 +233,7 @@ def test_invalid_decision_raises(
         asyncio.run(
             run_investigation(
                 provider,
-                build_tool_registry(repo),
+                build_tools(repo),
                 "why?",
             )
         )
@@ -258,7 +258,7 @@ def test_no_delegations_forces_a_final_answer(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -302,7 +302,7 @@ def test_invalid_delegations_are_filtered(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -334,8 +334,8 @@ def test_exhausted_budget_stops_the_round(
 ):
     monkeypatch.setattr(
         investigation,
-        "RunBudget",
-        lambda: RunBudget(max_delegations=0),
+        "make_budget",
+        lambda: make_budget(max_delegations=0),
     )
 
     provider = ScriptedProvider(
@@ -360,7 +360,7 @@ def test_exhausted_budget_stops_the_round(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -385,8 +385,8 @@ def test_per_agent_refusal_is_printed(
 ):
     monkeypatch.setattr(
         investigation,
-        "RunBudget",
-        lambda: RunBudget(max_per_agent=0),
+        "make_budget",
+        lambda: make_budget(max_per_agent=0),
     )
 
     provider = ScriptedProvider(
@@ -407,7 +407,7 @@ def test_per_agent_refusal_is_printed(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -455,7 +455,7 @@ def test_failing_agent_is_recorded_and_reported(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -522,7 +522,7 @@ def test_rounds_are_bounded(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -556,7 +556,7 @@ def test_unreadable_backend_does_not_abort_the_run(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why?",
         )
     )
@@ -623,7 +623,7 @@ def test_a_binary_file_in_the_repo_does_not_break_a_round(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why does retry double count?",
         )
     )
@@ -675,7 +675,7 @@ def test_an_invented_action_costs_a_step_not_the_run(
     asyncio.run(
         run_investigation(
             provider,
-            build_tool_registry(repo),
+            build_tools(repo),
             "why does retry double count?",
         )
     )

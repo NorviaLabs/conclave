@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from conftest import TIMEOUT
+
 from pathlib import Path
 
 from conclave import providers
@@ -99,6 +101,7 @@ def test_opencode_commands_and_config(monkeypatch):
     provider = OpenCodeProvider(
         Path("/tmp/repo"),
         model="fast-model",
+        timeout=TIMEOUT,
     )
 
     assert asyncio.run(
@@ -160,7 +163,9 @@ def test_opencode_without_model_flag(monkeypatch):
 
     asyncio.run(
         OpenCodeProvider(
-            Path(".")
+            Path("."),
+            model=None,
+            timeout=TIMEOUT,
         ).complete(
             [
                 {
@@ -192,7 +197,11 @@ def test_opencode_reports_stderr(monkeypatch):
         match="auth required",
     ):
         asyncio.run(
-            OpenCodeProvider(Path(".")).complete(
+            OpenCodeProvider(
+                Path("."),
+                model=None,
+                timeout=TIMEOUT,
+            ).complete(
                 [
                     {
                         "role": "user",
@@ -218,7 +227,11 @@ def test_opencode_reports_generic_failure(monkeypatch):
         match="OpenCode failed",
     ):
         asyncio.run(
-            OpenCodeProvider(Path(".")).complete(
+            OpenCodeProvider(
+                Path("."),
+                model=None,
+                timeout=TIMEOUT,
+            ).complete(
                 [
                     {
                         "role": "user",
@@ -248,6 +261,7 @@ def test_opencode_times_out_and_kills(monkeypatch):
         asyncio.run(
             OpenCodeProvider(
                 Path("."),
+                model=None,
                 timeout=0.01,
             ).complete(
                 [
@@ -291,6 +305,7 @@ def test_ollama_posts_chat_payload(monkeypatch):
 
     provider = OllamaProvider(
         model="qwen3.6",
+        timeout=TIMEOUT,
         base_url="http://127.0.0.1:11434/",
     )
 
@@ -330,9 +345,7 @@ def test_ollama_posts_chat_payload(monkeypatch):
         "stream": False,
     }
 
-    assert captured["timeout"] == (
-        providers.TIMEOUT_SECONDS
-    )
+    assert captured["timeout"] == TIMEOUT
 
 
 def test_ollama_keeps_reported_token_counts(monkeypatch):
@@ -357,7 +370,8 @@ def test_ollama_keeps_reported_token_counts(monkeypatch):
 
     answer = asyncio.run(
         providers.OllamaProvider(
-            model="qwen3.6"
+            model="qwen3.6",
+            timeout=TIMEOUT,
         ).complete([])
     )
 
@@ -400,7 +414,11 @@ def test_opencode_drops_null_bytes_from_the_prompt(
     )
 
     asyncio.run(
-        OpenCodeProvider(Path("/tmp/repo")).complete(
+        OpenCodeProvider(
+            Path("/tmp/repo"),
+            model=None,
+            timeout=TIMEOUT,
+        ).complete(
             [
                 {
                     "role": "user",

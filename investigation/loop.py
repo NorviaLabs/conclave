@@ -17,10 +17,12 @@ from conclave import (
     AgentResult,
     AgentSpec,
     Approver,
+    PrivateState,
     RunBudget,
     RunConfig,
     ToolAgentRuntime,
     ToolRegistry,
+    as_list,
     fan_out,
 )
 
@@ -28,6 +30,7 @@ from .agents import AGENTS
 from .config import (
     MAX_ROUNDS,
     RUN_CONFIG,
+    make_budget,
 )
 from .render import Renderer
 from .state import (
@@ -54,7 +57,7 @@ async def run_investigation(
     budget = (
         budget
         if budget is not None
-        else RunBudget()
+        else make_budget()
     )
 
     render = (
@@ -325,7 +328,10 @@ async def run_delegation(
 
     except Exception as exc:
         result = AgentResult(
-            content=f"Agent failed: {exc}"
+            content=f"Agent failed: {exc}",
+            private=PrivateState(
+                runtime.config
+            ),
         )
 
         status = "failed"
@@ -360,8 +366,12 @@ async def run_delegation(
         ),
         "status": status,
         "result": result.content,
-        "findings": result.findings,
-        "open_leads": result.open_leads,
+        "findings": as_list(
+            result.data.get("findings")
+        ),
+        "open_leads": as_list(
+            result.data.get("open_leads")
+        ),
         "checked": result.private.checked,
         "nested_delegations": [
             {

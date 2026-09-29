@@ -9,7 +9,6 @@ from typing import (
     Any,
     Awaitable,
     Callable,
-    TypedDict,
 )
 
 
@@ -20,14 +19,6 @@ class Capability(StrEnum):
     WRITE = "write"
     NETWORK = "network"
     SHELL = "shell"
-
-
-class Finding(TypedDict, total=False):
-    """One claim with its provenance, as agents hand it back."""
-
-    claim: str
-    provenance: str
-    confidence: float
 
 
 ToolFunc = Callable[

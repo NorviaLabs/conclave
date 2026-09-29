@@ -36,11 +36,7 @@ from .approval import (
     request_approval,
 )
 from .budget import RunBudget
-from .config import (
-    DEFAULT_CONFIG,
-    FAN_OUT_LIMIT,
-    RunConfig,
-)
+from .config import RunConfig
 from .events import (
     AgentFinished,
     AgentStarted,
@@ -78,9 +74,14 @@ async def fan_out(
     items: Iterable[T],
     worker: Callable[[T], Awaitable[R]],
     *,
-    limit: int = FAN_OUT_LIMIT,
+    limit: int,
 ) -> list[R]:
-    """Run one worker per item, at most `limit` of them at a time."""
+    """Run one worker per item, at most `limit` of them at a time.
+
+    The limit is required: "how many at once" is a decision about your
+    system, and an unbounded default would be a footgun dressed as
+    convenience.
+    """
 
     semaphore = asyncio.Semaphore(max(1, limit))
 
@@ -124,7 +125,7 @@ class ToolAgentRuntime:
         ]
         | None = None,
         *,
-        config: RunConfig = DEFAULT_CONFIG,
+        config: RunConfig,
         approver: Approver | None = None,
     ):
         self.provider = provider
@@ -298,17 +299,16 @@ class ToolAgentRuntime:
                             "",
                         )
                     ).strip(),
-                    findings=as_list(
-                        action.get(
-                            "findings"
-                        )
-                    ),
-                    open_leads=as_list(
-                        action.get(
-                            "open_leads"
-                        )
-                    ),
                     private=private,
+                    data={
+                        key: value
+                        for key, value in action.items()
+                        if key
+                        not in {
+                            "type",
+                            "content",
+                        }
+                    },
                     nested=nested,
                 )
 
@@ -751,19 +751,16 @@ class ToolAgentRuntime:
             return
 
         record["status"] = "completed"
-
-        record["findings"] = child_result.findings
-        record["open_leads"] = child_result.open_leads
+        record["content"] = child_result.content
+        record["data"] = child_result.data
 
         plan.descendants = child_result.nested
 
         record["observation"] = (
             f"{target} reported:\n"
-            f"{child_result.content[:self.config.max_delegation_report_chars]}"
-            "\n\nFindings:\n"
-            f"{json.dumps(child_result.findings, ensure_ascii=False)}"
-            "\n\nOpen leads:\n"
-            f"{json.dumps(child_result.open_leads, ensure_ascii=False)}"
+            f"{child_result.content[:self.config.max_tool_output_chars]}"
+            "\n\nStructured result:\n"
+            f"{json.dumps(child_result.data, ensure_ascii=False)}"
         )
 
     def refuse(
@@ -985,16 +982,13 @@ When finished:
 
 {{
   "type": "final",
-  "content": "your evidence-driven findings",
-  "findings": [
-    {{
-      "claim": "...",
-      "provenance": "path, commit, issue, PR or URL",
-      "confidence": 0.7
-    }}
-  ],
-  "open_leads": ["what you could not resolve"]
+  "content": "the answer, in prose"
 }}
+
+Your instructions may name extra fields to add to that
+object. The runtime returns them to the caller exactly as
+you wrote them, so use the names and shapes you were
+given and no others.
 
 Your private scratchpad:
 
@@ -1007,11 +1001,8 @@ Available tools:
 Rules:
 
 - Use only listed tools.
-- Gather evidence rather than guessing.
-- Include provenance in the final result:
-  file paths, commits, issues, PRs, URLs, etc.
-- Return findings and open_leads as lists,
-  empty when there are none.
+- Follow the fields your instructions specify for the
+  final action.
 - Do not invent tool results.
 - {JSON_ONLY_RULE}
 """.strip()

@@ -3,13 +3,13 @@ execution with output truncation.
 
 The registry knows nothing about agents, models or budgets. It stores tools,
 tells a caller what a given set of tools looks like, and runs one.
+
+The output cap is required: how much text a tool may put into a prompt is a
+decision about the system, not something a library should pick.
 """
 
 from typing import Any
 
-from .config import (
-    MAX_TOOL_OUTPUT_CHARS,
-)
 from .spec import (
     Capability,
     Tool,
@@ -27,9 +27,7 @@ TRUNCATION_MARKER = "\n...[truncated]"
 class ToolRegistry:
     def __init__(
         self,
-        max_output_chars: int = (
-            MAX_TOOL_OUTPUT_CHARS
-        ),
+        max_output_chars: int,
     ):
         self.tools: dict[str, Tool] = {}
 

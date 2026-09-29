@@ -22,6 +22,11 @@ from conclave import (
 )
 from conclave.tools import build_tool_registry
 
+from .config import (
+    RUN_CONFIG,
+    TIMEOUT_SECONDS,
+    make_budget as app_budget,
+)
 from .loop import run_investigation
 from .render import Renderer
 
@@ -126,6 +131,7 @@ def make_provider(
         return OpenCodeProvider(
             repo,
             model=args.model,
+            timeout=TIMEOUT_SECONDS,
         )
 
     return OllamaProvider(
@@ -133,6 +139,7 @@ def make_provider(
             args.model
             or DEFAULT_OLLAMA_MODEL
         ),
+        timeout=TIMEOUT_SECONDS,
         base_url=args.ollama_url,
     )
 
@@ -140,9 +147,9 @@ def make_provider(
 def make_budget(
     args: argparse.Namespace,
 ) -> RunBudget:
-    """Only the limits the caller actually set are enforced."""
+    """The app's delegation shape, with only the flags that were set."""
 
-    return RunBudget(
+    return app_budget(
         tool_calls=args.max_tool_calls,
         wall_clock_seconds=args.max_seconds,
         tokens=args.max_tokens,
@@ -200,7 +207,12 @@ async def main() -> None:
 
     await run_investigation(
         provider,
-        build_tool_registry(repo),
+        build_tool_registry(
+            repo,
+            max_output_chars=(
+                RUN_CONFIG.max_tool_output_chars
+            ),
+        ),
         question,
         budget=budget,
         approver=make_approver(args),

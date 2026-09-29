@@ -1,37 +1,29 @@
-"""Tunable limits for a run, and the defaults they fall back to.
+"""How a caller sizes a run.
 
-The module constants are the defaults; `RunConfig` is how a caller changes
-them for one run without editing the library.
+There are no numbers in this module. Every limit is one somebody chose:
+the core refuses to guess how many agents a system has, how much text is
+too much to put in a prompt, or how wide a fan-out may be, because a
+default silently answers a question only the caller can answer.
+
+A caller who wants a first run in one line still gets one — it just lives
+in their code, where it can be read by whoever wonders why 15.
 """
 
 from dataclasses import dataclass
 
-MAX_DELEGATIONS = 15
-MAX_DELEGATIONS_PER_AGENT = 4
-MAX_DEPTH = 2
-MAX_TOOL_STEPS = 8
-TIMEOUT_SECONDS = 300
-MAX_TOOL_OUTPUT_CHARS = 20_000
-MAX_NOTES = 12
-MAX_NOTE_CHARS = 300
-FAN_OUT_LIMIT = 4
-
 
 @dataclass(frozen=True)
 class RunConfig:
-    max_tool_steps: int = MAX_TOOL_STEPS
-    max_notes: int = MAX_NOTES
-    max_note_chars: int = MAX_NOTE_CHARS
+    """Every limit one run needs, supplied by the caller.
 
-    # How much of a delegated agent's report is handed back to the agent
-    # that asked for it. Truncation of *tool* output belongs to the tool
-    # registry, which owns `MAX_TOOL_OUTPUT_CHARS`.
-    max_delegation_report_chars: int = (
-        MAX_TOOL_OUTPUT_CHARS
-    )
+    `max_tool_steps` bounds the loop: an agent that has not finished by
+    then is told it ran out of steps and hands back what it has.
+    `max_tool_output_chars` bounds any text that goes into a prompt, from
+    a tool or from a delegated agent's report.
+    """
 
-    timeout_seconds: float = TIMEOUT_SECONDS
-    fan_out_limit: int = FAN_OUT_LIMIT
-
-
-DEFAULT_CONFIG = RunConfig()
+    max_tool_steps: int
+    max_notes: int
+    max_note_chars: int
+    max_tool_output_chars: int
+    fan_out_limit: int

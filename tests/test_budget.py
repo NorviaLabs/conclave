@@ -2,36 +2,44 @@
 
 import pytest
 
-from conclave import config
+from conftest import make_budget
+
 from conclave.budget import (
     DIMENSION_LABELS,
     RunBudget,
 )
 
 
-def test_defaults_follow_config():
-    budget = RunBudget()
+def test_the_caps_are_whatever_the_caller_said():
+    """There is nothing to inherit: a budget is only what it was told."""
 
-    assert budget.max_delegations == (
-        config.MAX_DELEGATIONS
+    budget = make_budget(
+        max_delegations=7,
+        max_per_agent=2,
+        max_depth=3,
     )
 
-    assert budget.max_per_agent == (
-        config.MAX_DELEGATIONS_PER_AGENT
-    )
-
-    assert budget.max_depth == config.MAX_DEPTH
+    assert budget.max_delegations == 7
+    assert budget.max_per_agent == 2
+    assert budget.max_depth == 3
 
     assert budget.used == 0
     assert budget.per_agent == {}
+    assert budget.remaining == 7
 
-    assert budget.remaining == (
-        config.MAX_DELEGATIONS
-    )
+
+def test_a_budget_without_caps_is_a_type_error():
+    """No silent shape: the caller must say how big the system is."""
+
+    with pytest.raises(TypeError):
+        RunBudget()
+
+    with pytest.raises(TypeError):
+        RunBudget(max_delegations=1)
 
 
 def test_reserve_charges_once():
-    budget = RunBudget(
+    budget = make_budget(
         max_delegations=3
     )
 
@@ -63,7 +71,7 @@ def test_reserve_charges_once():
 
 
 def test_may_delegate_only_below_max_depth():
-    budget = RunBudget(
+    budget = make_budget(
         max_depth=2
     )
 
@@ -72,7 +80,7 @@ def test_may_delegate_only_below_max_depth():
 
 
 def test_depth_guard_refuses_without_charging():
-    budget = RunBudget(
+    budget = make_budget(
         max_depth=2
     )
 
@@ -88,7 +96,7 @@ def test_depth_guard_refuses_without_charging():
 
 
 def test_cycle_guard_names_the_ancestry():
-    budget = RunBudget()
+    budget = make_budget()
 
     refusal = budget.reserve(
         "repo-researcher",
@@ -110,7 +118,7 @@ def test_cycle_guard_names_the_ancestry():
 
 
 def test_total_guard():
-    budget = RunBudget(
+    budget = make_budget(
         max_delegations=1,
         max_per_agent=10,
     )
@@ -135,7 +143,7 @@ def test_total_guard():
 
 
 def test_per_agent_guard():
-    budget = RunBudget(
+    budget = make_budget(
         max_delegations=10,
         max_per_agent=2,
     )
@@ -162,7 +170,7 @@ def test_per_agent_guard():
 
 
 def test_empty_budget_cannot_go_negative():
-    budget = RunBudget(
+    budget = make_budget(
         max_delegations=0
     )
 
@@ -194,7 +202,7 @@ def test_dimensions_are_labelled_for_humans():
 
 
 def test_an_unknown_dimension_is_a_bug_not_a_budget():
-    budget = RunBudget()
+    budget = make_budget()
 
     with pytest.raises(
         ValueError,
@@ -210,7 +218,7 @@ def test_an_unknown_dimension_is_a_bug_not_a_budget():
 
 
 def test_an_unset_dimension_is_unbounded():
-    budget = RunBudget()
+    budget = make_budget()
 
     assert budget.limit("tokens") is None
     assert budget.remaining_on("tokens") is None
@@ -221,7 +229,7 @@ def test_an_unset_dimension_is_unbounded():
 
 
 def test_a_set_dimension_reports_what_is_left():
-    budget = RunBudget(tool_calls=3)
+    budget = make_budget(tool_calls=3)
 
     assert budget.limit("tool_calls") == 3
     assert budget.remaining_on("tool_calls") == 3
@@ -232,7 +240,7 @@ def test_a_set_dimension_reports_what_is_left():
 
 
 def test_remaining_never_goes_negative():
-    budget = RunBudget(cost_usd=1.0)
+    budget = make_budget(cost_usd=1.0)
 
     budget.settle("cost_usd", 5.0)
 
@@ -240,7 +248,7 @@ def test_remaining_never_goes_negative():
 
 
 def test_reserve_dimension_refuses_once_the_limit_is_reached():
-    budget = RunBudget(tool_calls=1)
+    budget = make_budget(tool_calls=1)
 
     assert budget.reserve_dimension("tool_calls") is None
 
@@ -255,7 +263,7 @@ def test_reserve_dimension_refuses_once_the_limit_is_reached():
 
 
 def test_settle_reports_an_overspend():
-    budget = RunBudget(tokens=10)
+    budget = make_budget(tokens=10)
 
     assert budget.settle("tokens", 4) is None
     assert not budget.exceeded("tokens")
@@ -268,7 +276,7 @@ def test_settle_reports_an_overspend():
 
 
 def test_settle_ignores_unmeasurable_work():
-    budget = RunBudget(tokens=10)
+    budget = make_budget(tokens=10)
 
     assert budget.settle("tokens", None) is None
     assert budget.settle("tokens", 0) is None
@@ -276,7 +284,7 @@ def test_settle_ignores_unmeasurable_work():
 
 
 def test_an_unbounded_dimension_can_never_be_exceeded():
-    budget = RunBudget()
+    budget = make_budget()
 
     budget.settle("wall_clock_seconds", 10_000)
 
