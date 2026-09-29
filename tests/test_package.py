@@ -178,6 +178,12 @@ def test_the_library_contains_no_investigation_domain():
         "hypothes",
         "investigation",
         "roadmap",
+        # This app's cast and its currency. A prompt or a refusal that
+        # names them is the core assuming which system it is running.
+        "coordinator",
+        "evidence",
+        "researcher",
+        "specialist",
     )
 
     for path in core.rglob("*.py"):

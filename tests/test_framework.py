@@ -499,7 +499,7 @@ def test_a_run_can_be_bounded_from_outside():
     assert runtime.budget.spent_on("tokens") == 0
 
 
-def test_the_specialists_are_the_callers_choice():
+def test_the_agents_are_the_callers_choice():
     """A different catalog is a different system; nothing else changes."""
 
     translator = AgentSpec(

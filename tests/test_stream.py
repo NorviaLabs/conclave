@@ -304,7 +304,7 @@ def test_a_refused_delegation_is_reported(runtime):
     assert len(delegations) == 1
     assert delegations[0].status == "refused"
     assert delegations[0].reason.startswith(
-        "Unknown specialist"
+        "Unknown agent"
     )
 
 
@@ -893,6 +893,6 @@ def test_a_run_without_a_catalog_cannot_delegate(runtime):
     ]
 
     assert delegations[0].status == "refused"
-    assert "Unknown specialist" in (
+    assert "Unknown agent" in (
         delegations[0].reason
     )

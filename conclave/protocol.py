@@ -191,7 +191,7 @@ class PrivateState:
 
     Notes and the checked ledger stay with the
     agent that made them. Only the final handoff
-    crosses back to the coordinator.
+    crosses back to the caller.
 
     The scratchpad bounds come from the run's config: how much an agent
     may jot down is a limit somebody chose.

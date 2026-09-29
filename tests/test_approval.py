@@ -188,4 +188,4 @@ def test_refusal_text_tells_the_model_to_stop():
 
     assert "save_report" in text
     assert "Do not repeat this call" in text
-    assert "evidence" in text
+    assert "what you already have" in text

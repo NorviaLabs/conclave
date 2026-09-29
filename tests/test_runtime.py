@@ -655,7 +655,7 @@ def test_run_nests_and_propagates_handoff(runtime):
     )
 
 
-def test_run_refuses_unknown_specialist(runtime):
+def test_run_refuses_unknown_agent(runtime):
     provider = ScriptedProvider(
         {
             "repo-researcher": [
@@ -680,14 +680,14 @@ def test_run_refuses_unknown_specialist(runtime):
 
     assert result.nested[0]["status"] == "refused"
 
-    assert "Unknown specialist" in (
+    assert "Unknown agent" in (
         result.nested[0]["reason"]
     )
 
     assert budget.used == 0
 
 
-def test_run_refuses_non_string_specialist(runtime):
+def test_run_refuses_non_string_agent(runtime):
     provider = ScriptedProvider(
         {
             "repo-researcher": [
@@ -911,7 +911,7 @@ def test_run_advertises_delegation_only_below_max_depth(runtime):
     assert '"type": "delegate"' in shallow
     assert '"type": "delegate"' not in deep
     assert "You are at depth 2 of" in deep
-    assert "Available specialists" in shallow
+    assert "Available agents" in shallow
 
 
 def test_run_prompt_lists_only_allowed_tools(runtime):

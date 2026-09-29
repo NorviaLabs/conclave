@@ -3,7 +3,7 @@
 Destructive calls need an approver. There is no approver by default, so the
 default answer for a destructive call is *no*, and the refusal is handed back
 to the model as text — the same shape as a budget refusal — so an agent
-finalises on the evidence it has instead of crashing.
+finalises on what it has instead of crashing.
 
 Non-destructive calls are approved without asking. They still emit their
 capabilities on the event stream, so an automatic approval is never silent.
@@ -133,6 +133,6 @@ def refusal_text(tool: str) -> str:
     return (
         f"Refused: {tool} changes the world and "
         "no approver allowed it. Do not repeat "
-        "this call. Continue with the evidence "
-        "you already have."
+        "this call. Continue with what you "
+        "already have."
     )

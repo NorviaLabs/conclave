@@ -26,7 +26,7 @@ pulls a network dependency or shells out to anything.
         provider, tools, budget, agents, config=config
     )
 
-    async for event in runtime.stream(AGENTS["researcher"], task):
+    async for event in runtime.stream(AGENTS["writer"], task):
         print(event)
 """
 

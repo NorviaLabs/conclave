@@ -1,7 +1,7 @@
 """Run-scoped work budgets and the guards that bound recursion.
 
 Every delegation, top-level or nested, is reserved here before it runs.
-Refusals are returned as text so a caller can finalize on partial evidence
+Refusals are returned as text so a caller can finalize on partial results
 instead of crashing, and one shared accounting object is the only thing
 that decides whether more work is still affordable.
 

@@ -574,8 +574,8 @@ class ToolAgentRuntime:
         return AgentResult(
             content=(
                 f"{label} budget exhausted "
-                "before the specialist "
-                "produced a final answer."
+                "before the agent produced "
+                "a final answer."
             ),
             private=private,
             nested=nested,
@@ -656,7 +656,7 @@ class ToolAgentRuntime:
         ):
             return self.refuse(
                 record,
-                f"Unknown specialist: {target}",
+                f"Unknown agent: {target}",
             )
 
         if not task:
@@ -773,8 +773,8 @@ class ToolAgentRuntime:
         record["observation"] = (
             f"{reason}\n\n"
             "Do not repeat this delegation. "
-            "Continue with the evidence you "
-            "already have. Return only the "
+            "Continue with what you already "
+            "have. Return only the "
             "next JSON action."
         )
 
@@ -830,8 +830,8 @@ class ToolAgentRuntime:
                     tool.capabilities
                 ),
                 observation=(
-                    f"{refusal} Continue with the "
-                    "evidence you already have. "
+                    f"{refusal} Continue with "
+                    "what you already have. "
                     "Return only the next JSON "
                     "action."
                 ),
@@ -937,12 +937,12 @@ Delegation rules:
 - Delegations are limited and counted
   against the whole run.
 - The task must be self-contained: the other
-  specialist sees only your task text, not
+  agent sees only your task text, not
   your notes, your transcript or the shared
   state.
 - Never delegate work you already did.
 - You stay responsible for the final answer.
-- Available specialists:
+- Available agents:
   {", ".join(sorted(self.agents))}.
 """
 
@@ -976,7 +976,7 @@ To record a private note:
 }}
 
 Notes are private to you. They are never shared
-with the coordinator or with other specialists.
+with any other agent.
 {delegation}
 When finished:
 
