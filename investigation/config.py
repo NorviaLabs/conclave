@@ -14,9 +14,9 @@ from conclave import (
 
 # Rounds: this application's own control flow.
 
-MAX_ROUNDS = 8
+MAX_ROUNDS = None
 
-MAX_DELEGATIONS_PER_ROUND = 3
+MAX_DELEGATIONS_PER_ROUND = None
 
 
 # What one run may spend on tool output, notes and steps. Twelve steps is
@@ -25,10 +25,10 @@ MAX_DELEGATIONS_PER_ROUND = 3
 # exhaust the step budget before they could answer.
 
 RUN_CONFIG = RunConfig(
-    max_tool_steps=12,
-    max_notes=12,
-    max_note_chars=300,
-    max_tool_output_chars=20_000,
+    max_tool_steps=None,
+    max_notes=None,
+    max_note_chars=None,
+    max_tool_output_chars=None,
     fan_out_limit=MAX_DELEGATIONS_PER_ROUND,
 )
 
@@ -47,9 +47,9 @@ def make_budget(**overrides) -> RunBudget:
 
     return RunBudget(
         **{
-            "max_delegations": 15,
-            "max_per_agent": 4,
-            "max_depth": 2,
+            "max_delegations": None,
+            "max_per_agent": None,
+            "max_depth": None,
             **overrides,
         }
     )

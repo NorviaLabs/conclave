@@ -104,10 +104,8 @@ async def run_investigation(
         tuple[str, str]
     ] = set()
 
-    for round_number in range(
-        1,
-        max_rounds + 1,
-    ):
+    round_number = 1
+    while max_rounds is None or round_number <= max_rounds:
         render.round_header(
             round_number
         )
@@ -161,10 +159,10 @@ async def run_investigation(
             "delegations",
             [],
         ):
-            if len(valid) >= max_delegations_per_round:
+            if max_delegations_per_round is not None and len(valid) >= max_delegations_per_round:
                 break
 
-            if budget.remaining == 0:
+            if budget.max_delegations is not None and budget.remaining == 0:
                 render.skipped(
                     "delegation budget exhausted"
                 )
@@ -252,6 +250,7 @@ async def run_investigation(
         state = store.snapshot()
 
         render.state_summary(state)
+        round_number += 1
 
     render.write(
         "\n[investigation budget exhausted -> final]\n"

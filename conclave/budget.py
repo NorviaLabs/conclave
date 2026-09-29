@@ -35,9 +35,9 @@ DIMENSION_LABELS = {
 
 @dataclass
 class RunBudget:
-    max_delegations: int
-    max_per_agent: int
-    max_depth: int
+    max_delegations: int | None
+    max_per_agent: int | None
+    max_depth: int | None
 
     tool_calls: int | None = None
     wall_clock_seconds: float | None = None
@@ -64,17 +64,14 @@ class RunBudget:
     def remaining(
         self,
     ) -> int:
-        return max(
-            0,
-            self.max_delegations
-            - self.used,
-        )
+        return (max(0, self.max_delegations - self.used)
+                if self.max_delegations is not None else 0)
 
     def may_delegate(
         self,
         depth: int,
     ) -> bool:
-        return depth < self.max_depth
+        return self.max_depth is None or depth < self.max_depth
 
     def reserve(
         self,
@@ -84,7 +81,7 @@ class RunBudget:
     ) -> str | None:
         """Charge one delegation, or explain why it is refused."""
 
-        if depth > self.max_depth:
+        if self.max_depth is not None and depth > self.max_depth:
             return (
                 "Refused: "
                 f"{agent} would run at depth "
@@ -103,10 +100,7 @@ class RunBudget:
                 + "."
             )
 
-        if (
-            self.used
-            >= self.max_delegations
-        ):
+        if self.max_delegations is not None and self.used >= self.max_delegations:
             return (
                 "Refused: this run "
                 f"already used {self.used}/"
@@ -121,10 +115,7 @@ class RunBudget:
             )
         )
 
-        if (
-            used_by_agent
-            >= self.max_per_agent
-        ):
+        if self.max_per_agent is not None and used_by_agent >= self.max_per_agent:
             return (
                 f"Refused: {agent} already "
                 f"ran {used_by_agent}/"

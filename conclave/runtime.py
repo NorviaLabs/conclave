@@ -223,9 +223,8 @@ class ToolAgentRuntime:
 
         last_check = started
 
-        for step in range(
-            self.config.max_tool_steps
-        ):
+        step = 0
+        while self.config.max_tool_steps is None or step < self.config.max_tool_steps:
             messages[0][
                 "content"
             ] = self.system_prompt(
@@ -290,6 +289,8 @@ class ToolAgentRuntime:
                     else None
                 ),
             )
+
+            step += 1
 
             if kind == "final":
                 result = AgentResult(
@@ -758,7 +759,7 @@ class ToolAgentRuntime:
 
         record["observation"] = (
             f"{target} reported:\n"
-            f"{child_result.content[:self.config.max_tool_output_chars]}"
+            f"{child_result.content if self.config.max_tool_output_chars is None else child_result.content[:self.config.max_tool_output_chars]}"
             "\n\nStructured result:\n"
             f"{json.dumps(child_result.data, ensure_ascii=False)}"
         )

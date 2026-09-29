@@ -220,10 +220,7 @@ class PrivateState:
                 "Note ignored: it was empty."
             )
 
-        if (
-            len(self.notes)
-            >= self.config.max_notes
-        ):
+        if self.config.max_notes is not None and len(self.notes) >= self.config.max_notes:
             return (
                 "Note refused: the private "
                 "scratchpad is full "
@@ -232,9 +229,7 @@ class PrivateState:
                 "Continue without it."
             )
 
-        self.notes.append(
-            text[:self.config.max_note_chars]
-        )
+        self.notes.append(text if self.config.max_note_chars is None else text[:self.config.max_note_chars])
 
         return (
             f"Note {len(self.notes)}/"
@@ -247,12 +242,11 @@ class PrivateState:
         summary: str,
     ) -> None:
         self.checked.append(
-            summary[:self.config.max_note_chars]
+            summary if self.config.max_note_chars is None else summary[:self.config.max_note_chars]
         )
 
-        del self.checked[
-            :-self.config.max_notes
-        ]
+        if self.config.max_notes is not None:
+            del self.checked[:-self.config.max_notes]
 
     def render(
         self,

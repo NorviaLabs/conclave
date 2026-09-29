@@ -22,8 +22,8 @@ class RunConfig:
     a tool or from a delegated agent's report.
     """
 
-    max_tool_steps: int
-    max_notes: int
-    max_note_chars: int
-    max_tool_output_chars: int
-    fan_out_limit: int
+    max_tool_steps: int | None
+    max_notes: int | None
+    max_note_chars: int | None
+    max_tool_output_chars: int | None
+    fan_out_limit: int | None
