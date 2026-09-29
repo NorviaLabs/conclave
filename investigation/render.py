@@ -57,6 +57,7 @@ class Renderer:
         question: str,
         repo: Any,
         provider: str,
+        model: str | None = None,
     ) -> None:
         self.write(
             f"QUESTION\n{question}\n"
@@ -68,6 +69,10 @@ class Renderer:
 
         self.write(
             f"MODEL PROVIDER\n{provider}\n"
+        )
+
+        self.write(
+            f"MODEL\n{model or 'provider default'}\n"
         )
 
     def round_header(

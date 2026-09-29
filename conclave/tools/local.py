@@ -76,6 +76,10 @@ class LocalTools:
         path: str = ".",
         max_entries: int = 200,
     ) -> str:
+        # Models occasionally emit JSON null for optional arguments. Treat it
+        # like an omitted argument so the tool's declared default still wins.
+        if max_entries is None:
+            max_entries = 200
         root = self._safe_path(path)
 
         if not root.exists():
@@ -132,6 +136,10 @@ class LocalTools:
         start_line: int = 1,
         end_line: int = 250,
     ) -> str:
+        if start_line is None:
+            start_line = 1
+        if end_line is None:
+            end_line = 250
         file_path = self._safe_path(
             path
         )
@@ -180,6 +188,8 @@ class LocalTools:
         path: str = ".",
         max_results: int = 50,
     ) -> str:
+        if max_results is None:
+            max_results = 50
         root = self._safe_path(path)
 
         pattern = re.compile(
@@ -318,6 +328,8 @@ class LocalTools:
         path: str = ".",
         max_count: int = 20,
     ) -> str:
+        if max_count is None:
+            max_count = 20
         safe = self._safe_path(
             path
         )
@@ -514,6 +526,8 @@ class LocalTools:
         query: str,
         max_results: int = 5,
     ) -> str:
+        if max_results is None:
+            max_results = 5
         try:
             from ddgs import DDGS
 

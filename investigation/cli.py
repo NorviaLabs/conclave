@@ -289,6 +289,7 @@ async def main() -> None:
         question,
         repo,
         args.provider,
+        getattr(provider, "model", None),
     )
 
     render.budget_plan(budget)

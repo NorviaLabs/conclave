@@ -113,6 +113,7 @@ def test_header():
     assert "QUESTION\nwhy?" in printed
     assert "WORKSPACE\n/repo" in printed
     assert "MODEL PROVIDER\nollama" in printed
+    assert "MODEL\nprovider default" in printed
 
 
 def test_store_changed():
