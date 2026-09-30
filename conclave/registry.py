@@ -27,7 +27,7 @@ TRUNCATION_MARKER = "\n...[truncated]"
 class ToolRegistry:
     def __init__(
         self,
-        max_output_chars: int,
+        max_output_chars: int | None,
     ):
         self.tools: dict[str, Tool] = {}
 
@@ -91,8 +91,8 @@ class ToolRegistry:
         ].func(**arguments)
 
         if (
-            len(result)
-            > self.max_output_chars
+            self.max_output_chars is not None
+            and len(result) > self.max_output_chars
         ):
             result = (
                 result[

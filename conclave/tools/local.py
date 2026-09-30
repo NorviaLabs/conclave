@@ -432,7 +432,6 @@ class LocalTools:
                 "issue",
                 "view",
                 str(number),
-                "--comments",
                 "--json",
                 (
                     "number,title,state,"
@@ -452,7 +451,6 @@ class LocalTools:
                 "pr",
                 "view",
                 str(number),
-                "--comments",
                 "--json",
                 (
                     "number,title,state,"

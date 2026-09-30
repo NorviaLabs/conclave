@@ -142,6 +142,18 @@ def test_execute_passes_arguments():
     }
 
 
+def test_execute_with_unlimited_output():
+    registry = ToolRegistry(max_output_chars=None)
+    text = "x" * 40_000
+
+    async def big() -> str:
+        return text
+
+    registry.register(Tool("big", "d", {}, big))
+
+    assert asyncio.run(registry.execute("big", {})) == text
+
+
 def test_execute_truncates_long_output():
     registry = ToolRegistry(
         max_output_chars=CONFIG.max_tool_output_chars
