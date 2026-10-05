@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101514">
+  <title>Conclave · Application Studio</title>
+  <meta name="description" content="Build private agentic applications with complete starter teams, tool and output catalogues, and visual work plans.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23101514'/%3E%3Cpath d='M23 9L16 5 8 10v12l8 5 7-4M8 10l8 5 7-4M16 15v12' fill='none' stroke='%239de8c1' stroke-width='2.5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/studio.css">
+  <script type="module" src="/studio.js"></script>
+</head>
+<body>
+  <div id="app"><main class="loading"><h1>Conclave</h1><p>Loading your applications…</p></main></div>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <dialog id="record-dialog" aria-labelledby="detail-title"><button id="close-detail" class="icon-button" aria-label="Close details">×</button><div id="record-detail"></div></dialog>
+  <dialog id="editor-dialog" aria-labelledby="editor-title"><button id="close-editor" class="icon-button" aria-label="Close setup">×</button><form id="editor-form"><div id="editor-content"></div></form></dialog>
+  <dialog id="catalogue-dialog" aria-labelledby="catalogue-title"><button id="close-catalogue" class="icon-button" aria-label="Close catalogue">×</button><div id="catalogue-content"></div></dialog>
+</body>
+</html>
