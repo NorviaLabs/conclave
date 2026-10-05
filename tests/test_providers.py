@@ -169,13 +169,15 @@ def test_codex_timeout_reaps_process(monkeypatch):
     assert process.calls == 2
 
 
-def test_codex_cancellation_reaps_process(monkeypatch):
+@pytest.mark.parametrize("backend", ["codex", "opencode"])
+def test_cli_cancellation_reaps_process(monkeypatch, backend):
     process = FakeProcess(hang=True)
     async def fake_exec(*command, **kwargs):
         return process
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     async def cancel_call():
-        task = asyncio.create_task(CodexProvider(None, TIMEOUT).complete([]))
+        provider = CodexProvider(None, TIMEOUT) if backend == "codex" else OpenCodeProvider(Path("."), None, TIMEOUT)
+        task = asyncio.create_task(provider.complete([]))
         await asyncio.sleep(0.01)
         task.cancel()
         await task

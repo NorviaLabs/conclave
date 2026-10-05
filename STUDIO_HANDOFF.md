@@ -36,7 +36,8 @@ existing SQL migrations to a local SQLite database and serves the existing UI.
 Saved applications and member templates persist in studio/.studio-local/;
 that directory is ignored by Git. Restart the command after source changes.
 It uses the D1 methods the current Worker needs, not a complete D1 emulator.
-It makes no model calls or external tool calls.
+Without `STUDIO_PROVIDER`, it remains a sample preview. Explicitly configuring a
+provider enables local AI runs; see studio/README.md for source access and setup.
 
 For core development, return to the repository root and follow AGENTS.md:
 
@@ -47,10 +48,16 @@ uv run investigation --help
 
 ## Current boundary
 
-The browser runs deterministic fictional samples. The Python adapter can execute
-a definition using a host-provided provider and ToolRegistry, including human
-callbacks, but there is no live browser-to-runtime bridge or durable resume
-service. Connector catalog selections are metadata, not connected accounts.
+The browser retains deterministic fictional samples. The local preview now has
+a Node/Python bridge for starting saved applications, persisted progress/results,
+cancellation, human review and resume. Provider and source access are configured
+on the host. `studio/runtime/runs.py` validates versioned run requests and
+persists pinned definitions, request values and sanitized events in local SQLite.
+Request values reach AI steps and human review. Human contributions and reviewer
+identity persist, and waiting runs resume without repeating completed stages or
+resetting budgets. Interrupted agent/external-action recovery remains unsupported.
+The existing hosted Site has no Python bridge attached. Connector catalog
+selections are metadata, not connected accounts.
 The core runtime is provider-agnostic and should stay domain-neutral.
 
 ## Saved applications and hosting

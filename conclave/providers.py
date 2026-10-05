@@ -147,13 +147,14 @@ class OpenCodeProvider(ModelProvider):
                 timeout=self.timeout,
             )
 
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             process.kill()
             await process.communicate()
-
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RuntimeError(
                 "OpenCode model call timed out"
-            )
+            ) from exc
 
         if process.returncode != 0:
             raise RuntimeError(

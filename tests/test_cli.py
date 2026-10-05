@@ -436,7 +436,8 @@ def test_cli_passes_all_application_overrides(monkeypatch, captured_run, repo):
     # A subsequent run gets the original defaults, not the last run's overrides.
     defaults = cli.parse_args([])
     assert cli.make_run_config(defaults) == cli.RUN_CONFIG
-    assert cli.make_budget(defaults).max_delegations == 15
+    assert cli.make_budget(defaults) == cli.make_budget(cli.parse_args([]))
+    assert cli.make_budget(defaults).max_delegations is None
     ollama = cli.make_provider(
         cli.parse_args(["--provider", "ollama", "--model-timeout", "42"]), repo
     )

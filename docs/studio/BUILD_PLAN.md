@@ -5,6 +5,25 @@ Site source at 9c037d3349eac8d40101aadc5de62e47b94c90c0 on 5 October 2026.
 This preserves the investigation from the conversation. Recheck current source
 after merging newer core changes. The roadmap below is a recommendation.
 
+Terminal progress: `studio/runtime/runs.py` implements version 1 run requests,
+validated form values, pinned application snapshots and SQLite event records.
+The adapter binds those values to AI and human steps. Offline checks cover
+restart persistence, pending reviews, interruption, failures and single-start
+execution. Durable review submissions now retain reviewer identity and typed
+output. Waiting runs restore request-bound completed-step patches and budget
+usage, preserving branch isolation and skipping completed work. Duplicate/stale
+reviews are rejected; rejected or changes-requested decisions stop the run.
+The local preview now bridges Worker APIs to a Python child process. It resolves
+saved definition snapshots on the server, supports start/status/history/cancel,
+records the local operator's reviews and restores selected runs after reload.
+Explicit host configuration selects an existing backend, curated text-source
+folder and optional bundled public-web tools. Offline Worker/Python/fake-CLI
+checks exercise source reads, restart/review/resume and cancellation. They do
+not establish live model quality or connected cloud accounts. Production
+authentication, bounded source snapshots/claim support, controlled revision runs
+and interrupted-action recovery remain pending; the gap table below records
+the original investigation.
+
 ## Existing pieces to reuse
 
 - conclave/runtime.py: bounded agent loops, nested delegation and typed events.

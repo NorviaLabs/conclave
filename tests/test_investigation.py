@@ -206,6 +206,7 @@ def test_nested_refusals_are_printed(
             provider,
             build_tools(repo),
             "why?",
+            budget=make_budget(),
         )
     )
 

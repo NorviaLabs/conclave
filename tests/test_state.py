@@ -182,9 +182,12 @@ def test_initialize_state_normalizes(
     assert "hypotheses" in prompt
 
 
+@pytest.mark.parametrize("limit, rounds", [(3, 8), (None, None)])
 def test_decide_next_describes_budget_and_agents(
     budget,
     render,
+    limit,
+    rounds,
 ):
     provider = CannedProvider(
         '{"status": "done", "answer": "yes"}'
@@ -198,6 +201,8 @@ def test_decide_next_describes_budget_and_agents(
             2,
             budget,
             render,
+            max_delegations_per_round=limit,
+            max_rounds=rounds,
         )
     )
 
@@ -207,7 +212,10 @@ def test_decide_next_describes_budget_and_agents(
 
     assert "repo-researcher" in prompt
     assert "critic" in prompt
-    assert "Use at most 3" in prompt
+    assert ("Use at most 3" if limit is not None else "No per-round delegation limit") in prompt
+    assert "at most None" not in prompt
+    assert "2/None" not in prompt
+    assert ("2/8" if rounds is not None else "Round:\n\n2\n") in prompt
     assert "Round:" in prompt
 
 

@@ -8,6 +8,23 @@ export default {async fetch(request,env){const url=new URL(request.url),path=url
   if(!['GET','POST','PUT'].includes(request.method))return json({error:'Method not allowed.'},405);
   if(request.method!=='GET'&&(request.headers.get('origin')!==url.origin||!request.headers.get('content-type')?.startsWith('application/json')))return json({error:'Use a same-origin JSON request.'},403);
   const database=db(env);
+  if(path==='/api/runtime'&&request.method==='GET'){if(!env.RUNS)return json({local:!!env.STUDIO_LOCAL,available:false,reason:'Live runs need a configured local Python host.',tools:[]});const result=await env.RUNS('runtime',{});return json(result.result,result.status)}
+  if(path==='/api/runs'){
+   if(!env.RUNS)return json({error:'Live runs need a configured local Python host.'},503);
+   if(request.method==='GET'){const result=await env.RUNS('list',{application_id:url.searchParams.get('application_id')});return json(result.result,result.status)}
+   if(request.method==='POST'){
+    let value;try{value=await body(request);if(Object.keys(value).sort().join(',')!=='application_id,inputs,revision,task,version'||value.version!==1||typeof value.application_id!=='string'||!Number.isInteger(value.revision)||value.revision<1)throw new Error('Choose a saved application version and provide request values.')}catch(error){return json({error:error.message},400)}
+    const rows=await database.prepare('SELECT id, definition, revision FROM applications WHERE id = ?').bind(value.application_id).all(),saved=rows.results[0];
+    if(!saved)return json({error:'Saved application not found.'},404);
+    if(saved.revision!==value.revision)return json({error:'This application changed. Reload its saved version before starting.'},409);
+    const result=await env.RUNS('start',{...value,definition:JSON.parse(saved.definition)});return json(result.result,result.status);
+   }
+  }
+  const runMatch=path.match(/^\/api\/runs\/([a-f0-9]{32})(?:\/(resume|cancel|reviews))?$/);
+  if(runMatch&&env.RUNS){const id=runMatch[1],action=runMatch[2];
+   if(!action&&request.method==='GET'){const result=await env.RUNS('get',{run_id:id});return json(result.result,result.status)}
+   if(action&&request.method==='POST'){let value;try{value=await body(request);if(action==='reviews'?Object.keys(value).sort().join(',')!=='output,review_id':Object.keys(value).length)throw new Error('Use the supported request fields.')}catch(error){return json({error:error.message},400)}const result=await env.RUNS(action==='reviews'?'review':action,{...value,run_id:id});return json(result.result,result.status)}
+  }
   if(path==='/api/members'&&request.method==='GET'){const rows=await database.prepare('SELECT id, member, updated_at FROM member_templates ORDER BY updated_at DESC, id LIMIT 200').all();return json({members:rows.results.map(row=>({id:row.id,member:JSON.parse(row.member),updated_at:row.updated_at}))})}
   if(path==='/api/members'&&request.method==='POST'){let member;try{member=validateMember((await body(request)).member)}catch(error){return json({error:error.message},400)}const id=crypto.randomUUID(),updated_at=new Date().toISOString();await database.prepare('INSERT INTO member_templates (id, member, updated_at) VALUES (?, ?, ?)').bind(id,JSON.stringify(member),updated_at).run();return json({id,member,updated_at},201)}
   if(path==='/api/applications'&&request.method==='GET'){await seed(database);const rows=await database.prepare('SELECT id, definition, revision, updated_at FROM applications ORDER BY updated_at DESC, id').all();return json({applications:rows.results.map(r=>({id:r.id,definition:JSON.parse(r.definition),revision:r.revision,updated_at:r.updated_at}))})}

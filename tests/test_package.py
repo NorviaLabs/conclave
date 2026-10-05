@@ -45,13 +45,13 @@ def test_the_core_ships_no_numbers():
         ), f"{field.name} has a default"
 
 
-def test_application_limits_are_positive():
+def test_application_round_limits_are_unlimited():
     application = importlib.import_module(
         "investigation.config"
     )
 
-    assert application.MAX_ROUNDS > 0
-    assert application.MAX_DELEGATIONS_PER_ROUND > 0
+    assert application.MAX_ROUNDS is None
+    assert application.MAX_DELEGATIONS_PER_ROUND is None
 
 
 def test_the_application_states_its_own_numbers():
@@ -59,12 +59,15 @@ def test_the_application_states_its_own_numbers():
 
     budget = config.make_budget()
 
-    assert (
-        budget.max_per_agent
-        <= budget.max_delegations
-    )
-
-    assert config.RUN_CONFIG.max_tool_steps > 0
+    assert budget.max_per_agent is None
+    assert budget.max_delegations is None
+    assert budget.max_depth is None
+    assert all(getattr(config.RUN_CONFIG, field.name) is None
+               for field in dataclasses.fields(RunConfig))
+    limited = config.make_budget(max_delegations=15, max_per_agent=4, max_depth=2)
+    assert limited.max_per_agent <= limited.max_delegations
+    assert limited.max_depth == 2
+    assert config.make_budget() is not budget
     assert config.TIMEOUT_SECONDS > 0
 
 

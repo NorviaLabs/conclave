@@ -228,9 +228,15 @@ async def decide_next(
     budget: RunBudget,
     render: Any,
     *,
-    max_rounds: int = MAX_ROUNDS,
-    max_delegations_per_round: int = MAX_DELEGATIONS_PER_ROUND,
+    max_rounds: int | None = MAX_ROUNDS,
+    max_delegations_per_round: int | None = MAX_DELEGATIONS_PER_ROUND,
 ) -> dict[str, Any]:
+    round_label = str(round_number) if max_rounds is None else f"{round_number}/{max_rounds}"
+    delegation_instruction = (
+        "No per-round delegation limit is configured."
+        if max_delegations_per_round is None else
+        f"Use at most {max_delegations_per_round} independent delegations in this round."
+    )
     try:
         return await complete_json(
             provider,
@@ -247,7 +253,7 @@ Original question:
 
 Round:
 
-{round_number}/{max_rounds}
+{round_label}
 
 
 Current state:
@@ -287,8 +293,7 @@ important remaining uncertainty.
 
 Do not repeat completed work.
 
-Use at most {max_delegations_per_round}
-independent delegations in this round.
+{delegation_instruction}
 
 Finish when remaining uncertainty is not
 important enough to justify more investigation.

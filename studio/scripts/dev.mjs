@@ -4,6 +4,7 @@ import {createServer} from 'node:http';
 import {mkdir, readdir, readFile} from 'node:fs/promises';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
+import {startRuntime} from './runtime.mjs';
 
 if (Number(process.versions.node.split('.')[0]) < 24) {
   throw new Error('The local Studio preview requires Node.js 24 or newer.');
@@ -57,6 +58,7 @@ const {default:worker} = await import('../dist/server/index.js');
 const port = Number(process.env.STUDIO_PORT || 8787);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid STUDIO_PORT');
 const origin = 'http://127.0.0.1:' + port;
+const runtime=process.env.STUDIO_PROVIDER?startRuntime():null;
 const server = createServer(async (incoming, outgoing) => {
   try {
     if (incoming.headers.host !== '127.0.0.1:' + port && incoming.headers.host !== 'localhost:' + port) {
@@ -81,7 +83,7 @@ const server = createServer(async (incoming, outgoing) => {
       headers:incoming.headers,
       ...(method === 'GET' || method === 'HEAD' ? {} : {body:Buffer.concat(chunks)})
     });
-    const response = await worker.fetch(request, {DB:database});
+    const response = await worker.fetch(request, {DB:database,STUDIO_LOCAL:true,...(runtime?{RUNS:(command,value)=>runtime.call(command,value)}:{})});
     outgoing.writeHead(response.status, Object.fromEntries(response.headers));
     outgoing.end(Buffer.from(await response.arrayBuffer()));
   } catch (error) {
@@ -93,8 +95,8 @@ const server = createServer(async (incoming, outgoing) => {
 server.listen(port, '127.0.0.1', () => {
   console.log('Conclave Studio: ' + origin);
   console.log('Local data: studio/.studio-local/studio.sqlite');
-  console.log('Runs remain samples. Restart this command after editing source.');
+  console.log(runtime?'Python run service enabled. AI and source access use host configuration.':'Sample preview. Set STUDIO_PROVIDER to enable the local Python run service.');
 });
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => server.close(() => { sqlite.close(); process.exit(0); }));
+  process.on(signal, () => {runtime?.close();server.close(() => { sqlite.close(); process.exit(0); });});
 }
