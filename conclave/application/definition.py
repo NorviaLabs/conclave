@@ -135,6 +135,10 @@ def validate_request_inputs(definition: dict[str, Any], values: dict[str, Any]) 
 def validate_definition(definition: dict[str, Any]) -> None:
     if not isinstance(definition, dict):
         raise ValueError("Provide an application definition")
+    resources = definition.get("resources", {})
+    if not isinstance(resources, dict) or set(resources) - {"source"} or ("source" in resources and
+            (not isinstance(resources["source"], str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", resources["source"]))):
+        raise ValueError("Application resources must select a named source")
     validate_input_schema(definition)
     if type(definition.get("version")) is not int or definition["version"] != 1:
         raise ValueError("Unsupported definition version")
@@ -424,7 +428,7 @@ async def _restore_checkpoint(checkpoint, fingerprint, definition, store, budget
     return copy.deepcopy(patches)
 
 
-async def run_application(definition: dict[str, Any], provider: Any, tools: Any, task: str, *, inputs: dict[str, Any] | None = None, approver: Any = None, human_handler: Any = None, checkpoint: dict | None = None, human_inputs: dict | None = None) -> AsyncIterator[dict[str, Any]]:
+async def run_application(definition: dict[str, Any], provider: Any, tools: Any, task: str, *, inputs: dict[str, Any] | None = None, approver: Any = None, human_handler: Any = None, checkpoint: dict | None = None, human_inputs: dict | None = None, loop: Any = None) -> AsyncIterator[dict[str, Any]]:
     """Run an acyclic application in dependency order and yield safe events.
 
     Ready steps execute one at a time; this adapter does not run branches concurrently.
@@ -432,6 +436,9 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
 
     Provider and tool registration are host responsibilities. Core capability
     gates remain intact, and no write approval is inferred from a UI control.
+    `loop` is where the agent loop runs: it defaults to this process, and a
+    deployment that runs it in a sandbox supplies a factory with the runtime's
+    own signature. The budget, the approvals and the store stay here either way.
     human_handler receives a checkpoint request and returns a typed output dict,
     synchronously or asynchronously. It must obtain explicit input from a person.
     Without it, execution returns waiting_for_human with the current snapshot.
@@ -461,7 +468,7 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
         raise ValueError("Recorded human inputs must belong to pending human steps")
     thresholds = definition.get("budget_warnings", {})
     warned = {dimension for dimension, threshold in thresholds.items() if checkpoint is not None and threshold is not None and dimension in budget.spent and budget.spent[dimension] >= threshold}
-    runtime = ToolAgentRuntime(provider, tools, budget, agents, config=config, approver=approver)
+    runtime = loop(provider, tools, budget, agents, config=config, approver=approver) if loop is not None else ToolAgentRuntime(provider, tools, budget, agents, config=config, approver=approver)
     yield {"type": "ApplicationResumed" if checkpoint is not None else "ApplicationStarted", "name": definition["name"], "state": store.snapshot(), "views": project_views(definition, store.snapshot())}
     for stage in _execution_order(definition):
         if stage["id"] in patches:

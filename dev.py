@@ -1,4 +1,9 @@
-"""Run Conclave and Studio together: uv run python dev.py --provider codex."""
+"""Run the Studio dev server beside the Conclave backend: uv run python dev.py.
+
+`conclave serve` already serves the Studio page on one address; this launcher
+adds the Node dev server for UI work and stops both together. The backend finds
+the model provider already set up on this computer unless one is named here.
+"""
 import argparse
 import os
 from pathlib import Path
@@ -58,9 +63,9 @@ def wait_ready(url, children, stopped, *, token=None, timeout=30):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Start the Conclave backend and Studio frontend together.")
-    parser.add_argument("--provider", help="Backend provider, such as codex; otherwise use host configuration")
-    parser.add_argument("--model")
+    parser = argparse.ArgumentParser(description="Start the Conclave backend and the Studio dev server together.")
+    parser.add_argument("--provider", help="Backend provider, such as codex; the one on this computer when omitted")
+    parser.add_argument("--model", help="Model passed to the backend; its own default when omitted")
     parser.add_argument("--backend-port", type=port, default=8080)
     parser.add_argument("--studio-port", type=port, default=8787)
     parser.add_argument("--node", default=os.environ.get("STUDIO_NODE", "node"), help="Node.js 24+ executable (or set STUDIO_NODE)")
@@ -94,7 +99,9 @@ def main(argv=None):
         wait_ready(studio_url + "/api/health", children, stopped)
         if stopped.is_set():
             return 0
-        print(f"Ready: Studio {studio_url} | Conclave {api_url}\nPress Ctrl+C to stop both services.", flush=True)
+        print(f"Ready: Studio {studio_url} | Conclave {api_url}/api/health"
+              "\nThe backend serves the Studio page too, unless CONCLAVE_API_TOKEN is set."
+              "\nPress Ctrl+C to stop both services.", flush=True)
         while not stopped.wait(0.25):
             if any(child.poll() is not None for child in children):
                 raise RuntimeError("A service exited; stopping the other service.")

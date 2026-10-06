@@ -5,6 +5,7 @@ Providers, tools, credentials and approval callbacks remain host-owned.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import sqlite3
@@ -51,6 +52,10 @@ class RunRepository:
         self.history_limit = history_limit
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Runs this process is watching, for a caller that wants to be told
+        # rather than ask. In-process only: replicas would need a shared signal,
+        # which is the same work as moving the run claim into the database.
+        self.watchers: dict[str, set[asyncio.Queue]] = {}
         with self._connect() as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS studio_runs (
@@ -113,6 +118,7 @@ class RunRepository:
             if changed != 1:
                 raise ValueError("This run cannot be cancelled while inactive")
             self._insert_event(connection, run_id, {"type": "ApplicationFinished", "status": "cancelled", "reason": "Stopped by the local operator"})
+        self._notify(run_id)
 
     def submit_review(self, run_id: str, review_id: str, *, reviewer: str, output: dict) -> None:
         """Record one explicit contribution. The host authenticates the reviewer.
@@ -141,10 +147,11 @@ class RunRepository:
             )
             self._insert_event(connection, run_id, {"type": "HumanReviewSubmitted", "review_id": review_id,
                                                   "stage": review["stage"], "reviewer": reviewer, "submitted_at": timestamp})
+        self._notify(run_id)
 
-    def resume(self, run_id: str, provider, tools, *, approver=None):
+    def resume(self, run_id: str, provider, tools, *, approver=None, loop=None):
         """Continue a waiting run using its persisted, explicitly submitted review."""
-        return self.execute(run_id, provider, tools, approver=approver, resume=True)
+        return self.execute(run_id, provider, tools, approver=approver, resume=True, loop=loop)
 
     def _claim_resume(self, run_id: str):
         with self._connect() as connection:
@@ -178,6 +185,41 @@ class RunRepository:
         sequence = connection.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM studio_run_events WHERE run_id = ?", (run_id,)).fetchone()[0]
         connection.execute("INSERT INTO studio_run_events VALUES (?, ?, ?)", (run_id, sequence, json.dumps(event, allow_nan=False)))
 
+    def _notify(self, run_id: str) -> None:
+        """Tell anything watching this run to read it again.
+
+        Each watcher holds one slot, so a slow reader coalesces rather than
+        queueing up: every notification means "the record changed", and the
+        latest record is the one that matters.
+        """
+
+        for queue in list(self.watchers.get(run_id, ())):
+            try:
+                queue.put_nowait(run_id)
+            except asyncio.QueueFull:
+                pass
+
+    async def watch(self, run_id: str):
+        """The run's record now, and again whenever it changes.
+
+        A caller that wants to be told uses this instead of asking on a timer.
+        The generator ends when it is closed, which is what stops the watching.
+        """
+
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self.watchers.setdefault(run_id, set()).add(queue)
+        try:
+            yield self.get(run_id)
+            while True:
+                await queue.get()
+                yield self.get(run_id)
+        finally:
+            watching = self.watchers.get(run_id)
+            if watching is not None:
+                watching.discard(queue)
+                if not watching:
+                    self.watchers.pop(run_id, None)
+
     def _append(self, run_id: str, event: dict) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -194,8 +236,11 @@ class RunRepository:
             self._insert_event(connection, run_id, event)
             if event["type"] == "ApplicationFinished":
                 connection.execute("UPDATE studio_runs SET status = ? WHERE id = ?", (event["status"], run_id))
+        # After the write, so a watcher that re-reads sees this event and, for a
+        # finished run, the status it set.
+        self._notify(run_id)
 
-    async def execute(self, run_id: str, provider, tools, *, approver=None, human_handler=None, resume=False):
+    async def execute(self, run_id: str, provider, tools, *, approver=None, human_handler=None, resume=False, loop=None):
         """Start once, recording safe adapter events and a durable waiting review.
 
         A process crash leaves status 'running'; execution refuses to replay it.
@@ -210,7 +255,7 @@ class RunRepository:
             async for event in run_application(
                 request["definition"], provider, tools, request["task"],
                 inputs=request["inputs"], approver=approver, human_handler=human_handler,
-                checkpoint=checkpoint, human_inputs=human_inputs,
+                checkpoint=checkpoint, human_inputs=human_inputs, loop=loop,
             ):
                 self._append(run_id, event)
                 finished = event["type"] == "ApplicationFinished"

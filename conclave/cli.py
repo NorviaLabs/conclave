@@ -51,7 +51,7 @@ def host_settings(args):
 
 
 async def execute(args):
-    host = configured_host(workspace=Path.cwd())
+    host = configured_host(workspace=Path.cwd(), source_dir=getattr(args, "source_dir", None))
     try:
         if args.command == "run":
             definition = read_json(args.definition)
@@ -59,6 +59,8 @@ async def execute(args):
             value = {"version": 1, "application_id": application_id,
                      "revision": args.revision, "definition": definition, "task": args.task,
                      "inputs": read_json(args.inputs) if args.inputs else {}}
+            if args.source:
+                value["resources"] = {"source": args.source}
             _, record = await host.handle("start", value)
         elif args.command == "review":
             _, record = await host.handle("review", {"run_id": args.run_id, "review_id": args.review_id, "output": read_json(args.output)})
@@ -81,19 +83,21 @@ def run(argv=None):
     create.add_argument("definition")
     create.add_argument("--name", required=True)
     create.add_argument("--instructions", required=True)
-    server = commands.add_parser("serve", help="Start the local Conclave REST API")
+    server = commands.add_parser("serve", help="Start the local Conclave REST API and Studio page")
     server.add_argument("--port", type=int, default=8080)
-    server.add_argument("--provider")
-    server.add_argument("--model")
+    server.add_argument("--provider", help="Bundled backend; the one on this computer when omitted")
+    server.add_argument("--model", help="Model passed to the backend; its own default when omitted")
     for name in ("run", "status", "review", "resume", "cancel"):
         command = commands.add_parser(name)
         command.add_argument("--database", help="Run database (shared with Studio by default)")
-        command.add_argument("--provider", help="Bundled backend; custom factories use STUDIO_PROVIDER_FACTORY")
-        command.add_argument("--model")
+        command.add_argument("--provider", help="Bundled backend; custom factories use CONCLAVE_PROVIDER_FACTORY")
+        command.add_argument("--model", help="Model passed to the backend; its own default when omitted")
         if name == "run":
             command.add_argument("definition", help="Application JSON, including Studio exports")
             command.add_argument("--task", required=True)
             command.add_argument("--inputs", help="JSON file containing declared request field values")
+            command.add_argument("--source", help="Authorized source resource ID for this request")
+            command.add_argument("--source-dir", help="Folder to authorize as the source for this request")
             command.add_argument("--application-id")
             command.add_argument("--revision", type=int, default=1)
         else:

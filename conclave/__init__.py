@@ -39,6 +39,11 @@ from .approval import (
     refusal_text,
     request_approval,
 )
+from .authority import (
+    InProcessAuthority,
+    ModelCall,
+    RunAuthority,
+)
 from .budget import (
     DIMENSION_LABELS,
     RunBudget,
@@ -52,6 +57,8 @@ from .events import (
     Delegation,
     Event,
     NoteRecorded,
+    event_payload,
+    rebuild_event,
     RunFinished,
     RunStarted,
     StoreChanged,
@@ -75,9 +82,12 @@ from .providers import (
     OllamaProvider,
     OpenCodeProvider,
     Usage,
+    resolve_provider,
 )
 from .registry import (
     TRUNCATION_MARKER,
+    ToolExecutor,
+    ToolInvocation,
     ToolRegistry,
 )
 from .runtime import (
@@ -112,6 +122,7 @@ __all__ = [
     "BudgetExceeded",
     "Capability",
     "CodexProvider",
+    "InProcessAuthority",
     "Completion",
     "DIMENSION_LABELS",
     "Delegation",
@@ -119,12 +130,14 @@ __all__ = [
     "JSON_ONLY_RULE",
     "MergeFunc",
     "MergeResult",
+    "ModelCall",
     "ModelOutputError",
     "ModelProvider",
     "NoteRecorded",
     "OllamaProvider",
     "OpenCodeProvider",
     "PrivateState",
+    "RunAuthority",
     "RunBudget",
     "RunConfig",
     "RunFinished",
@@ -137,7 +150,9 @@ __all__ = [
     "ToolAgentRuntime",
     "ToolCalled",
     "ToolDenied",
+    "ToolExecutor",
     "ToolFunc",
+    "ToolInvocation",
     "ToolRegistry",
     "Usage",
     "append_merge",
@@ -145,10 +160,13 @@ __all__ = [
     "as_list",
     "complete_json",
     "deny_all",
+    "event_payload",
     "extract_json",
     "fan_out",
+    "rebuild_event",
     "refusal_text",
     "replace_merge",
     "report_usage",
     "request_approval",
+    "resolve_provider",
 ]

@@ -3,7 +3,7 @@ import copy
 import json
 import pytest
 
-from conclave.api import ApplicationAPI, start_server
+from conclave.api import ApplicationAPI, start_server, studio_assets
 from conclave.application.catalogue import configured_data, starter_definitions
 from conclave.application.service import LocalRunHost
 from conclave.application.workspace import Workspace
@@ -16,6 +16,25 @@ from test_studio_runs import with_final_stage
 def make_api(tmp_path, provider=None):
     host = LocalRunHost(RunRepository(tmp_path / "runs.sqlite"), provider or ScriptedProvider(default={"type": "final", "content": "Done", "text": "REST result"}), ToolRegistry(20000), reviewer="operator")
     return ApplicationAPI(host, Workspace(tmp_path / "applications.sqlite"))
+
+
+def test_source_settings_are_validated_persisted_and_applied(tmp_path, monkeypatch):
+    from conclave.application.service import configured_host
+    monkeypatch.setenv('CONCLAVE_DATA_DIR', str(tmp_path))
+    sources = {'documents': {'name': 'Documents', 'path': str(tmp_path), 'applications': []}}
+
+    async def exercise():
+        api = make_api(tmp_path)
+        assert (await api.dispatch('PUT', '/api/settings/sources', {'sources': sources}))[0] == 200
+        assert (await api.dispatch('GET', '/api/settings/sources'))[1]['sources'] == sources
+        assert json.loads((tmp_path / 'sources.json').read_text()) == sources
+        invalid = {'broken': {'path': str(tmp_path / 'missing')}}
+        assert (await api.dispatch('PUT', '/api/settings/sources', {'sources': invalid}))[0] == 400
+        assert set(api.host.resources) == {'documents'}
+        await api.host.close()
+    asyncio.run(exercise())
+    host = configured_host()
+    assert set(host.resources) == {'documents'}
 
 
 def test_rest_named_resource_binding_is_pinned_and_paths_are_not_accepted(tmp_path):
@@ -38,6 +57,25 @@ def test_rest_named_resource_binding_is_pinned_and_paths_are_not_accepted(tmp_pa
         assert str(resources['beta']['path']) not in json.dumps(run)
         await api.host.close()
 
+    asyncio.run(exercise())
+
+
+def test_saved_application_source_is_pinned_without_runtime_selection(tmp_path):
+    from test_application_resources import setup_resources, source_request
+
+    async def exercise():
+        tools, resources, _, _ = setup_resources(tmp_path)
+        api = make_api(tmp_path)
+        api.host.tools, api.host.resources, api.host.source_extensions = tools, resources, {'.md'}
+        value = source_request('beta')
+        value['definition']['resources'] = value.pop('resources')
+        _, saved = await api.dispatch('POST', '/api/applications', {'definition': value['definition']})
+        value.pop('definition')
+        value.update(application_id=saved['id'], revision=saved['revision'])
+        status, record = await api.dispatch('POST', '/api/runs', value)
+        assert status == 201
+        assert record['request']['resources'] == {'source': 'beta', 'source_revision': resources['beta']['revision']}
+        await api.host.close()
     asyncio.run(exercise())
 
 
@@ -213,6 +251,209 @@ def test_rest_validation_proposals_cancellation_and_redacted_errors(tmp_path):
         api.workspace.members = original
         assert (await api.dispatch("GET", "/outside"))[0] == 404
         await api.host.close()
+    asyncio.run(exercise())
+
+
+def test_the_studio_page_modules_and_download_are_served_from_this_origin(tmp_path):
+    """One command, one address: the page and its API share an origin."""
+    from conclave.api import static_page
+
+    api = make_api(tmp_path)
+    assets = studio_assets()
+    assert assets, "This checkout ships the Studio bundle"
+
+    page = static_page(api, "GET", "/", assets)
+    assert page.status == 200 and page.content_type.startswith("text/html") and b"<title>Conclave" in page.body
+
+    module = static_page(api, "GET", "/studio.js", assets)
+    assert module.status == 200 and module.content_type.startswith("text/javascript") and len(module.body) > 1000
+
+    # The page's modules import REST endpoints, never a file path.
+    shared = static_page(api, "GET", "/definition.js", assets)
+    assert b"/api/config/defaults" in shared.body and b"../../conclave" not in shared.body
+
+    download = static_page(api, "GET", "/downloads/application.py", assets)
+    assert download.content_type.startswith("text/x-python") and b"run_application" in download.body
+    assert download.filename == "conclave_application.py"
+
+    bundled = static_page(api, "GET", "/catalogue/defaults.json", assets)
+    assert json.loads(bundled.body) == api.defaults
+
+    # Anything else is not a page: the transport falls through to the API.
+    assert static_page(api, "GET", "/not-a-page.js", assets) is None
+    assert static_page(api, "GET", "/", {}) is None
+    assert static_page(api, "GET", "/api/health", assets) is None
+    assert static_page(api, "POST", "/", assets).status == 405
+    assert studio_assets(tmp_path / "no-checkout") == {}
+
+    asyncio.run(api.host.close())
+
+
+class FakeWriter:
+    """A connection that records the bytes the server writes."""
+
+    def __init__(self):
+        self.written = b""
+
+    def get_extra_info(self, name):
+        return ("127.0.0.1", 8080)
+
+    def write(self, data):
+        self.written += data
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        pass
+
+    async def wait_closed(self):
+        pass
+
+
+class FakeReader:
+    """The request head and body the handler reads."""
+
+    def __init__(self, head, body=b""):
+        self.head, self.body = head.encode(), body
+
+    async def readuntil(self, separator):
+        return self.head
+
+    async def readexactly(self, count):
+        assert count == len(self.body)
+        return self.body
+
+
+def respond_once(monkeypatch, api, request, *, body=b"", token=None, assets=None):
+    """The server's bytes for one raw request, without binding a socket."""
+    from types import SimpleNamespace
+    from conclave import api as module
+
+    captured = {}
+    server = SimpleNamespace(close=lambda: None)
+
+    async def capture(handler, host, port, **kwargs):
+        captured["respond"] = handler
+        return server
+
+    monkeypatch.setattr(module.asyncio, "start_server", capture)
+    asyncio.run(module.start_server(api, 0, token=token, assets=assets))
+    writer = FakeWriter()
+    asyncio.run(captured["respond"](FakeReader(request, body), writer))
+    head, _, payload = writer.written.partition(b"\r\n\r\n")
+    return head.decode(), payload
+
+
+def test_the_transport_serves_pages_and_json_from_one_address(tmp_path, monkeypatch):
+    api = make_api(tmp_path)
+    assets = studio_assets()
+    host = "Host: 127.0.0.1:8080\r\n"
+
+    head, payload = respond_once(monkeypatch, api, f"GET / HTTP/1.1\r\n{host}\r\n", assets=assets)
+    assert head.startswith("HTTP/1.1 200") and "Content-Type: text/html" in head
+    assert f"Content-Length: {len(payload)}" in head and b"<title>Conclave" in payload
+
+    head, payload = respond_once(monkeypatch, api, f"GET /api/health HTTP/1.1\r\n{host}\r\n", assets=assets)
+    assert head.startswith("HTTP/1.1 200") and "Content-Type: application/json" in head
+    assert json.loads(payload) == {"status": "ok", "api_version": 1}
+
+    # A page path is never a write, and the API still answers for itself.
+    head, _ = respond_once(monkeypatch, api, f"POST / HTTP/1.1\r\n{host}Content-Type: application/json\r\nContent-Length: 0\r\n\r\n", assets=assets)
+    assert head.startswith("HTTP/1.1 405")
+    head, payload = respond_once(monkeypatch, api, f"GET /api/nothing HTTP/1.1\r\n{host}\r\n", assets=assets)
+    assert head.startswith("HTTP/1.1 404") and json.loads(payload)["error"]
+
+    # The adapter download keeps its filename and type.
+    head, payload = respond_once(monkeypatch, api, f"GET /downloads/application.py HTTP/1.1\r\n{host}\r\n", assets=assets)
+    assert 'Content-Disposition: attachment; filename="conclave_application.py"' in head
+    assert b"run_application" in payload
+
+    # A token guards the API, and a page is not served without it.
+    head, _ = respond_once(monkeypatch, api, f"GET /api/health HTTP/1.1\r\n{host}\r\n", token="secret")
+    assert head.startswith("HTTP/1.1 401")
+    head, _ = respond_once(monkeypatch, api, f"GET / HTTP/1.1\r\n{host}\r\n")
+    assert head.startswith("HTTP/1.1 404")
+
+    # A HEAD response describes the page without sending it.
+    head, payload = respond_once(monkeypatch, api, f"HEAD / HTTP/1.1\r\n{host}\r\n", assets=assets)
+    assert payload == b"" and "Content-Length: 0" not in head
+
+    asyncio.run(api.host.close())
+
+
+def test_startup_lines_say_where_the_page_and_the_backend_are(tmp_path):
+    from conclave.api import startup_lines
+
+    api = make_api(tmp_path)
+    api.host.provider_name, api.host.provider_source = "opencode", "detected"
+    address = "http://127.0.0.1:8080"
+
+    assert startup_lines(api, address, {"/index.html": (b"page", "text/html")}, None) == [
+        f"Conclave REST API: {address}/api/health",
+        f"Studio: {address}",
+        "AI backend: opencode (found on this computer)",
+    ]
+
+    # A token deployment keeps the Studio dev server; a page cannot send it.
+    lines = startup_lines(api, address, {}, "secret")
+    assert "CONCLAVE_API_TOKEN" in lines[1] and "Studio:" not in lines[1]
+
+    # With nothing installed, the line is the next action rather than a blank.
+    api.host.provider, api.host.provider_name, api.host.provider_source = None, "codex", "configured"
+    api.host.unavailable = "The configured codex command is unavailable on this host"
+    assert startup_lines(api, address, {}, None)[-1] == "AI backend: unavailable. The configured codex command is unavailable on this host"
+
+    # A hosted host serves the API only, and says so instead of staying silent.
+    from conclave.application.profile import HOSTED
+
+    api.host.profile = HOSTED
+    lines = startup_lines(api, address, {}, None)
+    assert lines[1] == "This hosted host serves the API only; deploy the Studio bundle separately."
+
+
+def test_a_token_deployment_does_not_serve_the_page(tmp_path, monkeypatch, capsys):
+    """A browser page cannot present a bearer token, so it is not offered."""
+    import signal
+    from types import SimpleNamespace
+    from conclave import api as module
+
+    class FakeServer:
+        """A started server, without binding a socket."""
+
+        sockets = [SimpleNamespace(getsockname=lambda: ("127.0.0.1", 8080))]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "configured_api", lambda **kwargs: make_api(tmp_path))
+    monkeypatch.setenv("CONCLAVE_API_TOKEN", "test-token")
+    monkeypatch.setattr(module, "studio_assets", lambda *args: {"/index.html": (b"page", "text/html")})
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        callbacks = {}
+        monkeypatch.setattr(loop, "add_signal_handler", lambda signal, callback: callbacks.update({signal: callback}))
+        started, served = asyncio.Event(), {}
+        server = FakeServer()
+
+        async def start(*args, **kwargs):
+            served.update(kwargs)
+            started.set()
+            return server
+
+        monkeypatch.setattr(module, "start_server", start)
+        task = asyncio.create_task(module.serve(0))
+        await asyncio.wait_for(started.wait(), timeout=10)
+        assert served["assets"] == {} and served["token"] == "test-token"
+        output = capsys.readouterr().out
+        assert "CONCLAVE_API_TOKEN" in output and "Studio:" not in output
+        callbacks[signal.SIGTERM]()
+        await asyncio.wait_for(task, timeout=10)
+
     asyncio.run(exercise())
 
 

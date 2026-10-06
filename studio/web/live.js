@@ -13,6 +13,11 @@ function inputState(definition,stageId,patches){
   return state;
 }
 
+// A host that reports it can push is told about a run; one that cannot is asked
+// on a timer. The decision is here so it can be checked without a browser.
+export const liveFollowMode=runtime=>runtime?.features?.events===true?'push':'poll';
+export const liveStreamPath=runId=>`/api/runs/${encodeURIComponent(runId)}/stream`;
+
 export function projectLiveRun(record){
   const d=record.request.definition,patches=new Map(),completedSteps=[],trace=[],textOrigins={};
   let state=initialState(d),activeStep=null,version=0;
@@ -36,16 +41,19 @@ export function projectLiveRun(record){
 }
 
 export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress,history,runtime,busy,error,source='',applicationId=''}){
+  // A host that reports no profile is local, which is the server's default.
+  const local=runtime.profile?runtime.profile==='local':true;
+  const hostedPill=`HOSTED RUN${runtime.tenant&&runtime.tenant!=='local'?` · ${e(runtime.tenant)}`:''}`;
   const labels={pending:'Starting',running:'Team at work',waiting_human:'Your review is needed',completed:'Results are ready',stopped:'Work stopped',cancelled:'Request cancelled',interrupted:'Work interrupted',failed:'Request failed'};
   const active=run&&['pending','running'].includes(run.mode),last=run?.events.findLast(event=>event.type==='ApplicationFinished');
   const missing=[...new Set(d.agents.flatMap(member=>member.tools))].filter(name=>!runtime.tools?.includes(name));
   const needsSource=d.agents.some(member=>member.tools.some(name=>runtime.resource_tools?.includes(name)));
   const resources=(runtime.resources||[]).filter(item=>!item.applications||item.applications.includes(applicationId));
-  const bound=resources.some(item=>item.id===source||!source&&item.id==='default');
-  const resourceForm=needsSource?`<div class="field"><label for="live-source">Source documents</label><select id="live-source" data-source-resource><option value="">${resources.some(item=>item.id==='default')?'Use default source':'Choose a source resource'}</option>${resources.map(item=>`<option value="${e(item.id)}" ${item.id===source?'selected':''}>${e(item.name)}</option>`).join('')}</select>${!resources.length?'<p class="validation">No source resource is authorized for this application. Add one to the shared host resource catalogue.</p>':''}</div>`:'';
+  const bound=resources.some(item=>item.id===source||!source&&item.id===(d.resources?.source||'default'));
+  const resourceForm=needsSource?`<div class="field"><label for="live-source">Source documents</label><select id="live-source" data-source-resource><option value="">${d.resources?.source?'Use configured source':resources.some(item=>item.id==='default')?'Use default source':'Choose a source resource'}</option>${resources.map(item=>`<option value="${e(item.id)}" ${item.id===source?'selected':''}>${e(item.name)}</option>`).join('')}</select>${!resources.length?`<p class="validation">No source resource is authorized for this application.${local?' Add one to the shared host resource catalogue.<button class="button" data-action="source-settings">Configure sources</button>':' Ask the deployment to authorize a source for this application.'}</p>`:''}</div>`:'';
   return `<div class="run-heading"><div><span class="eyebrow">USE THE APPLICATION</span><h2>${run?'Your request':'Start a request'}</h2></div></div>
-  <div class="runtime-banner"><span class="runtime-pill">LOCAL RUN</span><p>${runtime.available?'Uses the AI provider configured on this computer.':'Live runs are unavailable on this host.'}</p></div>
-  ${!runtime.available?`<p class="validation" role="status">AI is not configured on this computer.</p><details class="quiet-details"><summary>Connection details</summary><p>${e(runtime.reason||'Configure the local AI host to start a request.')}</p></details>`:''}
+  <div class="runtime-banner"><span class="runtime-pill">${local?'LOCAL RUN':hostedPill}</span><p>${runtime.available?(!local?'Uses the AI provider configured for this workspace.':runtime.provider_source==='detected'?'Uses the AI provider already set up on this computer.':'Uses the AI provider configured on this computer.'):'Live runs are unavailable on this host.'}</p></div>
+  ${!runtime.available?`<p class="validation" role="status">${!local?'No AI provider is configured for this workspace.':'No AI provider was found on this computer.'}</p><details class="quiet-details"><summary>Connection details</summary><p>${e(runtime.reason||'Configure the local AI host to start a request.')}</p></details>`:''}
   ${missing.length?`<details class="quiet-details"><summary>Some requested tools are unavailable</summary><p>${missing.map(e).join(', ')}</p><p>Adjust tool access in the Plan or configure the host before running.</p></details>`:''}
   ${error?`<p class="validation" role="alert">${e(error)}</p>`:''}
   ${history.length?`<div class="field"><label for="live-history">Saved requests</label><select id="live-history" data-live-history><option value="">Choose a request</option>${history.map(item=>`<option value="${e(item.id)}" ${item.id===run?.runId?'selected':''}>${e(new Date(item.created_at).toLocaleString())} · ${e(item.status.replaceAll('_',' '))} · version ${item.revision}</option>`).join('')}</select></div>`:''}

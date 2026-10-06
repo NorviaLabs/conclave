@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A bounded multi-agent framework with application CLI and REST interfaces."
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = ["ddgs>=9.16.0"]
 
 [project.optional-dependencies]
 tools = [

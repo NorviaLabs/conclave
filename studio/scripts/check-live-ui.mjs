@@ -44,7 +44,23 @@ const unbound=liveRunMarkup(sourced,null,options);
 assert.match(unbound,/data-source-resource/);assert.match(unbound,/&lt;Case A&gt;/);assert.ok(!unbound.includes('Private'));
 assert.match(unbound,/data-action="start-live" disabled/);
 assert.ok(!liveRunMarkup(sourced,null,{...options,source:'case-a'}).includes('data-action="start-live" disabled'));
+sourced.resources={source:'case-a'};
+assert.ok(!liveRunMarkup(sourced,null,options).includes('data-action="start-live" disabled'));
+assert.match(liveRunMarkup(sourced,null,options),/Use configured source/);
+const webOnly=structuredClone(sourced);webOnly.agents[0].tools=['web_search'];delete webOnly.resources;
+const webMarkup=liveRunMarkup(webOnly,null,{...options,runtime:{available:true,tools:['web_search'],resource_tools:['read_file'],resources:[]}});
+assert.ok(!webMarkup.includes('data-source-resource'));
+assert.ok(!webMarkup.includes('data-action="start-live" disabled'));
 run.request.resources={source:'case-a'};
 assert.deepEqual(projectLiveRun(run).resources,{source:'case-a'});
 assert.match(liveRunMarkup(sourced,projectLiveRun(run),{...options,source:'case-a'}),/Source resource/);
 console.log('PASS: named resource selection, authorization filtering, escaping, start validation and saved resource display.');
+
+// The page must not claim to be running on this computer when the host says
+// otherwise, and a host that reports no profile is local by default.
+const hosted=liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',history:[],busy:false,error:'',runtime:{available:true,tools:[],profile:'hosted'}});
+assert.match(hosted,/HOSTED RUN/);assert.match(hosted,/configured for this workspace/);
+assert.ok(!hosted.includes('on this computer'));
+const unprofiled=liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',history:[],busy:false,error:'',runtime:{available:false,tools:[],reason:'No model backend is configured for this host.'}});
+assert.match(unprofiled,/LOCAL RUN/);assert.match(unprofiled,/No AI provider was found on this computer/);
+console.log('PASS: the page renders from the reported host profile instead of assuming a local machine.');

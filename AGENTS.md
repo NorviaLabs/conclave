@@ -4,14 +4,14 @@
 
 Conclave is a Python 3.14+ multi-agent runtime with an investigation CLI built on
 its public primitives. Use `uv` for dependency management and commands. The core
-has no runtime dependencies; `ddgs` is optional for bundled web-search tools.
+includes `ddgs` for bundled web-search tools.
 
 ## Layout and boundaries
 
 - `conclave/`: reusable runtime, JSON protocol, providers, budgets, approvals,
   tool registry, typed events, and schema-driven shared store.
-- `conclave/tools/`: bundled repository, Git, GitHub, and web tools. Keep these
-  optional: importing `conclave` must not import bundled tools, perform network
+- `conclave/tools/`: bundled repository, Git, GitHub, and web tools. Keep imports
+  lazy: importing `conclave` must not import bundled tools, perform network
   requests, or launch subprocesses.
 - `investigation/`: application-specific agents, state schema, prompts, round
   loop, configuration, CLI, and rendering.

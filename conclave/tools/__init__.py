@@ -1,9 +1,9 @@
 """The tools that ship alongside the core.
 
 They are importable, useful and *outside* the stability promise: a bundled
-tool may change or leave without a major version. Nothing in `conclave`
-proper imports this package, so a core install never pulls `ddgs`, `gh` or
-a scraper it did not ask for.
+tool may change or leave without a major version. Importing `conclave` does not
+import this package or launch tools. The application host registers these tools
+automatically; external Git and GitHub executables remain host-owned.
 
 Every tool here declares its capabilities. None of them declares WRITE, so
 none of them needs an approver to run.

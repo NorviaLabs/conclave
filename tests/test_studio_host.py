@@ -113,11 +113,15 @@ def test_host_sources_stay_in_explicit_folder_and_hide_credentials(tmp_path, mon
     (tmp_path / "outside.md").write_text("Outside selected folder")
     (source / "escape.md").symlink_to(tmp_path / "outside.md")
     monkeypatch.setenv("STUDIO_SOURCE_DIR", str(source))
+    # Keep saved source settings out of the way: this test is about the
+    # compatibility setting, not about what a machine happens to have saved.
+    monkeypatch.setenv("CONCLAVE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.delenv("STUDIO_PROVIDER", raising=False)
     monkeypatch.delenv("STUDIO_WEB", raising=False)
     monkeypatch.setattr(host_module, "RunRepository", lambda path: RunRepository(tmp_path / "test.sqlite"))
     host = host_module.configured_host()
-    assert set(host.tools.tools) == {"list_files", "read_file", "search_files", "knowledge_search"}
+    from conclave.application.resources import SOURCE_TOOLS
+    assert set(host.tools.tools) == SOURCE_TOOLS | {"web_search", "web_fetch"}
 
     async def exercise():
         assert "Supplied real evidence" in await host.tools.execute("read_file", {"path": "brief.md"})
@@ -345,6 +349,8 @@ def test_host_uses_shared_configurable_defaults(tmp_path, monkeypatch):
 @pytest.mark.parametrize("name,model,available", [("codex", None, True), ("opencode", "provider/model", True), ("ollama", "local-model", True), ("codex", None, False)])
 def test_conclave_provider_configuration_and_legacy_precedence(tmp_path, monkeypatch, name, model, available):
     import os
+    from conclave import providers
+
     calls = []
     provider = ScriptedProvider()
     for key in list(os.environ):
@@ -355,11 +361,12 @@ def test_conclave_provider_configuration_and_legacy_precedence(tmp_path, monkeyp
     monkeypatch.setenv("STUDIO_PROVIDER", "ignored")
     if model:
         monkeypatch.setenv("CONCLAVE_MODEL", model)
-    monkeypatch.setattr(host_module.shutil, "which", lambda name: "fake-executable" if available else None)
+    monkeypatch.setattr(providers.shutil, "which", lambda name: "fake-executable" if available else None)
     for backend in ("CodexProvider", "OpenCodeProvider", "OllamaProvider"):
-        monkeypatch.setattr(host_module, backend, lambda *args: calls.append(args) or provider)
+        monkeypatch.setattr(providers, backend, lambda *args: calls.append(args) or provider)
     host = host_module.configured_host(workspace=tmp_path)
     assert host.provider_name == name
+    assert host.provider_source == "configured"
     if available:
         assert host.provider is provider
         if name == "opencode":
@@ -370,12 +377,41 @@ def test_conclave_provider_configuration_and_legacy_precedence(tmp_path, monkeyp
             assert calls == [(model, 300.0)]
     else:
         assert host.provider is None and "unavailable" in host.unavailable
+        assert "CONCLAVE_PROVIDER" in host.unavailable
 
 
-def test_conclave_host_invalid_settings_and_explicit_web_tools(tmp_path, monkeypatch):
+def test_an_unconfigured_host_uses_the_backend_already_on_this_computer(tmp_path, monkeypatch):
+    """A first run needs no provider setting at all."""
     import os
-    import conclave.tools
-    from conclave import Capability, Tool
+    from conclave import providers
+
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    monkeypatch.setattr(providers.shutil, "which", lambda name: "/usr/local/bin/" + name if name == "opencode" else None)
+    host = host_module.configured_host(workspace=tmp_path)
+    assert (host.provider_name, host.provider_source) == ("opencode", "detected")
+    _, runtime = asyncio.run(host.handle("runtime", {}))
+    assert runtime["available"] and runtime["provider"] == "opencode"
+    assert runtime["provider_source"] == "detected"
+    asyncio.run(host.close())
+
+
+def test_an_unconfigured_host_with_no_backend_explains_the_one_setting(tmp_path, monkeypatch):
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    host = host_module.configured_host(workspace=tmp_path)
+    assert host.provider is None and host.provider_source is None
+    assert "No AI backend was found" in host.unavailable
+    assert "CONCLAVE_PROVIDER" in host.unavailable
+
+
+def test_conclave_host_invalid_settings_and_default_bundled_tools(tmp_path, monkeypatch):
+    import os
     for key in list(os.environ):
         if key.startswith(("CONCLAVE_", "STUDIO_")):
             monkeypatch.delenv(key)
@@ -392,11 +428,152 @@ def test_conclave_host_invalid_settings_and_explicit_web_tools(tmp_path, monkeyp
     with pytest.raises(ValueError, match="positive"):
         host_module.configured_host()
     monkeypatch.delenv("CONCLAVE_HISTORY_LIMIT")
-    tools = ToolRegistry(20000)
-    for name in ("web_search", "web_fetch"):
-        tools.register(Tool(name, name, {}, lambda: None, frozenset({Capability.READ})))
-    monkeypatch.setattr(conclave.tools, "build_tool_registry", lambda *args: tools)
-    monkeypatch.setenv("CONCLAVE_WEB", "1")
     host = host_module.configured_host()
-    assert set(host.tools.tools) == {"list_files", "read_file", "search_files", "knowledge_search", "web_fetch", "web_search"}
-    assert [adapter.id for adapter in host.adapters] == ["web_search", "web_reader"]
+    from conclave.application.resources import SOURCE_TOOLS
+    assert set(host.tools.tools) == SOURCE_TOOLS | {"web_fetch", "web_search"}
+    _, runtime = asyncio.run(host.handle("runtime", {}))
+    assert set(runtime["resource_tools"]) == SOURCE_TOOLS
+    # The folder this host was started in is the source, so the local folder
+    # connector is offered beside the web ones.
+    assert [adapter.id for adapter in host.adapters] == ["local_files", "web_search", "web_reader"]
+
+
+def test_an_unconfigured_host_reads_the_folder_it_was_started_in(tmp_path, monkeypatch):
+    """Nothing configured at all: the working folder is the source."""
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    (tmp_path / "notes.md").write_text("Supplied real evidence")
+    host = host_module.configured_host(workspace=tmp_path)
+    assert list(host.resources) == ["default"]
+    assert host.resources["default"]["path"] == tmp_path.resolve()
+    from conclave.application.resources import SOURCE_TOOLS
+    _, runtime = asyncio.run(host.handle("runtime", {}))
+    assert runtime["resources"] == [{"id": "default", "name": "This folder", "applications": None,
+                                    "tools": sorted(SOURCE_TOOLS)}]
+
+    async def exercise():
+        from test_application_resources import source_request
+
+        value = source_request(None)
+        value.pop("resources")
+        bound = host.run_tools(value)
+        assert "Supplied real evidence" in await bound.execute("read_file", {"path": "notes.md"})
+        # Containment still holds inside the folder the host was started in.
+        with pytest.raises((ValueError, RuntimeError)):
+            await bound.execute("read_file", {"path": "../outside.md"})
+        await host.close()
+
+    asyncio.run(exercise())
+
+
+def test_saved_named_sources_replace_the_working_folder(tmp_path, monkeypatch):
+    """An operator who saves source settings has answered this question."""
+    import json
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    (tmp_path / "sources.json").write_text(json.dumps({"documents": {"name": "Documents", "path": str(documents)}}))
+    host = host_module.configured_host(workspace=tmp_path)
+    assert list(host.resources) == ["documents"]
+    # A saved catalogue replaces the working folder rather than adding to it.
+    assert "local_files" not in [adapter.id for adapter in host.adapters]
+
+
+def test_an_empty_saved_catalogue_still_falls_back_to_the_working_folder(tmp_path, monkeypatch):
+    """Opening Studio's source settings and saving nothing decides nothing."""
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    (tmp_path / "sources.json").write_text("{}")
+    host = host_module.configured_host(workspace=tmp_path)
+    assert list(host.resources) == ["default"]
+    assert host.resources["default"]["path"] == tmp_path.resolve()
+
+
+def test_a_missing_source_dir_is_refused(tmp_path, monkeypatch):
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    with pytest.raises(ValueError, match="existing source folder"):
+        host_module.configured_host(workspace=tmp_path, source_dir=tmp_path / "missing")
+    host = host_module.configured_host(workspace=tmp_path, source_dir=tmp_path)
+    assert host.resources["default"]["path"] == tmp_path.resolve()
+
+
+def test_the_local_profile_keeps_its_conveniences(tmp_path, monkeypatch):
+    """What the default profile may assume: this machine and this folder."""
+    from conclave.application.profile import LOCAL
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    monkeypatch.setattr(host_module, "resolve_provider",
+                        lambda *args, **kwargs: (ScriptedProvider(), "codex", None))
+    host = host_module.configured_host(workspace=tmp_path)
+    assert host.profile == LOCAL
+    assert host.provider is not None and host.provider_source == "detected"
+    assert list(host.resources) == ["default"]
+
+
+def test_the_hosted_profile_inherits_no_local_convenience(tmp_path, monkeypatch):
+    """A hosted control plane is told everything; it inspects nothing."""
+    from conclave.application.profile import HOSTED
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_PROFILE", "hosted")
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    monkeypatch.setattr(host_module, "resolve_provider",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hosted must not probe")))
+    host = host_module.configured_host(workspace=tmp_path)
+    assert host.profile == HOSTED
+    assert host.provider is None and host.provider_source is None
+    assert "CONCLAVE_PROVIDER_FACTORY" in host.unavailable
+    # No folder is authorized, and the working folder is not assumed.
+    assert host.resources == {}
+    assert "local_files" not in [adapter.id for adapter in host.adapters]
+    _, runtime = asyncio.run(host.handle("runtime", {}))
+    assert runtime["profile"] == "hosted"
+    assert runtime["resources"] == []
+
+
+def test_a_configured_backend_is_used_in_hosted_mode(tmp_path, monkeypatch):
+    """Hosted still honours an explicit backend, model and factory."""
+    import os
+    for key in list(os.environ):
+        if key.startswith(("CONCLAVE_", "STUDIO_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("CONCLAVE_PROFILE", "hosted")
+    monkeypatch.setenv("CONCLAVE_PROVIDER", "codex")
+    monkeypatch.setenv("CONCLAVE_MODEL", "hosted/model")
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    calls = []
+    provider = ScriptedProvider()
+    from conclave import providers
+    monkeypatch.setattr(providers.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(providers, "CodexProvider", lambda *args: calls.append(args) or provider)
+    host = host_module.configured_host(workspace=tmp_path)
+    assert host.provider is provider and host.provider_source == "configured"
+    assert calls == [("hosted/model", 300.0)]
+
+
+def test_an_unknown_profile_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONCLAVE_PROFILE", "cluster")
+    monkeypatch.setenv("CONCLAVE_RUN_DATABASE", str(tmp_path / "runs.sqlite"))
+    with pytest.raises(ValueError, match="Unknown host profile"):
+        host_module.configured_host(workspace=tmp_path)

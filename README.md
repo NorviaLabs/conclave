@@ -7,7 +7,8 @@ The library (`conclave/`) supplies the loop and the guardrails: an agent run
 that cannot spin, a delegation budget that refuses instead of recursing, a
 capability gate that stops tools from changing the world without an approver, a
 caller-schema'd shared store, and an async stream of typed events instead of
-`print()` calls. It ships no agents, no tools and no domain vocabulary.
+`print()` calls. It ships bundled repository, Git, GitHub and web tools, but no
+application-specific agents or domain vocabulary.
 
 The app (`investigation/`) is consumer number one: a coordinator model decides
 what to investigate each round, specialist agents gather repository, GitHub and
@@ -19,14 +20,20 @@ rather than a chat transcript.
 
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
-- One model backend:
+- One model backend, whichever you already have:
   - a current [Codex CLI](https://developers.openai.com/codex/cli/) on `PATH`
     logged in with ChatGPT Plus/Pro, or
-  - `opencode` on `PATH` with an existing login (default backend; supports
-    ChatGPT Plus/Pro subscriptions), or
+  - `opencode` on `PATH` with an existing login (supports ChatGPT Plus/Pro
+    subscriptions), or
   - a local [Ollama](https://ollama.com/) server
-- Optional, per tool: `ddgs` (`uv sync --extra tools`, for `web_search`), `gh`
-  (GitHub tools), network access (`web_fetch`)
+- Node.js 24+ only for the separate Studio dev server; `conclave serve` serves
+  Studio itself.
+- Git for Git tools, `gh` for GitHub tools, and network access for web/GitHub tools.
+  The web-search dependency is included in a normal install.
+
+Conclave finds the backend already set up on this computer: `codex`, then
+`opencode`, then an Ollama server with an installed model. It never guesses a
+model name, and it never replaces a backend you asked for by name.
 
 ## Install
 
@@ -39,17 +46,28 @@ uv sync
 Conclave exposes a general application CLI and REST API built on the same core.
 Studio uses the REST API exclusively for persistence, proposals and execution.
 
-Start both together with Node.js 24+ available:
+One command serves the API and the Studio page on one address:
+
+```sh
+uv run conclave serve
+```
+
+Open the address it prints. Startup also reports which AI backend it is using,
+or the one setting that would fix it. Press Ctrl+C to stop.
+
+`--port` moves it, and `--provider`/`--model` override the detected backend.
+Setting `CONCLAVE_API_TOKEN` leaves the page unserved, because a browser cannot
+present a bearer token; use the Studio dev server below in that case.
+
+For UI development, or to run the two processes separately, use Node.js 24+:
 
 ```sh
 uv run python dev.py --provider codex
 ```
 
-Press Ctrl+C to stop both. Use `--backend-port`, `--studio-port` or `--node` to
-override ports or the Node executable. Existing `CONCLAVE_*` settings, including
-the API token and data directory, are inherited by both services.
-
-Or start them independently:
+`--backend-port`, `--studio-port` and `--node` override ports and the Node
+executable, `--provider`/`--model` override the detected backend, and existing
+`CONCLAVE_*` settings are inherited by both services. Or start them by hand:
 
 ```sh
 # Terminal 1, repository root:
@@ -62,7 +80,8 @@ CONCLAVE_API_URL=http://127.0.0.1:8080 npm run dev
 
 See [REST endpoints and interface boundaries](REST_API.md)
 for the endpoint list, configuration, existing-data compatibility and local-host
-limits. Studio is at http://127.0.0.1:8787; Conclave stays running independently.
+limits. The Studio dev server is at http://127.0.0.1:8787; Conclave stays
+running independently.
 
 ## Create and run an application
 
@@ -81,13 +100,18 @@ views, or export an application from Studio and pass that file to `conclave run`
 Use `--inputs inputs.json` for declared request values. Every run pins its
 definition and reports its ID, status, events and actual output as JSON.
 Provider authentication remains with the backend; model IDs pass through.
-`--model` is optional for Codex/OpenCode and required for Ollama.
+`--provider` and `--model` are optional: without them the backend already set up
+on this computer is used, and Ollama's own installed model is chosen.
 
 Runs persist in the same local database as Studio by default. Use `--database
 /absolute/path/runs.sqlite` to select another database consistently across commands.
-The same `CONCLAVE_SOURCE_DIR`, `CONCLAVE_WEB`, `CONCLAVE_EXTENSIONS` and custom provider
-factory settings apply. Tools must be registered on the host; write/unknown
-capability approvals retain their existing gates.
+The same `CONCLAVE_SOURCE_DIR`, `CONCLAVE_EXTENSIONS` and custom provider
+factory settings apply. Bundled tools are registered automatically. Applications
+whose agents read files, Git or GitHub use a source folder: with nothing
+configured, that is the folder the command runs in, and `--source-dir <folder>`
+or `--source <resource-id>` choose another for one run. Path containment,
+hidden-file denial and the document filters apply inside it. Agent allowlists and
+write/unknown capability approvals retain their existing gates.
 
 ```bash
 uv run conclave status RUN_ID
@@ -120,6 +144,9 @@ uv run python -m investigation "why does the retry path double-count failures?"
 # explicit repository, different backend
 uv run investigation --repo ~/code/my-project --provider ollama --model qwen3.6 "..."
 
+# no provider flags: whichever backend this computer already has set up
+uv run investigation --repo ~/code/my-project "..."
+
 # bound the run: at most 40 tool calls, 5 minutes and 200k tokens
 uv run investigation --max-tool-calls 40 --max-seconds 300 --max-tokens 200000 "..."
 
@@ -136,8 +163,8 @@ console script, then use `investigation` instead.
 | --- | --- | --- |
 | `question` | a built-in repository review prompt | What to investigate |
 | `--repo` | `.` | Repository the tools are scoped to |
-| `--provider` | `opencode` | `codex`, `opencode` or `ollama` |
-| `--model` | provider default | Model name passed to the backend |
+| `--provider` | detected | `codex`, `opencode` or `ollama`; detected on this computer when unset |
+| `--model` | provider default | Model name passed to the backend; Ollama's installed model when unset |
 | `--ollama-url` | `http://127.0.0.1:11434` | Ollama server |
 | `--approve-destructive` | off | Approve tools that declare `WRITE`; without it such calls are refused |
 | `--max-tool-calls` | unbounded | Tool calls allowed for the whole run |
@@ -229,6 +256,9 @@ Replace `openai/<model-id>` with an ID from the list that is available to your
 subscription. Subscription model availability and usage limits are controlled
 by OpenAI; a ChatGPT subscription is not API credit. Choosing the API-key login
 method instead uses separately billed API access.
+
+With `opencode` already signed in, both flags can be omitted: Conclave detects
+it and the backend uses the model it is configured with.
 
 OpenAI authentication stays inside the backend, not the runtime: `--model` is
 passed through to OpenCode, which also supports other providers. Ollama and

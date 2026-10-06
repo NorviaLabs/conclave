@@ -549,3 +549,88 @@ def test_opencode_drops_null_bytes_from_the_prompt(
 
     assert "\x00" not in captured["prompt"]
     assert "beforeafter" in captured["prompt"]
+
+
+# =============================================================================
+# Choosing a backend
+# =============================================================================
+
+
+def only_installed(monkeypatch, *names):
+    monkeypatch.setattr(
+        providers.shutil,
+        "which",
+        lambda name: "/usr/bin/" + name if name in names else None,
+    )
+
+
+def test_installed_ollama_models_reads_names_and_survives_no_server(monkeypatch):
+    monkeypatch.setattr(
+        providers.urllib.request,
+        "urlopen",
+        lambda request, timeout=None: FakeResponse(
+            json.dumps({"models": [{"name": "local-a"}, {"name": "local-b"}, {"size": 1}]}).encode()
+        ),
+    )
+
+    assert providers.installed_ollama_models() == ["local-a", "local-b"]
+
+    def refuse(request, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", refuse)
+
+    # No server is "no models", not an error: the caller asked what this
+    # machine can run right now.
+    assert providers.installed_ollama_models() == []
+
+
+def test_resolve_provider_honours_a_named_backend(monkeypatch):
+    only_installed(monkeypatch, "opencode")
+
+    provider, name, reason = providers.resolve_provider(
+        Path("/repo"), "codex", timeout=5.0
+    )
+
+    # The requested backend is never silently replaced by the installed one.
+    assert provider is None and name == "codex"
+    assert "codex" in reason and reason
+
+    provider, name, reason = providers.resolve_provider(Path("/repo"), "claude")
+    assert provider is None and name == "claude" and "Unknown backend" in reason
+
+
+def test_resolve_provider_detects_the_backend_already_on_this_computer(monkeypatch):
+    only_installed(monkeypatch, "codex", "opencode")
+
+    provider, name, reason = providers.resolve_provider(Path("/repo"), timeout=7.0)
+
+    assert (name, reason) == ("codex", None)
+    assert isinstance(provider, CodexProvider) and provider.timeout == 7.0
+
+
+def test_resolve_provider_falls_back_to_an_installed_ollama_model(monkeypatch):
+    only_installed(monkeypatch)
+    monkeypatch.setattr(providers, "installed_ollama_models", lambda base_url, timeout=1.0: ["local:8b"])
+
+    provider, name, reason = providers.resolve_provider(Path("/repo"), timeout=5.0)
+
+    assert (name, reason) == ("ollama", None)
+    assert isinstance(provider, OllamaProvider)
+    assert provider.model == "local:8b"
+
+    # A named Ollama with no installed model reports what is missing and
+    # never guesses a model name.
+    monkeypatch.setattr(providers, "installed_ollama_models", lambda base_url, timeout=1.0: [])
+    provider, name, reason = providers.resolve_provider(Path("/repo"), "ollama")
+    assert provider is None and name == "ollama" and "no models installed" in reason
+
+
+def test_resolve_provider_reports_a_computer_with_nothing_installed(monkeypatch):
+    only_installed(monkeypatch)
+    monkeypatch.setattr(providers, "installed_ollama_models", lambda base_url, timeout=1.0: [])
+
+    provider, name, reason = providers.resolve_provider(Path("/repo"))
+
+    assert (provider, name) == (None, None)
+    assert "No AI backend was found" in reason

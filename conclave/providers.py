@@ -8,6 +8,7 @@ backend can measure one. Backends that cannot measure tokens return
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import urllib.request
 
@@ -323,3 +324,119 @@ def read_usage(
             "eval_count"
         ),
     )
+
+
+# =============================================================================
+# Choosing a backend
+# =============================================================================
+
+
+OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
+
+COMMAND_PROVIDERS = ("codex", "opencode")
+
+
+def installed_ollama_models(
+    base_url: str = OLLAMA_DEFAULT_URL,
+    timeout: float = 1.0,
+) -> list[str]:
+    """What the local Ollama server has pulled, if anything.
+
+    An unreachable server is "no models" rather than an error: the caller
+    asked what this machine can run right now, and the answer is nothing.
+    """
+
+    try:
+        with urllib.request.urlopen(
+            f"{base_url.rstrip('/')}/api/tags",
+            timeout=timeout,
+        ) as response:
+            entries = json.loads(
+                response.read().decode()
+            ).get("models", [])
+
+    except Exception:
+        return []
+
+    return [
+        entry["name"]
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("name"), str)
+    ]
+
+
+def resolve_provider(
+    workspace: Path,
+    name: str | None = None,
+    model: str | None = None,
+    timeout: float = 300.0,
+    ollama_url: str = OLLAMA_DEFAULT_URL,
+) -> tuple[ModelProvider | None, str | None, str | None]:
+    """The backend this machine can run: provider, its name, why there is none.
+
+    A named backend is honoured or refused, never silently replaced. With
+    no name, the first backend that answers is used, so a caller needs no
+    configuration to start. Detection never invents a model: a command
+    backend keeps whatever default it was authenticated with, and Ollama
+    is asked which models it actually has installed.
+    """
+
+    if name in COMMAND_PROVIDERS:
+        if shutil.which(name) is None:
+            return (
+                None,
+                name,
+                f"The configured {name} command is unavailable on this host; install it and sign in",
+            )
+
+        provider = (
+            CodexProvider(model, timeout)
+            if name == "codex"
+            else OpenCodeProvider(workspace, model, timeout)
+        )
+
+        return provider, name, None
+
+    if name == "ollama":
+        chosen = model or next(
+            iter(installed_ollama_models(ollama_url)),
+            None,
+        )
+
+        if chosen is None:
+            return (
+                None,
+                name,
+                f"The Ollama server at {ollama_url} has no models installed; pull one to run it",
+            )
+
+        return (
+            OllamaProvider(chosen, timeout, ollama_url),
+            name,
+            None,
+        )
+
+    if name:
+        return None, name, f"Unknown backend {name!r}"
+
+    for candidate in COMMAND_PROVIDERS:
+        if shutil.which(candidate) is not None:
+            return resolve_provider(
+                workspace,
+                candidate,
+                model,
+                timeout,
+                ollama_url,
+            )
+
+    installed = installed_ollama_models(ollama_url)
+
+    if installed:
+        return (
+            OllamaProvider(installed[0], timeout, ollama_url),
+            "ollama",
+            None,
+        )
+
+    return None, None, "No AI backend was found on this computer; install codex or opencode, or start Ollama"

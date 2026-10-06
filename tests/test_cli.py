@@ -73,7 +73,9 @@ def test_parse_args_defaults(monkeypatch):
 
     assert args.question == []
     assert args.repo == "."
-    assert args.provider == "opencode"
+    # No provider flag means "whichever backend this computer has",
+    # so a first run needs no configuration at all.
+    assert args.provider is None
     assert args.model is None
     assert args.ollama_url == (
         "http://127.0.0.1:11434"
@@ -131,27 +133,40 @@ def test_help_belongs_to_the_application(capsys):
     assert "--repo" in output
 
 
+def installed_backend(monkeypatch, *names):
+    """The backends this computer has, for provider-selection tests."""
+
+    from conclave import providers
+
+    monkeypatch.setattr(providers.shutil, "which", lambda name: name if name in names else None)
+
+
 @pytest.mark.parametrize(
     "model",
     ["fast", "openai/gpt-5.2-codex"],
 )
 def test_make_provider_opencode(monkeypatch, model):
+    installed_backend(monkeypatch, "opencode")
+
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "investigation",
+            "--provider",
+            "opencode",
             "--model",
             model,
         ],
     )
 
-    provider = cli.make_provider(
+    provider, name = cli.make_provider(
         cli.parse_args(),
         Path("/repo"),
     )
 
     assert isinstance(provider, OpenCodeProvider)
+    assert name == "opencode"
     assert provider.model == model
     assert provider.cwd == Path("/repo")
 
@@ -171,42 +186,58 @@ def test_make_provider_ollama(monkeypatch):
         ],
     )
 
-    provider = cli.make_provider(
-        cli.parse_args(),
-        Path("/repo"),
-    )
+    provider, name = cli.make_provider(cli.parse_args(), Path("/repo"))
 
-    assert isinstance(provider, OllamaProvider)
+    assert isinstance(provider, OllamaProvider) and name == "ollama"
     assert provider.model == "qwen3.6"
     assert provider.base_url == "http://host:9"
 
 
 @pytest.mark.parametrize("model", [None, "gpt-5.2-codex"])
-def test_make_provider_codex(model):
+def test_make_provider_codex(monkeypatch, model):
+    installed_backend(monkeypatch, "codex")
+
     argv = ["--provider", "codex", "--model-timeout", "42"]
     if model:
         argv.extend(["--model", model])
-    provider = cli.make_provider(cli.parse_args(argv), Path("."))
+    provider, name = cli.make_provider(cli.parse_args(argv), Path("."))
     assert isinstance(provider, CodexProvider)
+    assert name == "codex"
     assert provider.model == model
     assert provider.timeout == 42
 
 
-def test_make_provider_ollama_default_model(
-    monkeypatch,
-):
+def test_make_provider_uses_an_installed_ollama_model(monkeypatch):
+    from conclave import providers
+
+    monkeypatch.setattr(providers, "installed_ollama_models", lambda *args, **kwargs: ["local-model:8b"])
     monkeypatch.setattr(
         sys,
         "argv",
         ["investigation", "--provider", "ollama"],
     )
 
-    provider = cli.make_provider(
-        cli.parse_args(),
-        Path("/repo"),
-    )
+    provider, name = cli.make_provider(cli.parse_args(), Path("/repo"))
 
-    assert provider.model == "qwen3.6"
+    # Never a guessed model: Ollama is asked what it has installed.
+    assert (name, provider.model) == ("ollama", "local-model:8b")
+
+
+def test_make_provider_detects_what_is_installed(monkeypatch):
+    installed_backend(monkeypatch, "codex", "opencode")
+
+    args = cli.parse_args(["investigation"])
+
+    provider, name = cli.make_provider(args, Path("/repo"))
+
+    assert name == "codex" and isinstance(provider, CodexProvider)
+
+
+def test_make_provider_says_what_to_install_when_there_is_nothing(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["investigation"])
+
+    with pytest.raises(RuntimeError, match="No AI backend was found"):
+        cli.make_provider(cli.parse_args(), Path("/repo"))
 
 
 def test_main_runs_the_investigation(
@@ -215,6 +246,8 @@ def test_main_runs_the_investigation(
     repo,
     capsys,
 ):
+    installed_backend(monkeypatch, "opencode")
+
     monkeypatch.setattr(
         sys,
         "argv",
@@ -254,6 +287,8 @@ def test_main_uses_the_default_question(
     captured_run,
     repo,
 ):
+    installed_backend(monkeypatch, "opencode")
+
     monkeypatch.setattr(
         sys,
         "argv",
@@ -378,6 +413,8 @@ def test_the_cli_passes_its_limits_to_the_run(
     captured_run,
     repo,
 ):
+    installed_backend(monkeypatch, "opencode")
+
     monkeypatch.setattr(
         sys,
         "argv",
@@ -401,6 +438,8 @@ def test_the_cli_passes_its_limits_to_the_run(
 
 
 def test_cli_passes_all_application_overrides(monkeypatch, captured_run, repo):
+    installed_backend(monkeypatch, "opencode")
+
     overrides = {
         "max-rounds": "16",
         "max-delegations-per-round": "5",
@@ -438,10 +477,13 @@ def test_cli_passes_all_application_overrides(monkeypatch, captured_run, repo):
     assert cli.make_run_config(defaults) == cli.RUN_CONFIG
     assert cli.make_budget(defaults) == cli.make_budget(cli.parse_args([]))
     assert cli.make_budget(defaults).max_delegations is None
-    ollama = cli.make_provider(
+    from conclave import providers
+
+    monkeypatch.setattr(providers, "installed_ollama_models", lambda *args, **kwargs: ["local-model"])
+    ollama, name = cli.make_provider(
         cli.parse_args(["--provider", "ollama", "--model-timeout", "42"]), repo
     )
-    assert ollama.timeout == 42
+    assert (name, ollama.timeout, ollama.model) == ("ollama", 42, "local-model")
 
 
 @pytest.mark.parametrize("flag,value", [

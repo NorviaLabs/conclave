@@ -7,6 +7,7 @@ import asyncio
 import hmac
 import json
 import signal
+from typing import NamedTuple
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -14,6 +15,111 @@ from .application.catalogue import configured_data, starter_definitions
 from .application.definition import validate_definition
 from .application.service import configured_host, setting
 from .application.workspace import Workspace, Conflict
+from .application.resources import load_resources
+
+
+SDK_SOURCE = '"""Compatibility facade for the installed Conclave application adapter."""\nfrom conclave.application import run_application, validate_definition\n\n__all__ = ["run_application", "validate_definition"]\n'
+
+CONTENT_TYPES = {
+    ".css": "text/css;charset=utf-8",
+    ".html": "text/html;charset=utf-8",
+    ".js": "text/javascript;charset=utf-8",
+    ".json": "application/json;charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+}
+
+# The browser loads its modules from absolute paths, so the page and its
+# sources live beside the application data they import over REST.
+SHARED_MODULES = {
+    "definition.js": ("'../../conclave/application/data/defaults.json'", "/api/config/defaults"),
+    "catalogue.js": ("'../../conclave/application/data/catalogue.json'", "/api/config/catalogue"),
+}
+
+
+class StaticResponse(NamedTuple):
+    status: int
+    body: bytes
+    content_type: str
+    filename: str | None = None
+
+
+def studio_assets(root=None) -> dict[str, tuple[bytes, str]]:
+    """The Studio page and its modules, keyed by request path.
+
+    Read once at startup: the server never touches the filesystem for a
+    request path, so no crafted path can reach a file outside this bundle.
+    A checkout without Studio serves the REST API alone.
+    """
+
+    studio = Path(root) if root is not None else Path(__file__).resolve().parents[1] / "studio"
+    web, shared = studio / "web", studio / "shared"
+
+    if not web.is_dir() or not shared.is_dir():
+        return {}
+
+    assets = {
+        "/" + path.relative_to(web).as_posix(): (
+            path.read_bytes(),
+            CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
+        )
+        for path in sorted(web.rglob("*"))
+        if path.is_file()
+    }
+
+    for name, (imported, endpoint) in SHARED_MODULES.items():
+        source = (shared / name).read_text().replace(imported, f"'{endpoint}'")
+
+        assets["/" + name] = (source.encode(), CONTENT_TYPES[".js"])
+
+    return assets
+
+
+def static_page(api, method, target, assets) -> StaticResponse | None:
+    """A served page, module or downloaded adapter, or None for no match."""
+
+    path = unquote(urlsplit(target).path)
+
+    if method not in {"GET", "HEAD"}:
+        return StaticResponse(405, b"", "text/plain;charset=utf-8")
+
+    if path == "/downloads/application.py":
+        return StaticResponse(200, SDK_SOURCE.encode(), "text/x-python;charset=utf-8", "conclave_application.py")
+
+    catalogue = {"/catalogue/defaults.json": api.defaults, "/catalogue/bundled.json": api.catalogue}
+
+    if path in catalogue:
+        return StaticResponse(200, json.dumps(catalogue[path]).encode(), CONTENT_TYPES[".json"])
+
+    asset = assets.get("/index.html" if path == "/" else path)
+
+    if asset is None:
+        return None
+
+    return StaticResponse(200, asset[0], asset[1])
+
+
+def startup_lines(api, address, assets, token) -> list[str]:
+    """What an operator needs at startup: where it is, and what runs it."""
+
+    lines = [f"Conclave REST API: {address}/api/health"]
+
+    if assets:
+        lines.append(f"Studio: {address}")
+    elif token:
+        # A browser page cannot present a bearer token, so a token
+        # deployment keeps the Studio dev server and this API separate.
+        lines.append("Studio is not served while CONCLAVE_API_TOKEN is set; start the Studio dev server instead.")
+    elif not api.host.profile.serve_ui:
+        lines.append(f"This {api.host.profile.name} host serves the API only; deploy the Studio bundle separately.")
+
+    if api.host.provider is not None:
+        lines.append(f"AI backend: {api.host.provider_name or 'configured'}"
+                     + (" (found on this computer)" if api.host.provider_source == "detected" else ""))
+    elif api.host.unavailable:
+        lines.append(f"AI backend: unavailable. {api.host.unavailable}")
+
+    return lines
 
 
 def reject_nonfinite(value):
@@ -27,9 +133,13 @@ class ApplicationAPI:
         self.catalogue = catalogue if catalogue is not None else configured_data("catalogue")
         self.proposal_lock = asyncio.Lock()
 
-    async def dispatch(self, method, target, value=None):
+    async def dispatch(self, method, target, value=None, *, principal=None, streaming=False):
+        """Answer one request. `principal` is who acted, when the transport
+        established one; the host's own principal answers otherwise. `streaming`
+        is what the transport can do, which decides whether this host reports
+        that a run's events can be pushed."""
         try:
-            return await self._dispatch(method, target, value)
+            return await self._dispatch(method, target, value, principal, streaming)
         except Conflict as error:
             return 409, {"error": str(error)}
         except KeyError:
@@ -47,7 +157,7 @@ class ApplicationAPI:
         if not isinstance(value, dict) or set(value) != set(required):
             raise ValueError("Use the supported request fields")
 
-    async def _dispatch(self, method, target, value):
+    async def _dispatch(self, method, target, value, principal=None, streaming=False):
         url = urlsplit(target)
         parts = [unquote(part) for part in url.path.strip('/').split('/')]
         query = parse_qs(url.query)
@@ -59,9 +169,31 @@ class ApplicationAPI:
         if method == "GET" and path == "/api/health":
             return 200, {"status": "ok", "api_version": 1}
         if method == "GET" and path == "/api/runtime":
-            return await self.host.handle("runtime", {})
+            return await self.host.handle("runtime", {}, streaming=streaming)
+        if path == "/api/settings/sources":
+            if method == "GET":
+                return 200, {"sources": {key: {"name": item["name"], "path": str(item["path"]),
+                                              "applications": item["applications"]}
+                                          for key, item in (self.host.resources or {}).items()}}
+            if method == "PUT":
+                self.fields(value, {"sources"})
+                if not isinstance(value["sources"], dict):
+                    raise ValueError("Source settings must contain a resource object")
+                if self.host.profile.name != "local":
+                    # A tenant of a hosted deployment does not name a path on
+                    # the server: its sources come from the deployment, which is
+                    # also what keeps one tenant's folders away from another.
+                    raise ValueError("This host's sources are configured by the deployment")
+                resources = load_resources(None, configured=value["sources"])
+                filename = self.host.paths.root / "sources.json"
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                temporary = filename.with_suffix('.json.new')
+                temporary.write_text(json.dumps(value["sources"], indent=2) + '\n')
+                temporary.replace(filename)
+                self.host.resources = resources
+                return 200, {"saved": True}
         if method == "GET" and path == "/api/sdk/application":
-            return 200, {"filename": "conclave_application.py", "source": '"""Compatibility facade for the installed Conclave application adapter."""\nfrom conclave.application import run_application, validate_definition\n\n__all__ = ["run_application", "validate_definition"]\n'}
+            return 200, {"filename": "conclave_application.py", "source": SDK_SOURCE}
         if method == "GET" and len(parts) == 3 and parts[1] == "config":
             data = {"defaults": self.defaults, "catalogue": self.catalogue}
             if parts[2] in data:
@@ -139,22 +271,59 @@ class ApplicationAPI:
                     return 200, {"events": events, "next_cursor": record["events"][-1]["sequence"] if record["events"] else 0, "status": record["status"]}
                 if method == "POST" and action in {"resume", "cancel", "reviews"}:
                     self.fields(value, {"review_id", "output"} if action == "reviews" else set())
-                    return await self.host.handle("review" if action == "reviews" else action, {**value, "run_id": run_id})
+                    return await self.host.handle("review" if action == "reviews" else action, {**value, "run_id": run_id},
+                                                  principal=principal)
         return 404, {"error": "Endpoint not found"}
 
 
-def configured_api(*, workspace=None):
-    host = configured_host(workspace=workspace)
+def configured_api(*, workspace=None, principal=None):
+    host = configured_host(workspace=workspace, principal=principal)
     defaults, catalogue = (configured_data(name) for name in ("defaults", "catalogue"))
-    database = setting("DATABASE", host.repository.path.parent / "studio.sqlite")
-    store = Workspace(database, starters=starter_definitions(catalogue, defaults), member_limit=int(setting("MEMBER_LIMIT", "200")))
+    # One tenant's applications and catalogue; the host's principal decided
+    # which, and a request cannot reach another tenant's store.
+    store = Workspace(host.paths.applications, starters=starter_definitions(catalogue, defaults),
+                      member_limit=int(setting("MEMBER_LIMIT", "200")))
     return ApplicationAPI(host, store, defaults=defaults, catalogue=catalogue)
 
 
-async def start_server(api, port=8080, *, token=None):
-    """Start a loopback HTTP/1.1 server; one bounded request per connection."""
+class TenantAPIs:
+    """One application service per tenant, built on first use.
+
+    Storage is per tenant, so a request can only ever reach the tenant its
+    service was built for. The acting principal is still passed per request,
+    because several people may act inside one tenant.
+    """
+
+    def __init__(self, workspace=None, *, factory=None):
+        self.workspace, self.factory, self.apis = workspace, factory or configured_api, {}
+
+    def for_principal(self, principal) -> ApplicationAPI:
+        service = self.apis.get(principal.tenant)
+
+        if service is None:
+            service = self.apis[principal.tenant] = self.factory(workspace=self.workspace, principal=principal)
+
+        return service
+
+    async def close(self) -> None:
+        services, self.apis = list(self.apis.values()), {}
+
+        for service in services:
+            await service.host.close()
+
+
+async def start_server(api, port=8080, *, token=None, assets=None):
+    """Start a loopback HTTP/1.1 server; one bounded request per connection.
+
+    `assets` serves the Studio bundle from this same origin, so one
+    process and one address run the whole local application.
+    """
+    assets = assets or {}
+
     async def respond(reader, writer):
         status, result = 400, {"error": "Invalid HTTP request"}
+        head = False
+
         try:
             async with asyncio.timeout(15):
                 raw = await reader.readuntil(b"\r\n\r\n")
@@ -162,6 +331,7 @@ async def start_server(api, port=8080, *, token=None):
                     raise ValueError()
                 lines = raw.decode("ascii").split("\r\n")
                 method, target, version = lines[0].split(' ')
+                head = method == "HEAD"
                 if version != "HTTP/1.1" or not target.startswith('/'):
                     raise ValueError()
                 headers = {}
@@ -189,13 +359,26 @@ async def start_server(api, port=8080, *, token=None):
                     value = json.loads(content, parse_constant=reject_nonfinite) if content else None
                     status, result = None, (method, target, value)
             if status is None:
-                # Provider work is independent of the request-read timeout.
-                status, result = await api.dispatch(*result)
+                method, target, value = result
+                page = None if urlsplit(target).path.startswith("/api/") else static_page(api, method, target, assets)
+                if page is not None:
+                    status, result = page.status, page
+                else:
+                    # Provider work is independent of the request-read timeout.
+                    status, result = await api.dispatch(method, target, value)
         except (ValueError, UnicodeError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
             status, result = 400, {"error": "Invalid HTTP or JSON request"}
+        payload, content_type, filename = b"", "application/json", None
+        if isinstance(result, StaticResponse):
+            status, payload, content_type, filename = result
+        elif status != 204:
+            payload = json.dumps(result, allow_nan=False).encode()
+        response = [f"HTTP/1.1 {status} Response", f"Content-Type: {content_type}", f"Content-Length: {len(payload)}"]
+        if filename:
+            response.append(f'Content-Disposition: attachment; filename="{filename}"')
+        response += ["Cache-Control: no-store", "X-Content-Type-Options: nosniff", "Connection: close"]
         try:
-            payload = b"" if status == 204 else json.dumps(result, allow_nan=False).encode()
-            writer.write(f"HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {len(payload)}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n".encode() + payload)
+            writer.write("\r\n".join(response).encode() + b"\r\n\r\n" + (b"" if head else payload))
             await writer.drain()
         except (ConnectionError, OSError):
             pass
@@ -207,14 +390,21 @@ async def start_server(api, port=8080, *, token=None):
 
 async def serve(port=8080):
     api = configured_api(workspace=Path.cwd())
+    token = setting("API_TOKEN")
+    # Serving the page from this process is a local convenience: a hosted
+    # deployment ships the bundle separately, and a bearer token cannot be
+    # presented by a browser page anyway.
+    assets = studio_assets() if api.host.profile.serve_ui and not token else {}
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stopped.set)
     try:
-        server = await start_server(api, port, token=setting("API_TOKEN"))
+        server = await start_server(api, port, token=token, assets=assets)
         async with server:
-            print(f"Conclave REST API: http://127.0.0.1:{server.sockets[0].getsockname()[1]}", flush=True)
+            address = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            for line in startup_lines(api, address, assets, token):
+                print(line, flush=True)
             await stopped.wait()
     finally:
         await api.host.close()

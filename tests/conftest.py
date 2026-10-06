@@ -42,6 +42,27 @@ CONFIG = RunConfig(
 TIMEOUT = 300.0
 
 
+def no_connection(request, timeout=None):
+    """The network boundary, faked for every test."""
+
+    raise OSError("No test reaches the network")
+
+
+@pytest.fixture(autouse=True)
+def no_installed_backend(monkeypatch):
+    """No test depends on the backends this machine happens to have.
+
+    Backend detection is a convenience for a first run, so the suite
+    starts from a computer with none of them; a test that exercises
+    detection patches what it needs itself.
+    """
+
+    from conclave import providers
+
+    monkeypatch.setattr(providers.shutil, "which", lambda name: None)
+    monkeypatch.setattr(providers.urllib.request, "urlopen", no_connection)
+
+
 def make_budget(**overrides) -> RunBudget:
     """A run budget with the caps spelled out."""
 

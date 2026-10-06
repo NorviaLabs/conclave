@@ -123,8 +123,8 @@ def test_importing_the_core_does_not_pull_the_bundled_tools():
     assert "ok" in result.stdout
 
 
-def test_everything_imports_without_the_optional_scraper():
-    """Acceptance test: `ddgs` is optional, even for the bundled tools."""
+def test_everything_imports_without_loading_the_scraper():
+    """Acceptance test: registering bundled tools does not import `ddgs`."""
 
     result = run_python(
         "\n".join(
@@ -146,6 +146,12 @@ def test_everything_imports_without_the_optional_scraper():
 
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout
+
+
+def test_web_search_dependency_is_included_in_normal_install():
+    requirements = importlib.metadata.requires("conclave")
+    assert any(requirement.startswith("ddgs") and "extra ==" not in requirement
+               for requirement in requirements)
 
 
 def test_main_module_exposes_run():

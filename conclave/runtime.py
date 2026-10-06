@@ -33,7 +33,11 @@ from .approval import (
     Approval,
     Approver,
     refusal_text,
-    request_approval,
+)
+from .authority import (
+    InProcessAuthority,
+    ModelCall,
+    RunAuthority,
 )
 from .budget import RunBudget
 from .config import RunConfig
@@ -127,6 +131,7 @@ class ToolAgentRuntime:
         *,
         config: RunConfig,
         approver: Approver | None = None,
+        authority: RunAuthority | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -136,6 +141,20 @@ class ToolAgentRuntime:
         self.approver = approver
 
         self._approval_lock = asyncio.Lock()
+
+        # The provider, the budget and the approver answer through one object,
+        # so a loop that runs somewhere else asks the same questions over a
+        # transport instead of holding any of them.
+        self.authority = (
+            authority
+            if authority is not None
+            else InProcessAuthority(
+                provider,
+                budget,
+                approver,
+                lock=self._approval_lock,
+            )
+        )
 
     # =====================================================================
     # Running one agent
@@ -234,8 +253,12 @@ class ToolAgentRuntime:
             )
 
             completion = (
-                await self.provider.complete(
-                    messages
+                await self.authority.complete(
+                    ModelCall(
+                        run_id=run_id,
+                        agent=spec.name,
+                        messages=messages,
+                    )
                 )
             )
 
@@ -243,7 +266,7 @@ class ToolAgentRuntime:
 
             now = time.monotonic()
 
-            for event in self.charge(
+            for event in await self.charge(
                 run_id,
                 [
                     (
@@ -360,7 +383,7 @@ class ToolAgentRuntime:
                 observation = result_text
 
             elif kind == "delegate":
-                plan = self.plan_delegation(
+                plan = await self.plan_delegation(
                     spec,
                     action,
                     depth,
@@ -474,10 +497,10 @@ class ToolAgentRuntime:
                 }
             )
 
-            if self.budget.exceeded(
+            if await self.authority.exceeded(
                 "wall_clock_seconds"
             ):
-                yield self.budget_event(
+                yield await self.budget_event(
                     run_id,
                     "wall_clock_seconds",
                 )
@@ -517,7 +540,7 @@ class ToolAgentRuntime:
     # Guards and accounting
     # =====================================================================
 
-    def charge(
+    async def charge(
         self,
         run_id: str,
         measurements: list[
@@ -532,14 +555,14 @@ class ToolAgentRuntime:
 
         for dimension, amount in measurements:
             if (
-                self.budget.settle(
+                await self.authority.settle(
                     dimension,
                     amount,
                 )
                 is not None
             ):
                 events.append(
-                    self.budget_event(
+                    await self.budget_event(
                         run_id,
                         dimension,
                     )
@@ -547,23 +570,22 @@ class ToolAgentRuntime:
 
         return events
 
-    def budget_event(
+    async def budget_event(
         self,
         run_id: str,
         dimension: str,
     ) -> BudgetExceeded:
+        limit, used = await self.authority.numbers(
+            dimension
+        )
+
         return BudgetExceeded(
             run_id=run_id,
             dimension=dimension,
             limit=float(
-                self.budget.limit(
-                    dimension
-                )
-                or 0.0
+                limit or 0.0
             ),
-            used=self.budget.spent_on(
-                dimension
-            ),
+            used=used,
         )
 
     def exhausted(
@@ -615,7 +637,7 @@ class ToolAgentRuntime:
             ),
         )
 
-    def plan_delegation(
+    async def plan_delegation(
         self,
         spec: AgentSpec,
         action: dict[str, Any],
@@ -667,7 +689,7 @@ class ToolAgentRuntime:
                 "task was empty.",
             )
 
-        refusal = self.budget.reserve(
+        refusal = await self.authority.reserve_delegation(
             str(target),
             depth + 1,
             ancestry + (spec.name,),
@@ -816,7 +838,7 @@ class ToolAgentRuntime:
             )
 
         refusal = (
-            self.budget.reserve_dimension(
+            await self.authority.reserve(
                 "tool_calls"
             )
         )
@@ -838,12 +860,11 @@ class ToolAgentRuntime:
                 ),
             )
 
-        approval = await request_approval(
+        approval = await self.authority.approve(
             tool,
             spec.name,
             arguments,
-            self.approver,
-            self._approval_lock,
+            run_id,
         )
 
         if approval is Approval.REFUSED:
@@ -876,6 +897,8 @@ class ToolAgentRuntime:
                 await self.tools.execute(
                     name,
                     arguments,
+                    run_id=run_id,
+                    agent=spec.name,
                 )
             )
 
@@ -922,7 +945,7 @@ class ToolAgentRuntime:
 
         delegation = ""
 
-        if self.budget.may_delegate(depth):
+        if self.authority.may_delegate(depth):
             delegation = f"""
 To delegate follow-up work:
 
@@ -954,7 +977,7 @@ multi-agent system.
 {spec.instructions}
 
 You are at depth {depth} of
-{self.budget.max_depth}.
+{self.authority.max_depth}.
 
 The Python runtime owns all tools.
 You cannot invoke tools directly.

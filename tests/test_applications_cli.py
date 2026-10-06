@@ -57,6 +57,30 @@ def test_exported_application_review_and_resume(tmp_path, monkeypatch, capsys):
     assert len(provider.prompts) == 2
 
 
+def test_run_selects_or_authorizes_a_source(tmp_path, monkeypatch, capsys):
+    """The CLI can answer the source question without an environment setting."""
+    path = tmp_path / "application.json"
+    cli.run(["create", str(path), "--name", "Reader", "--instructions", "Read the supplied notes."])
+    provider = ScriptedProvider(default={"type": "final", "content": "Done", "text": "Read"})
+    repository = RunRepository(tmp_path / "runs.sqlite")
+    seen = {}
+
+    def host(**kwargs):
+        seen.update(kwargs)
+        return LocalRunHost(repository, provider, ToolRegistry(20000), reviewer="operator")
+
+    monkeypatch.setattr(cli, "configured_host", host)
+
+    cli.run(["run", str(path), "--task", "Read the notes", "--source", "case-a"])
+    record = json.loads(capsys.readouterr().out)
+    assert record["request"]["resources"] == {"source": "case-a"}
+    assert seen["source_dir"] is None
+
+    cli.run(["run", str(path), "--task", "Read the notes", "--source-dir", str(tmp_path)])
+    capsys.readouterr()
+    assert seen["source_dir"] == str(tmp_path)
+
+
 def test_invalid_definition_does_not_create_run(tmp_path, monkeypatch):
     path = tmp_path / "invalid.json"
     path.write_text('{}')

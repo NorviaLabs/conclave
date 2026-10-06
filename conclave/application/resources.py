@@ -6,13 +6,15 @@ import hashlib
 
 from conclave import Capability, Tool, ToolRegistry
 
-SOURCE_TOOLS = frozenset({"list_files", "read_file", "search_files", "knowledge_search"})
+REPOSITORY_TOOLS = frozenset({"git_status", "git_log", "git_diff", "git_show", "github_issue", "github_pr",
+                              "github_search_issues", "github_search_prs"})
+SOURCE_TOOLS = frozenset({"list_files", "read_file", "search_files", "knowledge_search"}) | REPOSITORY_TOOLS
 
 
-def load_resources(filename, source=None):
-    resources = json.loads(Path(filename).read_text()) if filename else {}
+def load_resources(filename, source=None, *, configured=None):
+    resources = configured if configured is not None else json.loads(Path(filename).read_text()) if filename else {}
     if not isinstance(resources, dict):
-        raise ValueError("CONCLAVE_RESOURCES_FILE must contain a resource object")
+        raise ValueError("Source settings must contain a resource object")
     if source:
         resources.setdefault("default", {"path": source, "name": "Local source folder"})
     result = {}
@@ -35,6 +37,31 @@ def load_resources(filename, source=None):
         result[identifier] = {"path": root, "name": name, "applications": allowed,
                               "revision": hashlib.sha256(str(root).encode()).hexdigest()}
     return result
+
+
+def request_resources(request) -> dict:
+    """The resources a request pins: its own, or the ones its definition names.
+
+    One definition of "the source this run uses", so binding the tools and
+    granting the sandbox cannot disagree.
+    """
+
+    return request.get('resources', request['definition'].get('resources', {}))
+
+
+def working_folder(workspace) -> dict:
+    """The folder this host was started in, as one authorized source.
+
+    A first run should not need a setting to read the folder the operator
+    is already standing in. Containment, hidden-file denial and the
+    document filters still apply inside it, exactly as for a folder
+    authorized by name.
+    """
+
+    return load_resources(
+        None,
+        configured={"default": {"path": str(workspace), "name": "This folder"}},
+    )
 
 
 class SourceTools:
@@ -120,16 +147,33 @@ def register_source_tools(registry, source=None):
     for name, (description, parameters) in descriptions.items():
         registry.register(Tool(name, description, parameters, getattr(source, name) if source else unbound, frozenset({Capability.READ})))
 
+    from conclave.tools import build_tool_registry
+    bundled = build_tool_registry(source.root if source else Path.cwd(), registry.max_output_chars)
+
+    def scoped(func):
+        async def execute(**kwargs):
+            return await func(**kwargs)
+        return execute
+
+    for name in sorted(REPOSITORY_TOOLS):
+        tool = bundled.tool(name)
+        registry.register(Tool(name, tool.description, tool.parameters,
+                               scoped(tool.func) if source else unbound, tool.capabilities))
+
 
 def bind_resources(tools, resources, request, extensions):
+    """The tools one request may use, with source tools bound to its source."""
+
     requested = {name for agent in request['definition']['agents'] for name in agent['tools']
                  if tools.tool(name) is not None and getattr(tools.tool(name).func, '__module__', None) == __name__}
-    binding = request.get('resources', {}).get('source')
+    binding = request_resources(request).get('source')
     if binding is None and requested & SOURCE_TOOLS and 'default' in resources:
         binding = 'default'
     if binding is None:
         if requested & SOURCE_TOOLS:
-            raise ValueError("Select a source resource for this request")
+            raise ValueError("This application reads source documents, but no source folder is authorized"
+                             " for it. Set CONCLAVE_SOURCE_DIR, pass --source-dir, or add a source in Studio's"
+                             " source settings.")
         return tools
     resource = resources.get(binding)
     if resource is None:
@@ -142,9 +186,7 @@ def bind_resources(tools, resources, request, extensions):
     revision = request.get('resources', {}).get('source_revision')
     if revision is not None and revision != resource['revision']:
         raise ValueError("Selected source resource changed; start a new request")
-    bound = ToolRegistry(tools.max_output_chars)
-    for tool in tools.tools.values():
-        bound.register(tool)
+    bound = tools.copy()
     scoped = ToolRegistry(tools.max_output_chars)
     register_source_tools(scoped, SourceTools(resource['path'], extensions))
     for name, tool in scoped.tools.items():

@@ -10,16 +10,19 @@ import getpass
 import json
 import math
 import os
-import shutil
 import sys
 from pathlib import Path
 
-from conclave import CodexProvider, OpenCodeProvider, OllamaProvider, ToolRegistry
+from conclave import ToolRegistry
+from conclave.providers import OLLAMA_DEFAULT_URL, resolve_provider
 from .definition import validate_host_tools
 from .runs import RunRepository, validate_run_request
 from .extensions import ConnectorAdapter, load_extensions, load_provider_factory
 from .planning import propose
-from .resources import load_resources, register_source_tools, bind_resources, SourceTools, SOURCE_TOOLS
+from .principal import Principal, resolve_principal
+from .profile import LOCAL, resolve_profile
+from .resources import load_resources, register_source_tools, bind_resources, working_folder, SourceTools, SOURCE_TOOLS
+from .storage import RunStore, StoragePaths, tenant_paths, WorkspaceStore
 
 def setting(name, default=None):
     return os.environ.get("CONCLAVE_" + name, os.environ.get("STUDIO_" + name, default))
@@ -45,16 +48,48 @@ def public_record(record):
 
 
 class LocalRunHost:
-    def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, unavailable=None, adapters=(), resources=None, source_extensions=()):
+    def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, provider_source=None,
+                 unavailable=None, adapters=(), resources=None, source_extensions=(), profile=None,
+                 principal=None, paths=None, sandbox=None, loop=None):
         self.repository, self.provider, self.tools = repository, provider, tools
-        self.reviewer, self.provider_name, self.unavailable = reviewer, provider_name, unavailable
+        # `reviewer` names the actor recorded on a human contribution; the
+        # principal also carries the tenant whose storage this host holds.
+        self.principal = principal or resolve_principal(reviewer, source="host")
+        self.reviewer, self.provider_name, self.unavailable = self.principal.name, provider_name, unavailable
+        # Where this host writes what it owns. A host built by hand keeps the
+        # files beside its repository, which is what it did before tenancy.
+        self.paths = paths or StoragePaths(root=Path(repository.path).parent, runs=Path(repository.path),
+                                           applications=Path(repository.path).parent / "studio.sqlite")
+        # A deployment that runs tool calls behind a boundary supplies a
+        # factory; each run then gets an executor scoped to that run's grant.
+        self.sandbox = sandbox
+        # Where the agent loop runs: this process by default, a sandbox when a
+        # deployment says so. The budget and the store stay here either way.
+        self.loop = loop
+        # "configured" when a host setting chose this backend, "detected"
+        # when it was the backend already set up on this machine.
+        self.provider_source = provider_source
+        self.profile = profile or LOCAL
         self.tasks = {}
         self.adapters = tuple(adapters)
         self.resources = resources
         self.source_extensions = source_extensions
 
     def run_tools(self, request):
-        return bind_resources(self.tools, self.resources, request, self.source_extensions) if self.resources is not None else self.tools
+        """The tools one run may use, and where its calls actually run.
+
+        A sandbox factory is consulted per run, so the executor carries that
+        run's grant rather than the host's whole tool set.
+        """
+
+        tools = bind_resources(self.tools, self.resources, request, self.source_extensions) if self.resources is not None else self.tools
+
+        if self.sandbox is not None:
+            # The host's registry is shared between runs; a run's grant is not.
+            tools = tools.copy()
+            tools.executor = self.sandbox(tools, request)
+
+        return tools
 
     async def _consume(self, stream):
         try:
@@ -70,7 +105,8 @@ class LocalRunHost:
         if run_id in self.tasks:
             raise ValueError("This request is already running")
         tools = self.run_tools(self.repository.get(run_id)["request"])
-        stream = self.repository.resume(run_id, self.provider, tools) if resume else self.repository.execute(run_id, self.provider, tools)
+        stream = (self.repository.resume(run_id, self.provider, tools, loop=self.loop) if resume
+                  else self.repository.execute(run_id, self.provider, tools, loop=self.loop))
         # Claim and commit the first event before returning success to Node.
         try:
             await anext(stream)
@@ -85,7 +121,11 @@ class LocalRunHost:
         if self.provider is None:
             raise ValueError(self.unavailable or "Configure an AI provider on the local host")
 
-    async def handle(self, command, value):
+    async def handle(self, command, value, *, principal=None, streaming=False):
+        """Answer one command. `principal` names the actor for this request,
+        which matters inside a tenant where several people act; `streaming`
+        says whether this transport can push a run's events instead of being
+        asked for them."""
         if not isinstance(value, dict):
             raise ValueError("Provide a JSON request object")
         if command == "runtime":
@@ -98,10 +138,16 @@ class LocalRunHost:
                                        "category": "Host connections", "description": "Connection check failed",
                                        "default_mode": adapter.mode, "status": "unavailable", "available": False,
                                        "tools": list(adapter.tools), "origin": "host"})
-            return 200, {"local": True, "service": True, "available": self.provider is not None, "provider": self.provider_name,
+            # `local` is the older name for the same question the profile
+            # answers, so the two can never disagree.
+            return 200, {"local": self.profile.name == "local", "service": True,
+                         "available": self.provider is not None, "provider": self.provider_name,
+                         "provider_source": self.provider_source,
+                         "profile": self.profile.name,
+                         "tenant": self.principal.tenant,
                          "connectors": connectors, "reason": self.unavailable, "tools": sorted(self.tools.tools), "reviewer": self.reviewer,
                          "resources": [{"id": key, "name": item["name"], "applications": item["applications"],
-                                        "tools": ["list_files", "read_file", "search_files", "knowledge_search"]}
+                                        "tools": sorted(SOURCE_TOOLS)}
                                        for key, item in (self.resources or {}).items()],
                          "resource_tools": sorted(name for name in SOURCE_TOOLS if self.tools.tool(name) is not None
                                                   and getattr(self.tools.tool(name).func, "__module__", None) == SourceTools.__module__) if self.resources is not None else [],
@@ -112,13 +158,15 @@ class LocalRunHost:
                                                "origin": "host", "category": "Host tools", "available": True}
                                               for tool in self.tools.tools.values()],
                          "features": {"dag": True, "durable_reviews": True, "manual": True,
-                                      "schedules": False, "events": False, "budget_warnings": True}}
+                                      "schedules": False, "events": streaming, "budget_warnings": True}}
         if command == "propose":
             self._require_provider()
             return 200, await propose(self.provider, self.tools, value)
         if command == "start":
             self._require_provider()
             value = validate_run_request(value)
+            if "resources" not in value and value["definition"].get("resources"):
+                value["resources"] = dict(value["definition"]["resources"])
             validate_host_tools(value["definition"], self.tools)
             self.run_tools(value)
             # Pin the compatibility default just like an explicit selection.
@@ -170,7 +218,8 @@ class LocalRunHost:
         if command == "review":
             if set(value) != {"run_id", "review_id", "output"} or not isinstance(value["run_id"], str) or not isinstance(value["review_id"], str):
                 raise ValueError("Choose the waiting review and provide your contribution")
-            self.repository.submit_review(value["run_id"], value["review_id"], reviewer=self.reviewer, output=value["output"])
+            reviewer = (principal or self.principal).name
+            self.repository.submit_review(value["run_id"], value["review_id"], reviewer=reviewer, output=value["output"])
             return 200, public_record(self.repository.get(value["run_id"]))
         raise ValueError("Unknown local run command")
 
@@ -183,8 +232,34 @@ class LocalRunHost:
             await stream.aclose()
 
 
-def configured_host(*, workspace=None):
+def configured_paths(principal) -> StoragePaths:
+    """The storage this host uses, scoped to the principal's tenant.
+
+    `CONCLAVE_RUN_DATABASE` and `CONCLAVE_DATABASE` are single-operator
+    overrides, so they apply to the local tenant only: pointing every tenant
+    at one file would put their data in the same place.
+    """
+
     studio = Path(__file__).resolve().parents[2] / "studio"
+    run_database = setting("RUN_DATABASE")
+    data_dir = Path(setting("DATA_DIR", Path(run_database).parent if run_database else
+                            studio / ".studio-local" if studio.is_dir() else Path.cwd() / ".conclave"))
+    paths = tenant_paths(data_dir, principal.tenant)
+
+    if principal.tenant != "local":
+        return paths
+
+    runs = Path(run_database) if run_database else paths.runs
+
+    return StoragePaths(root=paths.root,
+                        runs=runs,
+                        applications=Path(setting("DATABASE")) if setting("DATABASE") else runs.parent / "studio.sqlite")
+
+
+def configured_host(*, workspace=None, source_dir=None, principal=None):
+    profile = resolve_profile(setting("PROFILE"))
+    principal = principal or resolve_principal(setting("PRINCIPAL"), setting("TENANT"))
+    paths = configured_paths(principal)
     workspace = Path(workspace).resolve() if workspace is not None else Path.cwd()
     source = setting("SOURCE_DIR")
     defaults_path = Path(setting("DEFAULTS_FILE", Path(__file__).parent / "data" / "defaults.json"))
@@ -198,47 +273,63 @@ def configured_host(*, workspace=None):
     import re
     if not source_extensions or any(not re.fullmatch(r"\.[a-z0-9_-]+", item) for item in source_extensions):
         raise ValueError("STUDIO_SOURCE_EXTENSIONS must contain comma-separated file suffixes")
-    resources = load_resources(setting("RESOURCES_FILE"), source)
+    saved_resources = paths.root / "sources.json"
+    resources = (load_resources(saved_resources) if saved_resources.exists()
+                 else load_resources(setting("RESOURCES_FILE"), source))
+    if not resources:
+        # Nothing has been authorized, so the folder this host was started
+        # in is the source: a first run needs no settings, and every file
+        # path stays contained in that folder. A hosted control plane has no
+        # such folder to assume, so it requires an authorized source.
+        resources = working_folder(workspace) if profile.implicit_source else {}
+    if source_dir is not None:
+        resources = {**resources, **working_folder(source_dir)}
     register_source_tools(tools)
-    if source:
+    if 'default' in resources:
         # Retain direct trusted-host access for legacy callers. Run execution
         # always builds its own registry from the pinned resource selection.
         register_source_tools(tools, SourceTools(resources["default"]["path"], source_extensions))
         adapters.append(ConnectorAdapter("local_files", "Local source folder", "files", ("read_file",), lambda: resources["default"]["path"].is_dir()))
-    if setting("WEB") == "1":
-        from conclave.tools import build_tool_registry
-        bundled = build_tool_registry(Path(source or studio), output_limit)
-        for name in ("web_search", "web_fetch"):
-            tools.register(bundled.tool(name))
-        adapters.extend([ConnectorAdapter("web_search", "Public web search", "research", ("web_search",), lambda: True),
-                         ConnectorAdapter("web_reader", "Public web reader", "research", ("web_fetch",), lambda: True)])
+    from conclave.tools import build_tool_registry
+    bundled = build_tool_registry(workspace, output_limit)
+    for name in ("web_search", "web_fetch"):
+        tools.register(bundled.tool(name))
+    adapters.extend([ConnectorAdapter("web_search", "Public web search", "research", ("web_search",), lambda: True),
+                     ConnectorAdapter("web_reader", "Public web reader", "research", ("web_fetch",), lambda: True)])
     adapters.extend(load_extensions(setting("EXTENSIONS", ""), tools))
-    name, model = setting("PROVIDER"), setting("MODEL") or None
-    provider, reason = None, None
+    name, model = setting("PROVIDER") or None, setting("MODEL") or None
+    provider, reason, source = None, None, None
     timeout = float(setting("MODEL_TIMEOUT", "300"))
     if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("STUDIO_MODEL_TIMEOUT must be finite and positive")
+        raise ValueError("CONCLAVE_MODEL_TIMEOUT must be finite and positive")
     factory = setting("PROVIDER_FACTORY")
     if factory:
         provider = load_provider_factory(factory)(model=model, timeout=timeout, workspace=workspace)
         if not callable(getattr(provider, "complete", None)):
             raise ValueError("The configured provider must implement complete(messages)")
-        name = name or factory.split(':')[0]
-    elif name in {"codex", "opencode"} and shutil.which(name) is None:
-        reason = f"The configured {name} command is unavailable on this host"
-    elif name == "codex":
-        provider = CodexProvider(model, timeout)
-    elif name == "opencode":
-        provider = OpenCodeProvider(workspace, model, timeout)
-    elif name == "ollama" and model:
-        provider = OllamaProvider(model, timeout, setting("OLLAMA_URL", "http://127.0.0.1:11434"))
+        name, source = name or factory.split(':')[0], "configured"
     else:
-        reason = "Set STUDIO_PROVIDER to codex, opencode or ollama, or set STUDIO_PROVIDER_FACTORY; Ollama also needs STUDIO_MODEL"
+        if name is None and not profile.detect_backend:
+            # A hosted control plane has no machine to inspect: it is told
+            # which backend to use, and gets credentials from its own store.
+            reason = ("No model backend is configured for this host. Set CONCLAVE_PROVIDER or "
+                      "CONCLAVE_PROVIDER_FACTORY.")
+        else:
+            # Locally, no configuration is required: the backend already
+            # signed in on this machine is used, and CONCLAVE_PROVIDER
+            # only overrides it.
+            chosen = name is not None
+            provider, name, reason = resolve_provider(workspace, name, model, timeout,
+                                                     setting("OLLAMA_URL", OLLAMA_DEFAULT_URL))
+            source = "configured" if chosen else ("detected" if provider is not None else None)
+            if provider is None:
+                reason = f"{reason}. Set CONCLAVE_PROVIDER to choose a backend explicitly."
     history_limit = int(setting("HISTORY_LIMIT", "30"))
     if history_limit < 1:
-        raise ValueError("STUDIO_HISTORY_LIMIT must be positive")
-    repository = RunRepository(Path(setting("RUN_DATABASE") or Path(setting("DATA_DIR", studio / ".studio-local" if studio.is_dir() else Path.cwd() / ".conclave")) / "runs.sqlite"))
+        raise ValueError("CONCLAVE_HISTORY_LIMIT must be positive")
+    repository = RunRepository(paths.runs)
     repository.history_limit = history_limit
     return LocalRunHost(repository, provider, tools,
-                        reviewer=getpass.getuser(), provider_name=name, unavailable=reason, adapters=adapters,
-                        resources=resources, source_extensions=source_extensions)
+                        reviewer=principal.name, provider_name=name, unavailable=reason, adapters=adapters,
+                        resources=resources, source_extensions=source_extensions, provider_source=source,
+                        profile=profile, principal=principal, paths=paths)

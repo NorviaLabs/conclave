@@ -16,13 +16,11 @@ from pathlib import Path
 
 from conclave import (
     Approver,
-    CodexProvider,
     ModelProvider,
-    OllamaProvider,
-    OpenCodeProvider,
     RunBudget,
     RunConfig,
     approve_all,
+    resolve_provider,
 )
 from conclave.tools import build_tool_registry
 
@@ -42,8 +40,6 @@ Investigate this repository and identify one important
 architectural weakness, using repository, GitHub and web
 evidence where useful.
 """.strip()
-
-DEFAULT_OLLAMA_MODEL = "qwen3.6"
 
 
 def nonnegative_int(value: str) -> int:
@@ -107,7 +103,11 @@ def parse_args(
             "opencode",
             "ollama",
         ],
-        default="opencode",
+        default=None,
+        help=(
+            "model backend; by default whichever "
+            "one this computer already has set up"
+        ),
     )
 
     parser.add_argument(
@@ -207,25 +207,29 @@ def make_run_config(args: argparse.Namespace) -> RunConfig:
 def make_provider(
     args: argparse.Namespace,
     repo: Path,
-) -> ModelProvider:
-    if args.provider == "codex":
-        return CodexProvider(model=args.model, timeout=args.model_timeout)
+) -> tuple[ModelProvider, str]:
+    """The backend to use, and the name to report for it.
 
-    if args.provider == "opencode":
-        return OpenCodeProvider(
-            repo,
-            model=args.model,
-            timeout=args.model_timeout,
+    `--provider` overrides; without it, the backend already set up on
+    this computer is used, so a first run needs no configuration.
+    """
+
+    provider, name, reason = resolve_provider(
+        repo,
+        args.provider,
+        args.model,
+        args.model_timeout,
+        args.ollama_url,
+    )
+
+    if provider is None:
+        raise RuntimeError(
+            f"{reason}. Pass --provider codex or "
+            "--provider opencode, or start Ollama with "
+            "an installed model."
         )
 
-    return OllamaProvider(
-        model=(
-            args.model
-            or DEFAULT_OLLAMA_MODEL
-        ),
-        timeout=args.model_timeout,
-        base_url=args.ollama_url,
-    )
+    return provider, name
 
 
 def make_budget(
@@ -275,7 +279,7 @@ async def main() -> None:
     if not question:
         question = DEFAULT_QUESTION
 
-    provider = make_provider(
+    provider, provider_name = make_provider(
         args,
         repo,
     )
@@ -288,7 +292,7 @@ async def main() -> None:
     render.header(
         question,
         repo,
-        args.provider,
+        provider_name,
         getattr(provider, "model", None),
     )
 

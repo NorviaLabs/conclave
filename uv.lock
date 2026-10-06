@@ -24,6 +24,9 @@ wheels = [
 name = "conclave"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "ddgs" },
+]
 
 [package.optional-dependencies]
 tools = [
@@ -38,7 +41,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ddgs", marker = "extra == 'tools'", specifier = ">=9.16.0" }]
+requires-dist = [
+    { name = "ddgs", specifier = ">=9.16.0" },
+    { name = "ddgs", marker = "extra == 'tools'", specifier = ">=9.16.0" },
+]
 provides-extras = ["tools"]
 
 [package.metadata.requires-dev]

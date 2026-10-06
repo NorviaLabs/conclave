@@ -50,6 +50,39 @@ def test_concurrent_resource_bindings_are_isolated(tmp_path):
     asyncio.run(exercise())
 
 
+def test_repository_tools_are_scoped_and_keep_capabilities(tmp_path, monkeypatch):
+    from conclave import Capability
+    from conclave.tools.local import LocalTools
+
+    async def status(local):
+        return str(local.repo)
+
+    monkeypatch.setattr(LocalTools, 'git_status', status)
+    tools, resources, first, second = setup_resources(tmp_path)
+    alpha = bind_resources(tools, resources, source_request(), {'.md'})
+    beta = bind_resources(tools, resources, source_request('beta'), {'.md'})
+
+    async def exercise():
+        assert await alpha.execute('git_status', {}) == str(first)
+        assert await beta.execute('git_status', {}) == str(second)
+        with pytest.raises(ValueError, match='Select a source'):
+            await tools.execute('git_status', {})
+    asyncio.run(exercise())
+    assert alpha.tool('git_status').capabilities == frozenset({Capability.READ, Capability.SHELL})
+    assert alpha.tool('github_issue').capabilities == frozenset({Capability.READ, Capability.SHELL, Capability.NETWORK})
+
+
+def test_saved_source_selection_and_web_only_agents(tmp_path):
+    tools, resources, _, _ = setup_resources(tmp_path)
+    value = source_request('beta')
+    value['definition']['resources'] = value.pop('resources')
+    bound = bind_resources(tools, resources, value, {'.md'})
+    assert 'Beta' in asyncio.run(bound.execute('read_file', {'path': 'brief.md'}))
+    value['definition'].pop('resources')
+    value['definition']['agents'][0]['tools'] = ['web_search']
+    assert bind_resources(tools, {}, value, {'.md'}) is tools
+
+
 def test_two_application_runs_read_their_own_sources_and_resume(tmp_path):
     tools, resources, _, _ = setup_resources(tmp_path)
 
@@ -111,7 +144,7 @@ def test_bindings_validate_before_creation_and_resume_from_pinned_resource(tmp_p
     async def exercise():
         for binding, application, message in [('unknown', 'research-brief', 'unavailable'),
                                                ('alpha', 'other-app', 'not authorized'),
-                                               (None, 'research-brief', 'Select a source')]:
+                                               (None, 'research-brief', 'no source folder is authorized')]:
             value = source_request(binding)
             value['application_id'] = application
             if binding is None:

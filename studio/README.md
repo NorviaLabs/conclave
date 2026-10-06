@@ -7,18 +7,18 @@ handoff. ../docs/studio/PRODUCT.md contains accepted UX decisions;
 
 ## Start Studio with Conclave
 
-From the repository root, start both services with one command:
+From the repository root, one command serves the REST API and this Studio page
+on one address:
 
 ```sh
-uv run python dev.py --provider codex
+uv run conclave serve
 ```
 
-Press Ctrl+C to stop both. This requires Node 24+; select a different executable
-with `--node /path/to/node` or `STUDIO_NODE`. The launcher waits for the backend
-before starting Studio and stops the other service if either exits.
+Open the address it prints. No Node.js, second port or proxy URL is involved.
+Startup also reports the AI backend it found on this computer, so no provider
+setting is needed to run an application.
 
-Studio is a REST client. Start the independent Conclave backend from the repository
-root first:
+For UI development, or to run the two processes separately, Node 24+ is needed:
 
 ```sh
 uv sync
@@ -40,6 +40,38 @@ Studio never launches Python, opens a database or configures a provider.
 Its server serves static assets and forwards same-origin API requests over HTTP.
 Stopping Studio leaves Conclave running.
 
+`uv run python dev.py --provider codex` starts both processes at once and stops
+them together; select the Node executable with `--node /path/to/node` or
+`STUDIO_NODE`.
+
+## Served from somewhere else
+
+The page talks to the host that served it by default, which covers a local
+`conclave serve` and the same-origin proxy above. A deployment that serves this
+bundle from another origin writes `config.json` beside the page:
+
+```json
+{"base": "https://api.example.com", "credentials": "include"}
+```
+
+The API must then allow the page's origin (`CONCLAVE_UI_ORIGINS` on the hosted
+host), and `credentials: "include"` is what a gateway that authenticates with a
+session cookie needs. A `token` is also accepted and is visible to anyone who
+can load the page, so the proxy — which holds the token server-side — remains
+the better shape for a secret. `profile` and `features` from `/api/runtime`
+decide the copy and whether the page is told about a run or asks on a timer.
+
+## Offline checks
+
+No browser, server or provider is involved:
+
+```sh
+node scripts/check-hosted-ui.mjs   # API configuration, push or ask, host copy
+node scripts/check-live-ui.mjs     # run projection and rendered markup
+node scripts/check-config.mjs      # host configuration and catalogues
+node scripts/check-api-proxy.mjs   # the same-origin proxy and its token
+```
+
 See [Conclave REST API](../REST_API.md) for the complete
 endpoint list, provider configuration, persistence, security and source boundaries.
 
@@ -53,19 +85,33 @@ endpoint list, provider configuration, persistence, security and source boundari
 | `CONCLAVE_PROPOSAL_TIMEOUT_MS` | `305000` | Proposal request timeout |
 | `STUDIO_PORT` | `8787` | UI port |
 
-Provider, tool, source and database settings belong to the backend process. Set
-`CONCLAVE_PROVIDER`, `CONCLAVE_SOURCE_DIR`, `CONCLAVE_WEB` and other
-`CONCLAVE_*` host settings there. Older corresponding `STUDIO_*` settings are
-accepted by Conclave as compatibility aliases, but Studio no longer interprets them.
+Provider, tool, source and database settings belong to the backend process. The
+backend detects the AI provider already set up on this computer, so
+`CONCLAVE_PROVIDER` is only an override; `CONCLAVE_SOURCE_DIR` and other
+`CONCLAVE_*` host settings are set there too. Older corresponding `STUDIO_*`
+settings are accepted by Conclave as compatibility aliases, but Studio no longer
+interprets them.
 Set the same `CONCLAVE_API_TOKEN` on both processes to enable backend authentication.
+While a token is set, `conclave serve` leaves this page unserved: a browser
+cannot present a bearer token, so the dev server above is how the UI reaches it.
 
 One backend can run multiple applications with different document folders.
-Configure `CONCLAVE_RESOURCES_FILE` once with named, host-approved folders, then
+Open **Advanced → Source settings** to configure named, host-approved folders and
+an optional saved source ID for the current application, then
 select **Source documents** separately for each request in Run. Selections are
 saved with runs and revalidated on resume; concurrent runs have isolated file-tool
 registries. See [Multiple applications on one backend](../REST_API.md#multiple-applications-on-one-backend)
-for the resource JSON format and application allowlists. Enable `CONCLAVE_WEB=1`
-once if web tools are needed; no per-application backend process is necessary.
+for the resource JSON format and application allowlists. Bundled web tools are
+always available; Git and GitHub tools are scoped to the selected source resource.
+No per-application backend process is necessary.
+Web-only agents require no source. Source settings persist without restarting;
+legacy source environment variables are only fallbacks. See the REST documentation
+for the audit of remaining host-owned environment settings.
+
+Nothing has to be configured to start: until a source is saved, the folder the
+backend was started in is offered as **This folder** and used automatically, so an
+application that reads documents runs on the first click. Saving any named source
+replaces it.
 
 ## Application workflows
 
