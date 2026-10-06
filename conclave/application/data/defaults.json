@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "name": "Untitled application",
+  "description": "",
+  "agents": [
+    {
+      "id": "researcher",
+      "name": "Researcher",
+      "kind": "ai",
+      "role": "researcher",
+      "instructions": "Gather relevant information and return structured findings.",
+      "tools": []
+    }
+  ],
+  "state": [
+    {
+      "key": "findings",
+      "label": "Findings",
+      "kind": "findings",
+      "type": "records",
+      "merge": "upsert",
+      "statuses": []
+    },
+    {
+      "key": "summary",
+      "label": "Summary",
+      "kind": "document",
+      "type": "text",
+      "merge": "replace",
+      "statuses": []
+    }
+  ],
+  "workflow": [
+    {
+      "id": "collect",
+      "name": "Collect findings",
+      "agent": "researcher",
+      "task": "Collect findings relevant to the user task.",
+      "output": "findings"
+    },
+    {
+      "id": "summarize",
+      "name": "Summarize",
+      "agent": "researcher",
+      "task": "Summarize the findings in shared state.",
+      "output": "summary"
+    }
+  ],
+  "views": [
+    {
+      "id": "findings_view",
+      "title": "Findings",
+      "collection": "findings",
+      "layout": "cards"
+    },
+    {
+      "id": "summary_view",
+      "title": "Summary",
+      "collection": "summary",
+      "layout": "prose"
+    }
+  ],
+  "run_config": {
+    "max_tool_steps": 12,
+    "max_notes": 12,
+    "max_note_chars": 300,
+    "max_tool_output_chars": 20000,
+    "fan_out_limit": 3
+  },
+  "run_budget": {
+    "max_delegations": 15,
+    "max_per_agent": 4,
+    "max_depth": 2,
+    "tool_calls": 40,
+    "wall_clock_seconds": 300,
+    "tokens": null,
+    "cost_usd": null
+  }
+}

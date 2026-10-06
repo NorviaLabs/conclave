@@ -2,7 +2,6 @@
 import assert from 'node:assert/strict';
 import {readFile, mkdir} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
-import {featuredApplications} from '../shared/catalogue.js';
 
 assert(process.env.STUDIO_PLAYWRIGHT_MODULE,'Set STUDIO_PLAYWRIGHT_MODULE to an external Playwright index.mjs path.');
 const {chromium}=await import(pathToFileURL(process.env.STUDIO_PLAYWRIGHT_MODULE).href);
@@ -30,6 +29,44 @@ const fillRequest=async task=>{
 const status=page.locator('.run-overview');
 try{
   await open(applicationId);
+  await page.locator('.rail-foot details summary').click();
+  await page.locator('[data-action="workspace-catalogue"]').click();
+  await page.locator('[data-catalogue-add-current]').click();
+  let catalog=JSON.parse(await page.locator('#dialog-catalogueText').inputValue());
+  const starterId=catalog.starters[0].id;
+  catalog.starters[0].name='Browser custom starter';
+  await page.locator('#dialog-catalogueText').fill(JSON.stringify(catalog,null,2));
+  await page.getByRole('button',{name:'Save catalog',exact:true}).click();
+  await page.locator('#editor-dialog').waitFor({state:'hidden'});
+  await page.reload();
+  await page.locator('[data-action="catalogue"]').click();
+  assert(await page.locator(`[data-catalogue-create="${starterId}"]`).isVisible());
+  await page.locator('#close-catalogue').click();
+  await page.locator('.rail-foot details summary').click();
+  await page.locator('[data-action="workspace-catalogue"]').click();
+  const [catalogDownload]=await Promise.all([page.waitForEvent('download'),page.locator('[data-catalogue-export]').click()]);
+  assert.equal(JSON.parse(await readFile(await catalogDownload.path(),'utf8')).starters[0].name,'Browser custom starter');
+  await page.locator('[data-catalogue-import]').setInputFiles({name:'catalog.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify({version:1,roles:[],starters:[],outputs:[]}))});
+  await page.getByRole('button',{name:'Save catalog',exact:true}).click();
+  await page.locator('#editor-dialog').waitFor({state:'hidden'});
+  await page.locator('[data-action="new"]').click();
+  await page.locator('#dialog-goal').fill('Create a team to assess habitat restoration evidence');
+  await page.getByRole('button',{name:'Suggest a team',exact:true}).click();
+  await page.getByRole('button',{name:'Create this draft',exact:true}).waitFor();
+  assert((await page.locator('#editor-content').innerText()).includes('No application has been saved or run'));
+  await page.getByRole('button',{name:'Create this draft',exact:true}).click();
+  assert((await page.locator('#application-name').innerText()).includes('Proposed domain team'));
+  await open(applicationId);
+  await page.locator('[data-tab="build"][role="tab"]').click();
+  await page.locator('[data-action="toggle-plan-resources"]').click();
+  await page.locator('[data-disclosure="plan-assistant"] summary').click();
+  await page.locator('#plan-command').fill('Adapt this team to habitat restoration evidence');
+  await page.locator('[data-action="propose-plan"]').click();
+  await page.locator('[data-action="apply-proposal"]').waitFor();
+  assert(!(await page.locator('#application-name').innerText()).includes('Proposed domain team'));
+  await page.locator('[data-action="apply-proposal"]').click();
+  assert((await page.locator('#application-name').innerText()).includes('Proposed domain team'));
+  await open(applicationId);
   assert.equal(await page.locator('#live-request').inputValue(),'');
   for(const field of await page.locator('[data-request-field][data-input-mode="live"]').all())assert.equal(await field.inputValue(),'');
   await page.locator('[data-action="start-live"]').click();
@@ -38,7 +75,7 @@ try{
   await page.locator('[data-action="start-live"]').click();
   await status.filter({hasText:'Your review is needed'}).waitFor();
   assert((await page.locator('#live-history option:checked').innerText()).includes('waiting for human'));
-  assert(await page.locator('.sample-banner .demo-pill').isVisible());
+  assert(await page.locator('.runtime-banner .runtime-pill').isVisible());
   const runUrl=page.url();
   await page.screenshot({path:`${artifacts}/live-review-desktop.png`,fullPage:true});
   await page.reload();
@@ -77,34 +114,22 @@ try{
   await page.screenshot({path:`${artifacts}/live-mobile.png`,fullPage:true});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Mobile layout overflows');
   await page.setViewportSize({width:1440,height:1000});
-  // Exercise all six featured workflows through their explicitly fictional runner.
-  for(const application of featuredApplications){
-    await open(application.id);
-    await page.locator('[data-action="use-samples"]').click();
-    assert((await page.locator('.sample-banner').innerText()).includes('SAMPLE MODE'));
-    assert(await page.locator('.sample-banner .demo-pill').isVisible());
-    await page.locator('[data-action="start-preview"]').click();
-    await page.locator('[data-action="pause-preview"]').click();
-    for(let i=0;i<60;i++){
-      if(await page.locator('.run-status.complete').count())break;
-      if(await page.locator('[data-action="complete-human"]').count()){
-        if(await page.locator('#human-decision').count()){
-          const options=await page.locator('#human-decision option').evaluateAll(items=>items.map(item=>item.value).filter(Boolean));
-          await page.locator('#human-decision').selectOption(options.includes('approved')?'approved':options[0]);
-        }
-        await page.locator('#human-response').fill('Browser sample review only.');
-        await page.locator('[data-action="complete-human"]').click();
-        if(await page.locator('[data-action="pause-preview"]').count())await page.locator('[data-action="pause-preview"]').click();
-      }else if(await page.locator('[data-action="step-preview"]').count()){
-        await page.locator('[data-action="step-preview"]').focus();
-        await page.keyboard.press('Enter');
-      }
-      await page.waitForTimeout(50);
-    }
-    await page.locator('.run-status.complete').waitFor();
-    assert((await page.locator('.sample-banner').innerText()).includes('Sample results'));
-    await page.screenshot({path:`${artifacts}/sample-${application.id}.png`,fullPage:true});
-  }
+  // Production UI has no fictional runner or draft sample tab.
+  assert.equal(await page.locator('[data-action="use-samples"],[data-action="start-preview"],[data-tab="test"]').count(),0);
+  // Delete a saved application with revision protection, preserving run history.
+  const deleteTarget=await page.evaluate(async()=>{
+    const list=await (await fetch('/api/applications')).json();
+    const definition=structuredClone(list.applications[0].definition);definition.name='Delete browser check';
+    return await (await fetch('/api/applications',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({definition})})).json();
+  });
+  await open(deleteTarget.id);
+  await page.locator('.rail-foot details summary').click();
+  page.once('dialog',dialog=>dialog.dismiss());await page.locator('[data-action="delete-application"]').click();
+  assert.equal(await page.locator('#application-name').innerText(),'Delete browser check');
+  page.once('dialog',dialog=>dialog.accept());await page.locator('[data-action="delete-application"]').click();
+  await page.waitForFunction(()=>!document.querySelector('#application-name')?.textContent.includes('Delete browser check'));
+  assert.equal(await page.evaluate(async id=>(await fetch('/api/applications/'+id)).status,deleteTarget.id),404);
+  await page.reload();assert.equal(await page.locator(`[data-select="${deleteTarget.id}"]`).count(),0);
   // Keyboard alternatives and dependency editing remain usable on the real canvas.
   await open(applicationId);
   await page.locator('[data-tab="build"][role="tab"]').click();
@@ -136,8 +161,50 @@ try{
   await page.locator('[data-action="save"]').click();
   await page.locator('#save-state').filter({hasText:'Saved · version 2'}).waitFor();
   await page.screenshot({path:`${artifacts}/plan-desktop.png`,fullPage:true});
+  // Caller-defined fields travel through actual model output and human review.
+  const customDefinition=structuredClone(before);
+  customDefinition.name='Custom observations';customDefinition.inputs=[];
+  customDefinition.agents=[{id:'writer',name:'Writer',kind:'ai',instructions:'Assess observations',tools:[]},{id:'reviewer',name:'Reviewer',kind:'human',instructions:'Review observations',tools:[]}];
+  customDefinition.state=[{key:'observations',label:'Observations',kind:'dataset',type:'records',merge:'replace',statuses:[],fields:[{key:'score',label:'Score',type:'number',required:true},{key:'verified',label:'Verified',type:'boolean',required:true}]}];
+  customDefinition.workflow=[{id:'draft',name:'Draft',agent:'writer',task:'Assess observations',output:'observations'},{id:'review',name:'Review',agent:'reviewer',task:'Review observations',output:'observations'}];
+  customDefinition.views=[{id:'observations_view',title:'Observations',collection:'observations',layout:'table'}];
+  customDefinition.connections=[{from:'draft',to:'review'}];delete customDefinition.canvas;
+  const customApp=await page.evaluate(async definition=>{const response=await fetch('/api/applications',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({definition})});if(!response.ok)throw new Error(await response.text());return response.json();},customDefinition);
+  await open(customApp.id);
+  await page.locator('[data-tab="build"][role="tab"]').click();await page.locator('[data-disclosure="setup-more"] summary').click();
+  await page.locator('[data-action="advanced"]').click();await page.locator('#schema-0').locator('xpath=ancestor::details[1]/summary').click();
+  const customFields=[...customDefinition.state[0].fields,{key:'notes',label:'Notes',type:'string',required:false}];
+  await page.locator('#schema-0').fill(JSON.stringify(customFields));await page.locator('[data-apply-schema="0"]').click();
+  await page.locator('[data-action="save"]').click();await page.locator('#save-state').filter({hasText:'Saved · version 2'}).waitFor();
+  await page.locator('[data-tab="use"][role="tab"]').click();await page.locator('#live-request').fill('Assess the observational evidence');
+  await page.locator('[data-action="start-live"]').click();await status.filter({hasText:'Your review is needed'}).waitFor();
+  await page.locator('#human-response').fill('Reviewed the evidence');
+  await page.locator('[data-action="submit-live-review"]').click();
+  await page.getByRole('alert').filter({hasText:'Provide record field: Score'}).waitFor();
+  await page.locator('#human-field-score').fill('2');await page.locator('#human-field-score').focus();
+  await page.waitForTimeout(1600);assert.equal(await page.locator('#human-field-score').inputValue(),'2');assert(await page.locator('#human-field-score').evaluate(el=>el===document.activeElement));
+  await page.locator('#human-field-verified').selectOption('false');
+  await page.locator('[data-action="submit-live-review"]').click();await status.filter({hasText:'Results are ready'}).waitFor();
+  assert(await page.getByRole('columnheader',{name:'Score',exact:true}).isVisible());
+  assert(await page.getByRole('cell',{name:'false',exact:true}).isVisible());
+  await page.reload();await status.filter({hasText:'Results are ready'}).waitFor();
+  assert(await page.getByRole('cell',{name:'2',exact:true}).isVisible());
+  await page.locator('[data-tab="build"][role="tab"]').click();
+  if(await page.locator('[data-disclosure="setup-more"]').getAttribute('open')===null)await page.locator('[data-disclosure="setup-more"] summary').click();
+  await page.locator('[data-step="2"]').click();
+  assert.deepEqual(await page.locator('[data-path="start_mode"] option').evaluateAll(options=>options.map(option=>option.value)),['manual']);
+
+  const disconnected=await context.newPage();
+  const disconnectedErrors=[];disconnected.on('pageerror',error=>disconnectedErrors.push(error.message));
+  await disconnected.route('**/api/config/**',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'Backend unavailable'})}));
+  await disconnected.goto(base);
+  await disconnected.getByRole('heading',{name:'Conclave is unavailable'}).waitFor();
+  assert(await disconnected.getByRole('button',{name:'Reload',exact:true}).isVisible());
+  await disconnected.unroute('**/api/config/**');await disconnected.reload();
+  await disconnected.locator('.shell').waitFor();
+  assert.deepEqual(disconnectedErrors,[]);await disconnected.close();
   assert.deepEqual(errors,[]);
-  console.log('PASS: Chromium live start/validation, polling focus, reload/history, review/resume, text download, cancellation, mobile layout, six fictional workflows, keyboard step controls, independent list order, dependency editing, export and save.');
+  console.log('PASS: Chromium live start/validation, polling focus, reload/history, review/resume, text download, cancellation, mobile layout, sample removal, application deletion, keyboard step controls, independent list order, dependency editing, export and save.');
   console.log(`Screenshots: ${artifacts}`);
 }catch(error){
   await page.screenshot({path:`${artifacts}/failure.png`,fullPage:true});

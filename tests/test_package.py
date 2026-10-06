@@ -172,7 +172,7 @@ def test_console_entry_point_targets_the_app():
         == "investigation.cli:run"
     )
 
-    assert "conclave" not in scripts
+    assert scripts["conclave"] == "conclave.cli:run"
 
 
 def test_the_library_contains_no_investigation_domain():

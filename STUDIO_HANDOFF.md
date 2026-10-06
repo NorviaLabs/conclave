@@ -1,3 +1,8 @@
+Current update: Studio uses Conclave REST for all runs. The fictional sample runner,
+fixture packs and legacy investigation demo have been removed. Application deletion
+is available under the sidebar Advanced menu and preserves run history. Historical
+implementation notes below describe the original import and may reference removed files.
+
 # Conclave Studio: terminal handoff
 
 This is the entry point for continuing the Conclave Studio work in Codex terminal.

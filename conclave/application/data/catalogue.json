@@ -1,0 +1,5299 @@
+{
+  "applicationTypes": [
+    {
+      "id": "case-resolution",
+      "name": "Resolve a customer case",
+      "purpose": "Prepare a safe reply for case CS-1042: a reported duplicate renewal charge.",
+      "example": "Prepare a safe reply for case CS-1042: a reported duplicate renewal charge.",
+      "members": [
+        {
+          "id": "case_analyst",
+          "name": "Case analyst",
+          "preset": "case_analyst",
+          "tools": [
+            "read_ticket",
+            "read_customer_history"
+          ]
+        },
+        {
+          "id": "policy_checker",
+          "name": "Policy checker",
+          "preset": "policy_checker",
+          "tools": [
+            "read_policy"
+          ]
+        },
+        {
+          "id": "support_writer",
+          "name": "Support writer",
+          "preset": "support_writer",
+          "tools": []
+        },
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_ticket",
+        "read_customer_history",
+        "read_policy",
+        "read_file"
+      ],
+      "outputs": [
+        {
+          "key": "case_summary",
+          "name": "Case summary",
+          "owner": "case_analyst",
+          "kind": "findings",
+          "task": "Separate verified charges, customer reports and attempted fixes."
+        },
+        {
+          "key": "policy_check",
+          "name": "Policy check",
+          "owner": "policy_checker",
+          "kind": "findings",
+          "task": "Check eligibility against the dated policy and list missing facts."
+        },
+        {
+          "key": "reply",
+          "name": "Reply draft",
+          "owner": "support_writer",
+          "kind": "document",
+          "task": "Draft a reply using the case and policy checks."
+        },
+        {
+          "key": "quality",
+          "name": "Reply review",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check promises, privacy and factual support."
+        },
+        {
+          "key": "approval",
+          "name": "Reply approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Approve the draft for manual delivery or request changes. Approval does not send it."
+        }
+      ],
+      "plan": [
+        {
+          "id": "case_summary",
+          "name": "Case summary",
+          "agent": "case_analyst",
+          "output": "case_summary",
+          "task": "Separate verified charges, customer reports and attempted fixes."
+        },
+        {
+          "id": "policy_check",
+          "name": "Policy check",
+          "agent": "policy_checker",
+          "output": "policy_check",
+          "task": "Check eligibility against the dated policy and list missing facts."
+        },
+        {
+          "id": "reply",
+          "name": "Reply draft",
+          "agent": "support_writer",
+          "output": "reply",
+          "task": "Draft a reply using the case and policy checks."
+        },
+        {
+          "id": "quality",
+          "name": "Reply review",
+          "agent": "fact_checker",
+          "output": "quality",
+          "task": "Check promises, privacy and factual support."
+        },
+        {
+          "id": "approval",
+          "name": "Reply approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Approve the draft for manual delivery or request changes. Approval does not send it."
+        }
+      ],
+      "connections": [
+        {
+          "from": "case_summary",
+          "to": "reply"
+        },
+        {
+          "from": "policy_check",
+          "to": "reply"
+        },
+        {
+          "from": "reply",
+          "to": "quality"
+        },
+        {
+          "from": "quality",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "case",
+          "label": "Case and previous replies",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "policy",
+          "label": "Current policy and date",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "limits",
+          "label": "Reply requirements",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Confirm the payment evidence is current.",
+        "Check refund authority and unsupported promises.",
+        "Review privacy before manually sending."
+      ],
+      "research": {
+        "audience": "Customer support lead",
+        "url": "https://doi.org/10.1093/qje/qjae044",
+        "summary": "A field study of 5,172 support agents found 15% more resolved issues per hour with AI assistance. This supports the audience; these exact plans are product hypotheses."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "support",
+          "purpose": "Customer case",
+          "suggested": "zendesk",
+          "required": true
+        },
+        {
+          "group": "knowledge",
+          "purpose": "Current support policy",
+          "suggested": "confluence",
+          "required": true
+        },
+        {
+          "group": "payments",
+          "purpose": "Billing evidence when needed",
+          "suggested": "stripe",
+          "required": false
+        },
+        {
+          "group": "crm",
+          "purpose": "Customer account context",
+          "suggested": "hubspot_crm",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "zendesk",
+          "purpose": "Customer case",
+          "scope": "",
+          "mode": "read"
+        },
+        {
+          "connector": "confluence",
+          "purpose": "Current support policy",
+          "scope": "",
+          "mode": "read"
+        }
+      ]
+    },
+    {
+      "id": "escalation-preparation",
+      "name": "Prepare a support escalation",
+      "purpose": "Prepare an engineering handoff for intermittent exports in case CS-2048.",
+      "example": "Prepare an engineering handoff for intermittent exports in case CS-2048.",
+      "members": [
+        {
+          "id": "case_analyst",
+          "name": "Case analyst",
+          "preset": "case_analyst",
+          "tools": [
+            "read_ticket",
+            "read_customer_history"
+          ]
+        },
+        {
+          "id": "escalation_manager",
+          "name": "Escalation coordinator",
+          "preset": "escalation_manager",
+          "tools": [
+            "read_ticket",
+            "read_customer_history",
+            "read_policy"
+          ]
+        },
+        {
+          "id": "policy_checker",
+          "name": "Policy checker",
+          "preset": "policy_checker",
+          "tools": [
+            "read_policy"
+          ]
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_ticket",
+        "read_customer_history",
+        "read_policy"
+      ],
+      "outputs": [
+        {
+          "key": "timeline",
+          "name": "Case timeline",
+          "owner": "case_analyst",
+          "kind": "findings",
+          "task": "Summarize impact and attempted fixes without guessing cause."
+        },
+        {
+          "key": "gaps",
+          "name": "Missing information",
+          "owner": "escalation_manager",
+          "kind": "tasks",
+          "task": "List the minimum missing evidence and who should collect it."
+        },
+        {
+          "key": "routing",
+          "name": "Escalation eligibility",
+          "owner": "policy_checker",
+          "kind": "findings",
+          "task": "Apply escalation rules and distinguish proposed from assigned priority."
+        },
+        {
+          "key": "handoff",
+          "name": "Engineering handoff",
+          "owner": "escalation_manager",
+          "kind": "document",
+          "task": "Prepare a concise handoff with impact, evidence, attempts and open questions."
+        },
+        {
+          "key": "approval",
+          "name": "Lead approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Confirm ownership and severity, or request missing evidence before manual escalation."
+        }
+      ],
+      "plan": [
+        {
+          "id": "timeline",
+          "name": "Case timeline",
+          "agent": "case_analyst",
+          "output": "timeline",
+          "task": "Summarize impact and attempted fixes without guessing cause."
+        },
+        {
+          "id": "gaps",
+          "name": "Missing information",
+          "agent": "escalation_manager",
+          "output": "gaps",
+          "task": "List the minimum missing evidence and who should collect it."
+        },
+        {
+          "id": "routing",
+          "name": "Escalation eligibility",
+          "agent": "policy_checker",
+          "output": "routing",
+          "task": "Apply escalation rules and distinguish proposed from assigned priority."
+        },
+        {
+          "id": "handoff",
+          "name": "Engineering handoff",
+          "agent": "escalation_manager",
+          "output": "handoff",
+          "task": "Prepare a concise handoff with impact, evidence, attempts and open questions."
+        },
+        {
+          "id": "approval",
+          "name": "Lead approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Confirm ownership and severity, or request missing evidence before manual escalation."
+        }
+      ],
+      "connections": [
+        {
+          "from": "timeline",
+          "to": "gaps"
+        },
+        {
+          "from": "timeline",
+          "to": "routing"
+        },
+        {
+          "from": "gaps",
+          "to": "handoff"
+        },
+        {
+          "from": "routing",
+          "to": "handoff"
+        },
+        {
+          "from": "handoff",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "case",
+          "label": "Case history and impact",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "criteria",
+          "label": "Escalation rules",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "attempts",
+          "label": "Attempted fixes and evidence",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Confirm customer impact without claiming a global outage.",
+        "Include redacted evidence and missing information.",
+        "Have a lead assign severity and ownership."
+      ],
+      "research": {
+        "audience": "Customer support lead",
+        "url": "https://doi.org/10.1093/qje/qjae044",
+        "summary": "A field study of 5,172 support agents found 15% more resolved issues per hour with AI assistance. This supports the audience; these exact plans are product hypotheses."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "support",
+          "purpose": "Case and attachments",
+          "suggested": "zendesk",
+          "required": true
+        },
+        {
+          "group": "knowledge",
+          "purpose": "Escalation rules",
+          "suggested": "confluence",
+          "required": true
+        },
+        {
+          "group": "issues",
+          "purpose": "Engineering handoff",
+          "suggested": "jira",
+          "required": true
+        },
+        {
+          "group": "notifications",
+          "purpose": "Lead notification",
+          "suggested": "slack",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "zendesk",
+          "purpose": "Case and attachments",
+          "scope": "",
+          "mode": "read"
+        },
+        {
+          "connector": "confluence",
+          "purpose": "Escalation rules",
+          "scope": "",
+          "mode": "read"
+        },
+        {
+          "connector": "jira",
+          "purpose": "Engineering handoff",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "options-comparison",
+      "name": "Compare options and recommend",
+      "purpose": "Compare supplied knowledge-base products for a support team.",
+      "example": "Compare supplied knowledge-base products for a support team.",
+      "members": [
+        {
+          "id": "analyst",
+          "name": "Comparison analyst",
+          "preset": "analyst",
+          "tools": [
+            "calculate"
+          ]
+        },
+        {
+          "id": "researcher",
+          "name": "Source researcher",
+          "preset": "researcher",
+          "tools": [
+            "web_search",
+            "web_fetch",
+            "read_file"
+          ]
+        },
+        {
+          "id": "reviewer",
+          "name": "Critical reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "calculate",
+        "web_search",
+        "web_fetch",
+        "read_file"
+      ],
+      "outputs": [
+        {
+          "key": "criteria",
+          "name": "Decision criteria",
+          "owner": "analyst",
+          "kind": "findings",
+          "task": "Separate mandatory requirements from weighted preferences."
+        },
+        {
+          "key": "option_a",
+          "name": "Option A evidence",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Check Option A against each requirement with source references."
+        },
+        {
+          "key": "option_b",
+          "name": "Option B evidence",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Check Option B and identify missing proof."
+        },
+        {
+          "key": "option_c",
+          "name": "Option C evidence",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Check Option C and quantify budget tradeoff."
+        },
+        {
+          "key": "comparison",
+          "name": "Options comparison",
+          "owner": "analyst",
+          "kind": "dataset",
+          "task": "Compare eligibility before scoring; leave unsupported scores blank."
+        },
+        {
+          "key": "challenge",
+          "name": "Assumption review",
+          "owner": "reviewer",
+          "kind": "findings",
+          "task": "Challenge missing evidence and sensitivity to budget and requirements."
+        },
+        {
+          "key": "recommendation",
+          "name": "Recommendation",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Give a conditional recommendation and questions that must be answered."
+        },
+        {
+          "key": "approval",
+          "name": "Decision review",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Choose an option, defer or request more evidence with a rationale."
+        }
+      ],
+      "plan": [
+        {
+          "id": "criteria",
+          "name": "Decision criteria",
+          "agent": "analyst",
+          "output": "criteria",
+          "task": "Separate mandatory requirements from weighted preferences."
+        },
+        {
+          "id": "option_a",
+          "name": "Option A evidence",
+          "agent": "researcher",
+          "output": "option_a",
+          "task": "Check Option A against each requirement with source references."
+        },
+        {
+          "id": "option_b",
+          "name": "Option B evidence",
+          "agent": "researcher",
+          "output": "option_b",
+          "task": "Check Option B and identify missing proof."
+        },
+        {
+          "id": "option_c",
+          "name": "Option C evidence",
+          "agent": "researcher",
+          "output": "option_c",
+          "task": "Check Option C and quantify budget tradeoff."
+        },
+        {
+          "id": "comparison",
+          "name": "Options comparison",
+          "agent": "analyst",
+          "output": "comparison",
+          "task": "Compare eligibility before scoring; leave unsupported scores blank."
+        },
+        {
+          "id": "challenge",
+          "name": "Assumption review",
+          "agent": "reviewer",
+          "output": "challenge",
+          "task": "Challenge missing evidence and sensitivity to budget and requirements."
+        },
+        {
+          "id": "recommendation",
+          "name": "Recommendation",
+          "agent": "creator",
+          "output": "recommendation",
+          "task": "Give a conditional recommendation and questions that must be answered."
+        },
+        {
+          "id": "approval",
+          "name": "Decision review",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Choose an option, defer or request more evidence with a rationale."
+        }
+      ],
+      "connections": [
+        {
+          "from": "criteria",
+          "to": "option_a"
+        },
+        {
+          "from": "criteria",
+          "to": "option_b"
+        },
+        {
+          "from": "criteria",
+          "to": "option_c"
+        },
+        {
+          "from": "option_a",
+          "to": "comparison"
+        },
+        {
+          "from": "option_b",
+          "to": "comparison"
+        },
+        {
+          "from": "option_c",
+          "to": "comparison"
+        },
+        {
+          "from": "comparison",
+          "to": "challenge"
+        },
+        {
+          "from": "challenge",
+          "to": "recommendation"
+        },
+        {
+          "from": "recommendation",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "criteria",
+          "label": "Decision criteria and must-haves",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "options",
+          "label": "Options and supplied evidence",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "scope",
+          "label": "Decision boundaries",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Apply mandatory gates before weighted preferences.",
+        "Resolve missing source evidence.",
+        "State tradeoffs and conditions explicitly."
+      ],
+      "research": {
+        "audience": "Research and strategy analyst",
+        "url": "https://doi.org/10.1287/orsc.2025.21838",
+        "summary": "An experiment with 758 consultants found faster, higher-quality work on suitable tasks, but poorer correctness on a task outside AI capabilities. Source checks and human judgment remain essential. These exact plans were not tested."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Requirements and vendor evidence",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "sheets",
+          "purpose": "Comparison table",
+          "suggested": "google_sheets",
+          "required": true
+        },
+        {
+          "group": "research",
+          "purpose": "Public source research",
+          "suggested": "web_search",
+          "required": false
+        },
+        {
+          "group": "research",
+          "purpose": "Read source pages",
+          "suggested": "web_reader",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Requirements and vendor evidence",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "google_sheets",
+          "purpose": "Comparison table",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "research-brief",
+      "name": "Build an evidence-backed brief",
+      "purpose": "Prepare a brief on reducing repeat support contacts without overstating the evidence.",
+      "example": "Prepare a brief on reducing repeat support contacts without overstating the evidence.",
+      "members": [
+        {
+          "id": "analyst",
+          "name": "Comparison analyst",
+          "preset": "analyst",
+          "tools": [
+            "calculate"
+          ]
+        },
+        {
+          "id": "researcher",
+          "name": "Source researcher",
+          "preset": "researcher",
+          "tools": [
+            "web_search",
+            "web_fetch",
+            "read_file"
+          ]
+        },
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "calculate",
+        "web_search",
+        "web_fetch",
+        "read_file"
+      ],
+      "outputs": [
+        {
+          "key": "scope",
+          "name": "Research scope",
+          "owner": "analyst",
+          "kind": "findings",
+          "task": "Define the question, outcomes and exclusions."
+        },
+        {
+          "key": "audit",
+          "name": "Audit findings",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Extract audit observations and limitations."
+        },
+        {
+          "key": "survey",
+          "name": "Survey findings",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Extract survey findings without substituting preference for outcomes."
+        },
+        {
+          "key": "verification",
+          "name": "Source and claim checks",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check provenance, dates, conflicting definitions and unsupported causal claims."
+        },
+        {
+          "key": "brief",
+          "name": "Research brief",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Synthesize findings, uncertainty and a measurable next experiment."
+        },
+        {
+          "key": "approval",
+          "name": "Brief approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Review claims, limitations and the proposed measurement before sharing."
+        }
+      ],
+      "plan": [
+        {
+          "id": "scope",
+          "name": "Research scope",
+          "agent": "analyst",
+          "output": "scope",
+          "task": "Define the question, outcomes and exclusions."
+        },
+        {
+          "id": "audit",
+          "name": "Audit findings",
+          "agent": "researcher",
+          "output": "audit",
+          "task": "Extract audit observations and limitations."
+        },
+        {
+          "id": "survey",
+          "name": "Survey findings",
+          "agent": "researcher",
+          "output": "survey",
+          "task": "Extract survey findings without substituting preference for outcomes."
+        },
+        {
+          "id": "verification",
+          "name": "Source and claim checks",
+          "agent": "fact_checker",
+          "output": "verification",
+          "task": "Check provenance, dates, conflicting definitions and unsupported causal claims."
+        },
+        {
+          "id": "brief",
+          "name": "Research brief",
+          "agent": "creator",
+          "output": "brief",
+          "task": "Synthesize findings, uncertainty and a measurable next experiment."
+        },
+        {
+          "id": "approval",
+          "name": "Brief approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Review claims, limitations and the proposed measurement before sharing."
+        }
+      ],
+      "connections": [
+        {
+          "from": "scope",
+          "to": "audit"
+        },
+        {
+          "from": "scope",
+          "to": "survey"
+        },
+        {
+          "from": "audit",
+          "to": "verification"
+        },
+        {
+          "from": "survey",
+          "to": "verification"
+        },
+        {
+          "from": "verification",
+          "to": "brief"
+        },
+        {
+          "from": "brief",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "question",
+          "label": "Research question and audience",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "sources",
+          "label": "Source pack and dates",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "boundaries",
+          "label": "Scope and evidence rules",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Inspect source dates and definitions.",
+        "Keep observation separate from causation.",
+        "Preserve limitations in the final brief."
+      ],
+      "research": {
+        "audience": "Research and strategy analyst",
+        "url": "https://doi.org/10.1287/orsc.2025.21838",
+        "summary": "An experiment with 758 consultants found faster, higher-quality work on suitable tasks, but poorer correctness on a task outside AI capabilities. Source checks and human judgment remain essential. These exact plans were not tested."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Source pack and final brief",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "research",
+          "purpose": "Find public sources",
+          "suggested": "web_search",
+          "required": false
+        },
+        {
+          "group": "research",
+          "purpose": "Read and cite sources",
+          "suggested": "web_reader",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Source pack and final brief",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "launch-content-production",
+      "name": "Produce reviewed content",
+      "purpose": "Draft a launch article for your product using only approved claims.",
+      "example": "Draft a launch article for your product using only approved claims.",
+      "members": [
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "brand_editor",
+          "name": "Brand editor",
+          "preset": "brand_editor",
+          "tools": [
+            "read_brand_guide"
+          ]
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "read_brand_guide"
+      ],
+      "outputs": [
+        {
+          "key": "brief",
+          "name": "Writing brief",
+          "owner": "creator",
+          "kind": "findings",
+          "task": "Identify audience, structure, approved facts and unsupported requested claims."
+        },
+        {
+          "key": "draft",
+          "name": "First draft",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Draft using approved facts and mark unresolved claims explicitly."
+        },
+        {
+          "key": "facts",
+          "name": "Fact review",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check each material claim against the source pack."
+        },
+        {
+          "key": "brand",
+          "name": "Brand review",
+          "owner": "brand_editor",
+          "kind": "findings",
+          "task": "Check tone, accessibility and prohibited language."
+        },
+        {
+          "key": "final",
+          "name": "Revised article",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Revise against both fact and brand reviews, preserving limitations."
+        },
+        {
+          "key": "approval",
+          "name": "Editor approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Approve for manual publication or request changes. This step does not publish."
+        }
+      ],
+      "plan": [
+        {
+          "id": "brief",
+          "name": "Writing brief",
+          "agent": "creator",
+          "output": "brief",
+          "task": "Identify audience, structure, approved facts and unsupported requested claims."
+        },
+        {
+          "id": "draft",
+          "name": "First draft",
+          "agent": "creator",
+          "output": "draft",
+          "task": "Draft using approved facts and mark unresolved claims explicitly."
+        },
+        {
+          "id": "facts",
+          "name": "Fact review",
+          "agent": "fact_checker",
+          "output": "facts",
+          "task": "Check each material claim against the source pack."
+        },
+        {
+          "id": "brand",
+          "name": "Brand review",
+          "agent": "brand_editor",
+          "output": "brand",
+          "task": "Check tone, accessibility and prohibited language."
+        },
+        {
+          "id": "final",
+          "name": "Revised article",
+          "agent": "creator",
+          "output": "final",
+          "task": "Revise against both fact and brand reviews, preserving limitations."
+        },
+        {
+          "id": "approval",
+          "name": "Editor approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Approve for manual publication or request changes. This step does not publish."
+        }
+      ],
+      "connections": [
+        {
+          "from": "brief",
+          "to": "draft"
+        },
+        {
+          "from": "draft",
+          "to": "facts"
+        },
+        {
+          "from": "draft",
+          "to": "brand"
+        },
+        {
+          "from": "facts",
+          "to": "final"
+        },
+        {
+          "from": "brand",
+          "to": "final"
+        },
+        {
+          "from": "final",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "brief",
+          "label": "Audience, purpose and format",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "facts",
+          "label": "Approved facts and source material",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "brand",
+          "label": "Brand and publication rules",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Remove unsupported performance claims.",
+        "Complete both factual and brand reviews.",
+        "Keep publication a separate manual action."
+      ],
+      "research": {
+        "audience": "Content marketing manager",
+        "url": "https://doi.org/10.1126/science.adh2586",
+        "summary": "An experiment with 453 professionals found writing tasks took 40% less time and quality improved 18%. Results were pooled across professions; they do not prove campaign results or these exact plans."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Brief, approved claims and brand guide",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "publishing",
+          "purpose": "Website draft destination",
+          "suggested": "wordpress",
+          "required": true
+        },
+        {
+          "group": "notifications",
+          "purpose": "Editor notification",
+          "suggested": "slack",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Brief, approved claims and brand guide",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "wordpress",
+          "purpose": "Website draft destination",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "content-repurposing",
+      "name": "Repurpose approved content",
+      "purpose": "Adapt an approved your product article into LinkedIn, email and FAQ drafts.",
+      "example": "Adapt an approved your product article into LinkedIn, email and FAQ drafts.",
+      "members": [
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "channel_writer",
+          "name": "Channel writer",
+          "preset": "channel_writer",
+          "tools": [
+            "read_channel_guidelines"
+          ]
+        },
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "read_channel_guidelines"
+      ],
+      "outputs": [
+        {
+          "key": "source",
+          "name": "Source boundaries",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Extract approved facts, caveats and forbidden additions."
+        },
+        {
+          "key": "linkedin",
+          "name": "LinkedIn draft",
+          "owner": "channel_writer",
+          "kind": "document",
+          "task": "Write a LinkedIn draft within the supplied length and preserve caveats."
+        },
+        {
+          "key": "email",
+          "name": "Email draft",
+          "owner": "channel_writer",
+          "kind": "document",
+          "task": "Write a subject and email within 150 words using only approved facts."
+        },
+        {
+          "key": "faq",
+          "name": "FAQ draft",
+          "owner": "channel_writer",
+          "kind": "document",
+          "task": "Write three source-backed questions and answers."
+        },
+        {
+          "key": "checks",
+          "name": "Cross-channel review",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check consistency, caveats, lengths and unsupported additions across all drafts."
+        },
+        {
+          "key": "package",
+          "name": "Content package",
+          "owner": "creator",
+          "kind": "artifact",
+          "task": "Package the reviewed drafts with channel labels; do not fabricate file links."
+        },
+        {
+          "key": "approval",
+          "name": "Package approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Approve each draft for manual delivery or request channel-specific changes."
+        }
+      ],
+      "plan": [
+        {
+          "id": "source",
+          "name": "Source boundaries",
+          "agent": "fact_checker",
+          "output": "source",
+          "task": "Extract approved facts, caveats and forbidden additions."
+        },
+        {
+          "id": "linkedin",
+          "name": "LinkedIn draft",
+          "agent": "channel_writer",
+          "output": "linkedin",
+          "task": "Write a LinkedIn draft within the supplied length and preserve caveats."
+        },
+        {
+          "id": "email",
+          "name": "Email draft",
+          "agent": "channel_writer",
+          "output": "email",
+          "task": "Write a subject and email within 150 words using only approved facts."
+        },
+        {
+          "id": "faq",
+          "name": "FAQ draft",
+          "agent": "channel_writer",
+          "output": "faq",
+          "task": "Write three source-backed questions and answers."
+        },
+        {
+          "id": "checks",
+          "name": "Cross-channel review",
+          "agent": "fact_checker",
+          "output": "checks",
+          "task": "Check consistency, caveats, lengths and unsupported additions across all drafts."
+        },
+        {
+          "id": "package",
+          "name": "Content package",
+          "agent": "creator",
+          "output": "package",
+          "task": "Package the reviewed drafts with channel labels; do not fabricate file links."
+        },
+        {
+          "id": "approval",
+          "name": "Package approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Approve each draft for manual delivery or request channel-specific changes."
+        }
+      ],
+      "connections": [
+        {
+          "from": "source",
+          "to": "linkedin"
+        },
+        {
+          "from": "source",
+          "to": "email"
+        },
+        {
+          "from": "source",
+          "to": "faq"
+        },
+        {
+          "from": "linkedin",
+          "to": "checks"
+        },
+        {
+          "from": "email",
+          "to": "checks"
+        },
+        {
+          "from": "faq",
+          "to": "checks"
+        },
+        {
+          "from": "checks",
+          "to": "package"
+        },
+        {
+          "from": "package",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "source",
+          "label": "Approved source content",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "channels",
+          "label": "Channel requirements",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "voice",
+          "label": "Audience and voice",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Preserve source meaning and caveats in every channel.",
+        "Check edited lengths against channel requirements.",
+        "Review each draft before manual delivery."
+      ],
+      "research": {
+        "audience": "Content marketing manager",
+        "url": "https://doi.org/10.1126/science.adh2586",
+        "summary": "An experiment with 453 professionals found writing tasks took 40% less time and quality improved 18%. Results were pooled across professions; they do not prove campaign results or these exact plans."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Approved source article",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "marketing",
+          "purpose": "Email draft destination",
+          "suggested": "mailchimp",
+          "required": true
+        },
+        {
+          "group": "marketing",
+          "purpose": "Social draft destination",
+          "suggested": "buffer",
+          "required": true
+        },
+        {
+          "group": "publishing",
+          "purpose": "FAQ destination",
+          "suggested": "wordpress",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Approved source article",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "mailchimp",
+          "purpose": "Email draft destination",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "buffer",
+          "purpose": "Social draft destination",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "investigation",
+      "name": "Investigation",
+      "example": "Explain why API latency increased.",
+      "purpose": "Investigate a question, collect evidence, test explanations and produce an evidence-backed synthesis.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Coordinator",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "researcher",
+          "name": "Researcher",
+          "preset": "researcher",
+          "tools": [
+            "list_files",
+            "read_file",
+            "search_files",
+            "web_search",
+            "web_fetch"
+          ]
+        },
+        {
+          "id": "architect",
+          "name": "Analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "critic",
+          "name": "Critic",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Verifier",
+          "preset": "verifier",
+          "tools": []
+        },
+        {
+          "id": "synthesizer",
+          "name": "Synthesizer",
+          "preset": "creator",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "list_files",
+        "read_file",
+        "search_files",
+        "web_search",
+        "web_fetch"
+      ],
+      "outputs": [
+        {
+          "key": "evidence",
+          "name": "Evidence",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Gather source observations and their locators."
+        },
+        {
+          "key": "facts",
+          "name": "Facts",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Record facts supported by evidence."
+        },
+        {
+          "key": "hypotheses",
+          "name": "Hypotheses",
+          "kind": "findings",
+          "owner": "architect",
+          "task": "Assess competing explanations against the evidence."
+        },
+        {
+          "key": "questions",
+          "name": "Open questions",
+          "kind": "findings",
+          "owner": "critic",
+          "task": "Record missing evidence and unresolved questions."
+        },
+        {
+          "key": "synthesis",
+          "name": "Synthesis",
+          "kind": "document",
+          "owner": "synthesizer",
+          "task": "Write a synthesis of the strongest explanation, alternatives and limitations. Refer to source identifiers."
+        }
+      ],
+      "plan": [
+        {
+          "id": "frame",
+          "name": "Frame the investigation",
+          "agent": "coordinator",
+          "output": "questions",
+          "task": "Define the question, missing information and completion criteria."
+        },
+        {
+          "id": "gather",
+          "name": "Gather evidence",
+          "agent": "researcher",
+          "output": "evidence",
+          "task": "Gather source observations and their locators."
+        },
+        {
+          "id": "establish",
+          "name": "Establish facts",
+          "agent": "researcher",
+          "output": "facts",
+          "task": "Record evidence-supported facts."
+        },
+        {
+          "id": "reason",
+          "name": "Test hypotheses",
+          "agent": "architect",
+          "output": "hypotheses",
+          "task": "Propose and compare competing explanations."
+        },
+        {
+          "id": "challenge",
+          "name": "Challenge the findings",
+          "agent": "critic",
+          "output": "questions",
+          "task": "Record unanswered questions and limitations."
+        },
+        {
+          "id": "verify",
+          "name": "Verify the evidence",
+          "agent": "verifier",
+          "output": "facts",
+          "task": "Independently verify recorded facts against their sources."
+        },
+        {
+          "id": "synthesize",
+          "name": "Synthesize",
+          "agent": "synthesizer",
+          "output": "synthesis",
+          "task": "Write an evidence-backed synthesis with alternatives and limitations."
+        }
+      ],
+      "output_statuses": {
+        "hypotheses": [
+          "proposed",
+          "supported",
+          "refuted",
+          "unresolved"
+        ]
+      }
+    },
+    {
+      "id": "document-review",
+      "name": "Document review",
+      "example": "Review a rollout proposal.",
+      "purpose": "Review a proposal, identify issues, suggest revisions and obtain a human review decision.",
+      "members": [
+        {
+          "id": "reviewer",
+          "name": "Reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Fact checker",
+          "preset": "verifier",
+          "tools": []
+        },
+        {
+          "id": "editor",
+          "name": "Editor",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "writer",
+          "name": "Summary writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Human approver",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "search_files"
+      ],
+      "outputs": [
+        {
+          "key": "issues",
+          "name": "Review issues",
+          "kind": "findings",
+          "owner": "reviewer",
+          "task": "Identify unsupported claims, omissions and ambiguity."
+        },
+        {
+          "key": "checks",
+          "name": "Fact checks",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Check claims against available sources."
+        },
+        {
+          "key": "revisions",
+          "name": "Suggested revisions",
+          "kind": "findings",
+          "owner": "editor",
+          "task": "Suggest precise revisions for the recorded issues."
+        },
+        {
+          "key": "summary",
+          "name": "Review summary",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Summarize revisions and unresolved review questions."
+        },
+        {
+          "key": "approval",
+          "name": "Review decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Accept, reject or request changes to the reviewed document."
+        }
+      ],
+      "output_statuses": {
+        "issues": [
+          "open",
+          "addressed"
+        ]
+      }
+    },
+    {
+      "id": "research-desk",
+      "name": "Research desk",
+      "example": "Explore approaches to model routing.",
+      "purpose": "Produce a cited research brief that compares approaches and preserves unanswered questions.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Research lead",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "researcher",
+          "name": "Researcher",
+          "preset": "researcher",
+          "tools": [
+            "web_search",
+            "web_fetch",
+            "knowledge_search",
+            "read_file"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Source verifier",
+          "preset": "verifier",
+          "tools": []
+        },
+        {
+          "id": "writer",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "knowledge_search",
+        "read_file"
+      ],
+      "outputs": [
+        {
+          "key": "questions",
+          "name": "Research questions",
+          "kind": "findings",
+          "owner": "coordinator",
+          "task": "Define the research questions and selection criteria."
+        },
+        {
+          "key": "sources",
+          "name": "Source notes",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Collect relevant sources and summarize their evidence."
+        },
+        {
+          "key": "comparisons",
+          "name": "Approach comparisons",
+          "kind": "dataset",
+          "owner": "analyst",
+          "task": "Compare approaches using explicit criteria."
+        },
+        {
+          "key": "checks",
+          "name": "Source checks",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Verify important claims and flag gaps."
+        },
+        {
+          "key": "brief",
+          "name": "Research brief",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Write a cited brief with comparisons, limitations and unanswered questions."
+        }
+      ]
+    },
+    {
+      "id": "decision-support",
+      "name": "Decision support",
+      "example": "Choose between infrastructure options.",
+      "purpose": "Evaluate options against explicit criteria and record a human decision.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Facilitator",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "researcher",
+          "name": "Researcher",
+          "preset": "researcher",
+          "tools": [
+            "read_file",
+            "web_search",
+            "read_spreadsheet"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Options analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "reviewer",
+          "name": "Risk reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "web_search",
+        "read_spreadsheet",
+        "calculate"
+      ],
+      "outputs": [
+        {
+          "key": "criteria",
+          "name": "Decision criteria",
+          "kind": "findings",
+          "owner": "coordinator",
+          "task": "Define the criteria, constraints and acceptable trade-offs."
+        },
+        {
+          "key": "options",
+          "name": "Option evidence",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Gather evidence about the available options."
+        },
+        {
+          "key": "comparison",
+          "name": "Option comparison",
+          "kind": "dataset",
+          "owner": "analyst",
+          "task": "Compare options against the criteria without false precision."
+        },
+        {
+          "key": "risks",
+          "name": "Risks and trade-offs",
+          "kind": "findings",
+          "owner": "reviewer",
+          "task": "Challenge assumptions and identify risks."
+        },
+        {
+          "key": "decision",
+          "name": "Decision record",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Record the selected option or request more work, with a rationale."
+        }
+      ]
+    },
+    {
+      "id": "data-analysis",
+      "name": "Data analysis",
+      "example": "Explain a change in conversion rates.",
+      "purpose": "Validate data, explain observed changes and produce a checked analysis.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Analysis lead",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "researcher",
+          "name": "Data researcher",
+          "preset": "researcher",
+          "tools": [
+            "query_database",
+            "read_spreadsheet",
+            "api_read"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Data analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Data verifier",
+          "preset": "verifier",
+          "tools": [
+            "calculate"
+          ]
+        },
+        {
+          "id": "writer",
+          "name": "Report writer",
+          "preset": "creator",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "query_database",
+        "read_spreadsheet",
+        "api_read",
+        "calculate",
+        "run_code"
+      ],
+      "outputs": [
+        {
+          "key": "questions",
+          "name": "Analysis questions",
+          "kind": "findings",
+          "owner": "coordinator",
+          "task": "Define the metrics, time window and questions to answer."
+        },
+        {
+          "key": "data",
+          "name": "Extracted data",
+          "kind": "dataset",
+          "owner": "researcher",
+          "task": "Collect the required data and record its sources."
+        },
+        {
+          "key": "analysis",
+          "name": "Analysis findings",
+          "kind": "findings",
+          "owner": "analyst",
+          "task": "Analyze changes and make assumptions explicit."
+        },
+        {
+          "key": "checks",
+          "name": "Validation checks",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Check data quality, calculations and alternative explanations."
+        },
+        {
+          "key": "report",
+          "name": "Analysis report",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Explain the validated metrics, interpretations and limitations; reference chart artifacts when available."
+        }
+      ]
+    },
+    {
+      "id": "software-delivery",
+      "name": "Software delivery",
+      "example": "Implement and verify a feature.",
+      "purpose": "Prepare a software change, verify it and obtain human approval.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Planner",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "engineer",
+          "name": "Implementer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Test engineer",
+          "preset": "verifier",
+          "tools": [
+            "run_tests"
+          ]
+        },
+        {
+          "id": "reviewer",
+          "name": "Code reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Human maintainer",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "list_files",
+        "read_file",
+        "search_files",
+        "prepare_patch",
+        "run_tests"
+      ],
+      "outputs": [
+        {
+          "key": "plan",
+          "name": "Implementation plan",
+          "kind": "tasks",
+          "owner": "coordinator",
+          "task": "Define the work, acceptance checks and dependencies."
+        },
+        {
+          "key": "patch",
+          "name": "Code change",
+          "kind": "artifact",
+          "owner": "engineer",
+          "task": "Prepare a code change and attach the host-supplied patch reference."
+        },
+        {
+          "key": "tests",
+          "name": "Test results",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Run available tests and record passed, failed and missing checks."
+        },
+        {
+          "key": "review",
+          "name": "Review findings",
+          "kind": "findings",
+          "owner": "reviewer",
+          "task": "Review correctness, maintainability and risks."
+        },
+        {
+          "key": "approval",
+          "name": "Change decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Accept the change, reject it or request revisions."
+        }
+      ]
+    },
+    {
+      "id": "incident-response",
+      "name": "Incident response",
+      "example": "Coordinate an outage response.",
+      "purpose": "Build an incident timeline, investigate causes, verify recovery and coordinate human decisions.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Incident coordinator",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "researcher",
+          "name": "Evidence collector",
+          "preset": "researcher",
+          "tools": [
+            "api_read",
+            "query_database",
+            "read_file"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Incident analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Recovery verifier",
+          "preset": "verifier",
+          "tools": []
+        },
+        {
+          "id": "writer",
+          "name": "Communications writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Incident commander",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "api_read",
+        "query_database",
+        "read_file",
+        "manage_ticket",
+        "send_message"
+      ],
+      "outputs": [
+        {
+          "key": "actions",
+          "name": "Response plan",
+          "kind": "tasks",
+          "owner": "coordinator",
+          "task": "List response actions, owners and checks."
+        },
+        {
+          "key": "timeline",
+          "name": "Incident timeline",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Collect observations with timestamps and sources."
+        },
+        {
+          "key": "causes",
+          "name": "Cause assessment",
+          "kind": "findings",
+          "owner": "analyst",
+          "task": "Assess likely causes and preserve alternatives."
+        },
+        {
+          "key": "recovery",
+          "name": "Recovery checks",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Verify recovery against explicit measures."
+        },
+        {
+          "key": "update",
+          "name": "Incident update",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Draft a factual incident update with current impact and uncertainty."
+        },
+        {
+          "key": "decision",
+          "name": "Commander decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Record the response or recovery decision and rationale."
+        }
+      ]
+    },
+    {
+      "id": "content-production",
+      "name": "Content production",
+      "example": "Develop a technical article.",
+      "purpose": "Develop a sourced article through drafting, fact checking, editing and human approval.",
+      "members": [
+        {
+          "id": "researcher",
+          "name": "Researcher",
+          "preset": "researcher",
+          "tools": [
+            "web_search",
+            "web_fetch",
+            "read_file"
+          ]
+        },
+        {
+          "id": "writer",
+          "name": "Writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Fact checker",
+          "preset": "verifier",
+          "tools": []
+        },
+        {
+          "id": "editor",
+          "name": "Editor",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Human publisher",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "read_file",
+        "generate_artifact"
+      ],
+      "outputs": [
+        {
+          "key": "sources",
+          "name": "Research notes",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Gather sources, examples and candidate arguments."
+        },
+        {
+          "key": "draft",
+          "name": "Article draft",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Develop a clear argument and source-supported draft."
+        },
+        {
+          "key": "checks",
+          "name": "Fact checks",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Check factual claims, quotations and attribution."
+        },
+        {
+          "key": "review",
+          "name": "Editorial review",
+          "kind": "findings",
+          "owner": "editor",
+          "task": "Review clarity, structure and unsupported assertions."
+        },
+        {
+          "key": "approval",
+          "name": "Publication decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Approve the draft or request changes. This does not publish it."
+        }
+      ]
+    },
+    {
+      "id": "support-resolution",
+      "name": "Support resolution",
+      "example": "Investigate a customer complaint.",
+      "purpose": "Investigate a case, check the proposed resolution and obtain human approval of the response.",
+      "members": [
+        {
+          "id": "researcher",
+          "name": "Case researcher",
+          "preset": "researcher",
+          "tools": [
+            "knowledge_search",
+            "api_read",
+            "read_file"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Resolution specialist",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Resolution verifier",
+          "preset": "verifier",
+          "tools": []
+        },
+        {
+          "id": "writer",
+          "name": "Response writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Human support owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "knowledge_search",
+        "api_read",
+        "read_file",
+        "manage_ticket",
+        "send_email"
+      ],
+      "outputs": [
+        {
+          "key": "case",
+          "name": "Case evidence",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Collect the case history, relevant knowledge and source records."
+        },
+        {
+          "key": "resolution",
+          "name": "Resolution options",
+          "kind": "findings",
+          "owner": "analyst",
+          "task": "Propose resolutions and identify escalation conditions."
+        },
+        {
+          "key": "checks",
+          "name": "Resolution checks",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Check policy consistency and whether the resolution addresses the case."
+        },
+        {
+          "key": "reply",
+          "name": "Proposed response",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Draft a clear response with the verified resolution and limitations."
+        },
+        {
+          "key": "approval",
+          "name": "Response decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Approve the response, reject it or request changes. Sending requires a separate authorized tool action."
+        }
+      ]
+    },
+    {
+      "id": "project-coordination",
+      "name": "Project coordination",
+      "example": "Coordinate a product launch.",
+      "purpose": "Develop a project plan, inspect dependencies and report blockers for a human owner.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Project coordinator",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "researcher",
+          "name": "Requirements researcher",
+          "preset": "researcher",
+          "tools": [
+            "read_file",
+            "api_read"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Dependency analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "reviewer",
+          "name": "Risk reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "writer",
+          "name": "Status writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Human project owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "api_read",
+        "manage_ticket",
+        "manage_calendar"
+      ],
+      "outputs": [
+        {
+          "key": "plan",
+          "name": "Delivery plan",
+          "kind": "tasks",
+          "owner": "coordinator",
+          "task": "Define actions, owners, dependencies and completion criteria."
+        },
+        {
+          "key": "requirements",
+          "name": "Requirements",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Gather requirements and their sources."
+        },
+        {
+          "key": "dependencies",
+          "name": "Dependencies",
+          "kind": "findings",
+          "owner": "analyst",
+          "task": "Identify dependencies, sequencing constraints and blockers."
+        },
+        {
+          "key": "risks",
+          "name": "Delivery risks",
+          "kind": "findings",
+          "owner": "reviewer",
+          "task": "Challenge feasibility and identify risks."
+        },
+        {
+          "key": "status",
+          "name": "Progress brief",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Summarize progress, blockers and decisions needed."
+        },
+        {
+          "key": "decision",
+          "name": "Owner decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Accept the plan or record requested changes."
+        }
+      ]
+    },
+    {
+      "id": "due-diligence",
+      "name": "Due diligence",
+      "example": "Assess a vendor\u2019s claims.",
+      "purpose": "Check a vendor\u2019s claims, identify missing evidence and support a human assessment.",
+      "members": [
+        {
+          "id": "researcher",
+          "name": "Researcher",
+          "preset": "researcher",
+          "tools": [
+            "web_search",
+            "web_fetch",
+            "read_file",
+            "read_spreadsheet"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Domain analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Claims verifier",
+          "preset": "verifier",
+          "tools": []
+        },
+        {
+          "id": "reviewer",
+          "name": "Risk reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "writer",
+          "name": "Assessment writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Human evaluator",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "read_file",
+        "read_spreadsheet"
+      ],
+      "outputs": [
+        {
+          "key": "claims",
+          "name": "Vendor claims",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Collect the vendor claims with source references."
+        },
+        {
+          "key": "assessment",
+          "name": "Claim assessment",
+          "kind": "dataset",
+          "owner": "analyst",
+          "task": "Assess claims against explicit requirements."
+        },
+        {
+          "key": "verification",
+          "name": "Verified claims",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Independently verify claims and record evidence gaps."
+        },
+        {
+          "key": "risks",
+          "name": "Risks and questions",
+          "kind": "findings",
+          "owner": "reviewer",
+          "task": "Identify risks and questions requiring further evidence."
+        },
+        {
+          "key": "report",
+          "name": "Assessment report",
+          "kind": "document",
+          "owner": "writer",
+          "task": "Summarize supported claims, risks and limitations."
+        },
+        {
+          "key": "decision",
+          "name": "Evaluation decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Record the assessment decision and rationale."
+        }
+      ]
+    },
+    {
+      "id": "planning-simulation",
+      "name": "Planning and simulation",
+      "example": "Evaluate migration strategies.",
+      "purpose": "Compare migration scenarios using explicit assumptions and obtain a human planning decision.",
+      "members": [
+        {
+          "id": "coordinator",
+          "name": "Planner",
+          "preset": "coordinator",
+          "tools": []
+        },
+        {
+          "id": "researcher",
+          "name": "Researcher",
+          "preset": "researcher",
+          "tools": [
+            "read_file",
+            "read_spreadsheet"
+          ]
+        },
+        {
+          "id": "analyst",
+          "name": "Scenario analyst",
+          "preset": "analyst",
+          "tools": []
+        },
+        {
+          "id": "verifier",
+          "name": "Model verifier",
+          "preset": "verifier",
+          "tools": [
+            "calculate"
+          ]
+        },
+        {
+          "id": "reviewer",
+          "name": "Risk reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Human decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "read_spreadsheet",
+        "calculate",
+        "run_code"
+      ],
+      "outputs": [
+        {
+          "key": "plan",
+          "name": "Candidate plan",
+          "kind": "tasks",
+          "owner": "coordinator",
+          "task": "Define candidate actions and acceptance criteria."
+        },
+        {
+          "key": "assumptions",
+          "name": "Assumptions and inputs",
+          "kind": "findings",
+          "owner": "researcher",
+          "task": "Collect inputs and mark assumptions separately from observations."
+        },
+        {
+          "key": "scenarios",
+          "name": "Scenario comparison",
+          "kind": "dataset",
+          "owner": "analyst",
+          "task": "Compare scenarios and projected consequences; mark projections explicitly."
+        },
+        {
+          "key": "checks",
+          "name": "Model checks",
+          "kind": "findings",
+          "owner": "verifier",
+          "task": "Check calculations, assumptions and sensitivity."
+        },
+        {
+          "key": "risks",
+          "name": "Plan risks",
+          "kind": "findings",
+          "owner": "reviewer",
+          "task": "Review the plan and identify failure modes."
+        },
+        {
+          "key": "decision",
+          "name": "Planning decision",
+          "kind": "decision",
+          "owner": "approver",
+          "task": "Choose a scenario or request further analysis with a rationale."
+        }
+      ]
+    }
+  ],
+  "connectorDescriptors": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "group": "ai",
+      "category": "AI models",
+      "description": "Run the application\u2019s AI team.",
+      "default_mode": "model",
+      "status": "unavailable"
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "group": "ai",
+      "category": "AI models",
+      "description": "Run the application\u2019s AI team.",
+      "default_mode": "model",
+      "status": "unavailable"
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini",
+      "group": "ai",
+      "category": "AI models",
+      "description": "Run the application\u2019s AI team.",
+      "default_mode": "model",
+      "status": "unavailable"
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "group": "ai",
+      "category": "AI models",
+      "description": "Run the application\u2019s AI team.",
+      "default_mode": "model",
+      "status": "unavailable"
+    },
+    {
+      "id": "custom_model",
+      "name": "Custom model endpoint",
+      "group": "ai",
+      "category": "AI models",
+      "description": "Run the application\u2019s AI team.",
+      "default_mode": "model",
+      "status": "unavailable"
+    },
+    {
+      "id": "zendesk",
+      "name": "Zendesk",
+      "group": "support",
+      "category": "Customer support",
+      "description": "Read cases and history; prepare replies for review.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "intercom",
+      "name": "Intercom",
+      "group": "support",
+      "category": "Customer support",
+      "description": "Read cases and history; prepare replies for review.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "freshdesk",
+      "name": "Freshdesk",
+      "group": "support",
+      "category": "Customer support",
+      "description": "Read cases and history; prepare replies for review.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "salesforce",
+      "name": "Salesforce",
+      "group": "crm",
+      "category": "Customer records",
+      "description": "Read customer account context and previous interactions.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "hubspot_crm",
+      "name": "HubSpot CRM",
+      "group": "crm",
+      "category": "Customer records",
+      "description": "Read customer account context and previous interactions.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "confluence",
+      "name": "Confluence",
+      "group": "knowledge",
+      "category": "Knowledge and policies",
+      "description": "Read dated policies, guidance and approved answers.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "group": "knowledge",
+      "category": "Knowledge and policies",
+      "description": "Read dated policies, guidance and approved answers.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "zendesk_help",
+      "name": "Zendesk Help Center",
+      "group": "knowledge",
+      "category": "Knowledge and policies",
+      "description": "Read dated policies, guidance and approved answers.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "google_workspace",
+      "name": "Google Drive and Docs",
+      "group": "files",
+      "category": "Files and documents",
+      "description": "Read source packs and save reviewed documents.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "microsoft_files",
+      "name": "SharePoint and OneDrive",
+      "group": "files",
+      "category": "Files and documents",
+      "description": "Read source packs and save reviewed documents.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "dropbox",
+      "name": "Dropbox",
+      "group": "files",
+      "category": "Files and documents",
+      "description": "Read source packs and save reviewed documents.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "box",
+      "name": "Box",
+      "group": "files",
+      "category": "Files and documents",
+      "description": "Read source packs and save reviewed documents.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "google_sheets",
+      "name": "Google Sheets",
+      "group": "sheets",
+      "category": "Spreadsheets",
+      "description": "Read comparison data and prepare result tables.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "excel",
+      "name": "Excel",
+      "group": "sheets",
+      "category": "Spreadsheets",
+      "description": "Read comparison data and prepare result tables.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "jira",
+      "name": "Jira",
+      "group": "issues",
+      "category": "Engineering handoffs",
+      "description": "Prepare an engineering issue linked to the original case.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "group": "issues",
+      "category": "Engineering handoffs",
+      "description": "Prepare an engineering issue linked to the original case.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "github_issues",
+      "name": "GitHub Issues",
+      "group": "issues",
+      "category": "Engineering handoffs",
+      "description": "Prepare an engineering issue linked to the original case.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "group": "notifications",
+      "category": "Review notifications",
+      "description": "Notify reviewers and link to the decision in Conclave.",
+      "default_mode": "approved",
+      "status": "unavailable"
+    },
+    {
+      "id": "teams",
+      "name": "Microsoft Teams",
+      "group": "notifications",
+      "category": "Review notifications",
+      "description": "Notify reviewers and link to the decision in Conclave.",
+      "default_mode": "approved",
+      "status": "unavailable"
+    },
+    {
+      "id": "gmail",
+      "name": "Gmail",
+      "group": "email",
+      "category": "Email",
+      "description": "Read relevant messages and prepare approved outgoing emails.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "outlook",
+      "name": "Outlook",
+      "group": "email",
+      "category": "Email",
+      "description": "Read relevant messages and prepare approved outgoing emails.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "web_search",
+      "name": "Web search provider",
+      "group": "research",
+      "category": "Web research",
+      "description": "Search public sources or read pages with source references.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "web_reader",
+      "name": "Web-page reader",
+      "group": "research",
+      "category": "Web research",
+      "description": "Search public sources or read pages with source references.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "wordpress",
+      "name": "WordPress",
+      "group": "publishing",
+      "category": "Website publishing",
+      "description": "Prepare content drafts; publish only after approval.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "webflow",
+      "name": "Webflow",
+      "group": "publishing",
+      "category": "Website publishing",
+      "description": "Prepare content drafts; publish only after approval.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "contentful",
+      "name": "Contentful",
+      "group": "publishing",
+      "category": "Website publishing",
+      "description": "Prepare content drafts; publish only after approval.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "hubspot_marketing",
+      "name": "HubSpot Marketing",
+      "group": "marketing",
+      "category": "Marketing delivery",
+      "description": "Prepare channel drafts and deliver approved content.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "mailchimp",
+      "name": "Mailchimp",
+      "group": "marketing",
+      "category": "Marketing delivery",
+      "description": "Prepare channel drafts and deliver approved content.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "buffer",
+      "name": "Buffer",
+      "group": "marketing",
+      "category": "Marketing delivery",
+      "description": "Prepare channel drafts and deliver approved content.",
+      "default_mode": "draft",
+      "status": "unavailable"
+    },
+    {
+      "id": "stripe",
+      "name": "Stripe",
+      "group": "payments",
+      "category": "Payment records",
+      "description": "Verify charges and refund history. Refund actions are excluded.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "razorpay",
+      "name": "Razorpay",
+      "group": "payments",
+      "category": "Payment records",
+      "description": "Verify charges and refund history. Refund actions are excluded.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "http_api",
+      "name": "Custom API",
+      "group": "custom",
+      "category": "Custom systems",
+      "description": "Connect internal sources or receive events. Advanced setup is folded away.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "webhook",
+      "name": "Incoming webhook",
+      "group": "custom",
+      "category": "Custom systems",
+      "description": "Connect internal sources or receive events. Advanced setup is folded away.",
+      "default_mode": "read",
+      "status": "unavailable"
+    },
+    {
+      "id": "mcp_server",
+      "name": "Custom tool server",
+      "group": "custom",
+      "category": "Custom systems",
+      "description": "Connect internal sources or receive events. Advanced setup is folded away.",
+      "default_mode": "read",
+      "status": "unavailable"
+    }
+  ],
+  "featuredApplications": [
+    {
+      "id": "case-resolution",
+      "name": "Resolve a customer case",
+      "purpose": "Prepare a safe reply for case CS-1042: a reported duplicate renewal charge.",
+      "example": "Prepare a safe reply for case CS-1042: a reported duplicate renewal charge.",
+      "members": [
+        {
+          "id": "case_analyst",
+          "name": "Case analyst",
+          "preset": "case_analyst",
+          "tools": [
+            "read_ticket",
+            "read_customer_history"
+          ]
+        },
+        {
+          "id": "policy_checker",
+          "name": "Policy checker",
+          "preset": "policy_checker",
+          "tools": [
+            "read_policy"
+          ]
+        },
+        {
+          "id": "support_writer",
+          "name": "Support writer",
+          "preset": "support_writer",
+          "tools": []
+        },
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_ticket",
+        "read_customer_history",
+        "read_policy",
+        "read_file"
+      ],
+      "outputs": [
+        {
+          "key": "case_summary",
+          "name": "Case summary",
+          "owner": "case_analyst",
+          "kind": "findings",
+          "task": "Separate verified charges, customer reports and attempted fixes."
+        },
+        {
+          "key": "policy_check",
+          "name": "Policy check",
+          "owner": "policy_checker",
+          "kind": "findings",
+          "task": "Check eligibility against the dated policy and list missing facts."
+        },
+        {
+          "key": "reply",
+          "name": "Reply draft",
+          "owner": "support_writer",
+          "kind": "document",
+          "task": "Draft a reply using the case and policy checks."
+        },
+        {
+          "key": "quality",
+          "name": "Reply review",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check promises, privacy and factual support."
+        },
+        {
+          "key": "approval",
+          "name": "Reply approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Approve the draft for manual delivery or request changes. Approval does not send it."
+        }
+      ],
+      "plan": [
+        {
+          "id": "case_summary",
+          "name": "Case summary",
+          "agent": "case_analyst",
+          "output": "case_summary",
+          "task": "Separate verified charges, customer reports and attempted fixes."
+        },
+        {
+          "id": "policy_check",
+          "name": "Policy check",
+          "agent": "policy_checker",
+          "output": "policy_check",
+          "task": "Check eligibility against the dated policy and list missing facts."
+        },
+        {
+          "id": "reply",
+          "name": "Reply draft",
+          "agent": "support_writer",
+          "output": "reply",
+          "task": "Draft a reply using the case and policy checks."
+        },
+        {
+          "id": "quality",
+          "name": "Reply review",
+          "agent": "fact_checker",
+          "output": "quality",
+          "task": "Check promises, privacy and factual support."
+        },
+        {
+          "id": "approval",
+          "name": "Reply approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Approve the draft for manual delivery or request changes. Approval does not send it."
+        }
+      ],
+      "connections": [
+        {
+          "from": "case_summary",
+          "to": "reply"
+        },
+        {
+          "from": "policy_check",
+          "to": "reply"
+        },
+        {
+          "from": "reply",
+          "to": "quality"
+        },
+        {
+          "from": "quality",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "case",
+          "label": "Case and previous replies",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "policy",
+          "label": "Current policy and date",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "limits",
+          "label": "Reply requirements",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Confirm the payment evidence is current.",
+        "Check refund authority and unsupported promises.",
+        "Review privacy before manually sending."
+      ],
+      "research": {
+        "audience": "Customer support lead",
+        "url": "https://doi.org/10.1093/qje/qjae044",
+        "summary": "A field study of 5,172 support agents found 15% more resolved issues per hour with AI assistance. This supports the audience; these exact plans are product hypotheses."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "support",
+          "purpose": "Customer case",
+          "suggested": "zendesk",
+          "required": true
+        },
+        {
+          "group": "knowledge",
+          "purpose": "Current support policy",
+          "suggested": "confluence",
+          "required": true
+        },
+        {
+          "group": "payments",
+          "purpose": "Billing evidence when needed",
+          "suggested": "stripe",
+          "required": false
+        },
+        {
+          "group": "crm",
+          "purpose": "Customer account context",
+          "suggested": "hubspot_crm",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "zendesk",
+          "purpose": "Customer case",
+          "scope": "",
+          "mode": "read"
+        },
+        {
+          "connector": "confluence",
+          "purpose": "Current support policy",
+          "scope": "",
+          "mode": "read"
+        }
+      ]
+    },
+    {
+      "id": "escalation-preparation",
+      "name": "Prepare a support escalation",
+      "purpose": "Prepare an engineering handoff for intermittent exports in case CS-2048.",
+      "example": "Prepare an engineering handoff for intermittent exports in case CS-2048.",
+      "members": [
+        {
+          "id": "case_analyst",
+          "name": "Case analyst",
+          "preset": "case_analyst",
+          "tools": [
+            "read_ticket",
+            "read_customer_history"
+          ]
+        },
+        {
+          "id": "escalation_manager",
+          "name": "Escalation coordinator",
+          "preset": "escalation_manager",
+          "tools": [
+            "read_ticket",
+            "read_customer_history",
+            "read_policy"
+          ]
+        },
+        {
+          "id": "policy_checker",
+          "name": "Policy checker",
+          "preset": "policy_checker",
+          "tools": [
+            "read_policy"
+          ]
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_ticket",
+        "read_customer_history",
+        "read_policy"
+      ],
+      "outputs": [
+        {
+          "key": "timeline",
+          "name": "Case timeline",
+          "owner": "case_analyst",
+          "kind": "findings",
+          "task": "Summarize impact and attempted fixes without guessing cause."
+        },
+        {
+          "key": "gaps",
+          "name": "Missing information",
+          "owner": "escalation_manager",
+          "kind": "tasks",
+          "task": "List the minimum missing evidence and who should collect it."
+        },
+        {
+          "key": "routing",
+          "name": "Escalation eligibility",
+          "owner": "policy_checker",
+          "kind": "findings",
+          "task": "Apply escalation rules and distinguish proposed from assigned priority."
+        },
+        {
+          "key": "handoff",
+          "name": "Engineering handoff",
+          "owner": "escalation_manager",
+          "kind": "document",
+          "task": "Prepare a concise handoff with impact, evidence, attempts and open questions."
+        },
+        {
+          "key": "approval",
+          "name": "Lead approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Confirm ownership and severity, or request missing evidence before manual escalation."
+        }
+      ],
+      "plan": [
+        {
+          "id": "timeline",
+          "name": "Case timeline",
+          "agent": "case_analyst",
+          "output": "timeline",
+          "task": "Summarize impact and attempted fixes without guessing cause."
+        },
+        {
+          "id": "gaps",
+          "name": "Missing information",
+          "agent": "escalation_manager",
+          "output": "gaps",
+          "task": "List the minimum missing evidence and who should collect it."
+        },
+        {
+          "id": "routing",
+          "name": "Escalation eligibility",
+          "agent": "policy_checker",
+          "output": "routing",
+          "task": "Apply escalation rules and distinguish proposed from assigned priority."
+        },
+        {
+          "id": "handoff",
+          "name": "Engineering handoff",
+          "agent": "escalation_manager",
+          "output": "handoff",
+          "task": "Prepare a concise handoff with impact, evidence, attempts and open questions."
+        },
+        {
+          "id": "approval",
+          "name": "Lead approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Confirm ownership and severity, or request missing evidence before manual escalation."
+        }
+      ],
+      "connections": [
+        {
+          "from": "timeline",
+          "to": "gaps"
+        },
+        {
+          "from": "timeline",
+          "to": "routing"
+        },
+        {
+          "from": "gaps",
+          "to": "handoff"
+        },
+        {
+          "from": "routing",
+          "to": "handoff"
+        },
+        {
+          "from": "handoff",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "case",
+          "label": "Case history and impact",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "criteria",
+          "label": "Escalation rules",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "attempts",
+          "label": "Attempted fixes and evidence",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Confirm customer impact without claiming a global outage.",
+        "Include redacted evidence and missing information.",
+        "Have a lead assign severity and ownership."
+      ],
+      "research": {
+        "audience": "Customer support lead",
+        "url": "https://doi.org/10.1093/qje/qjae044",
+        "summary": "A field study of 5,172 support agents found 15% more resolved issues per hour with AI assistance. This supports the audience; these exact plans are product hypotheses."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "support",
+          "purpose": "Case and attachments",
+          "suggested": "zendesk",
+          "required": true
+        },
+        {
+          "group": "knowledge",
+          "purpose": "Escalation rules",
+          "suggested": "confluence",
+          "required": true
+        },
+        {
+          "group": "issues",
+          "purpose": "Engineering handoff",
+          "suggested": "jira",
+          "required": true
+        },
+        {
+          "group": "notifications",
+          "purpose": "Lead notification",
+          "suggested": "slack",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "zendesk",
+          "purpose": "Case and attachments",
+          "scope": "",
+          "mode": "read"
+        },
+        {
+          "connector": "confluence",
+          "purpose": "Escalation rules",
+          "scope": "",
+          "mode": "read"
+        },
+        {
+          "connector": "jira",
+          "purpose": "Engineering handoff",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "options-comparison",
+      "name": "Compare options and recommend",
+      "purpose": "Compare supplied knowledge-base products for a support team.",
+      "example": "Compare supplied knowledge-base products for a support team.",
+      "members": [
+        {
+          "id": "analyst",
+          "name": "Comparison analyst",
+          "preset": "analyst",
+          "tools": [
+            "calculate"
+          ]
+        },
+        {
+          "id": "researcher",
+          "name": "Source researcher",
+          "preset": "researcher",
+          "tools": [
+            "web_search",
+            "web_fetch",
+            "read_file"
+          ]
+        },
+        {
+          "id": "reviewer",
+          "name": "Critical reviewer",
+          "preset": "reviewer",
+          "tools": []
+        },
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "calculate",
+        "web_search",
+        "web_fetch",
+        "read_file"
+      ],
+      "outputs": [
+        {
+          "key": "criteria",
+          "name": "Decision criteria",
+          "owner": "analyst",
+          "kind": "findings",
+          "task": "Separate mandatory requirements from weighted preferences."
+        },
+        {
+          "key": "option_a",
+          "name": "Option A evidence",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Check Option A against each requirement with source references."
+        },
+        {
+          "key": "option_b",
+          "name": "Option B evidence",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Check Option B and identify missing proof."
+        },
+        {
+          "key": "option_c",
+          "name": "Option C evidence",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Check Option C and quantify budget tradeoff."
+        },
+        {
+          "key": "comparison",
+          "name": "Options comparison",
+          "owner": "analyst",
+          "kind": "dataset",
+          "task": "Compare eligibility before scoring; leave unsupported scores blank."
+        },
+        {
+          "key": "challenge",
+          "name": "Assumption review",
+          "owner": "reviewer",
+          "kind": "findings",
+          "task": "Challenge missing evidence and sensitivity to budget and requirements."
+        },
+        {
+          "key": "recommendation",
+          "name": "Recommendation",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Give a conditional recommendation and questions that must be answered."
+        },
+        {
+          "key": "approval",
+          "name": "Decision review",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Choose an option, defer or request more evidence with a rationale."
+        }
+      ],
+      "plan": [
+        {
+          "id": "criteria",
+          "name": "Decision criteria",
+          "agent": "analyst",
+          "output": "criteria",
+          "task": "Separate mandatory requirements from weighted preferences."
+        },
+        {
+          "id": "option_a",
+          "name": "Option A evidence",
+          "agent": "researcher",
+          "output": "option_a",
+          "task": "Check Option A against each requirement with source references."
+        },
+        {
+          "id": "option_b",
+          "name": "Option B evidence",
+          "agent": "researcher",
+          "output": "option_b",
+          "task": "Check Option B and identify missing proof."
+        },
+        {
+          "id": "option_c",
+          "name": "Option C evidence",
+          "agent": "researcher",
+          "output": "option_c",
+          "task": "Check Option C and quantify budget tradeoff."
+        },
+        {
+          "id": "comparison",
+          "name": "Options comparison",
+          "agent": "analyst",
+          "output": "comparison",
+          "task": "Compare eligibility before scoring; leave unsupported scores blank."
+        },
+        {
+          "id": "challenge",
+          "name": "Assumption review",
+          "agent": "reviewer",
+          "output": "challenge",
+          "task": "Challenge missing evidence and sensitivity to budget and requirements."
+        },
+        {
+          "id": "recommendation",
+          "name": "Recommendation",
+          "agent": "creator",
+          "output": "recommendation",
+          "task": "Give a conditional recommendation and questions that must be answered."
+        },
+        {
+          "id": "approval",
+          "name": "Decision review",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Choose an option, defer or request more evidence with a rationale."
+        }
+      ],
+      "connections": [
+        {
+          "from": "criteria",
+          "to": "option_a"
+        },
+        {
+          "from": "criteria",
+          "to": "option_b"
+        },
+        {
+          "from": "criteria",
+          "to": "option_c"
+        },
+        {
+          "from": "option_a",
+          "to": "comparison"
+        },
+        {
+          "from": "option_b",
+          "to": "comparison"
+        },
+        {
+          "from": "option_c",
+          "to": "comparison"
+        },
+        {
+          "from": "comparison",
+          "to": "challenge"
+        },
+        {
+          "from": "challenge",
+          "to": "recommendation"
+        },
+        {
+          "from": "recommendation",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "criteria",
+          "label": "Decision criteria and must-haves",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "options",
+          "label": "Options and supplied evidence",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "scope",
+          "label": "Decision boundaries",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Apply mandatory gates before weighted preferences.",
+        "Resolve missing source evidence.",
+        "State tradeoffs and conditions explicitly."
+      ],
+      "research": {
+        "audience": "Research and strategy analyst",
+        "url": "https://doi.org/10.1287/orsc.2025.21838",
+        "summary": "An experiment with 758 consultants found faster, higher-quality work on suitable tasks, but poorer correctness on a task outside AI capabilities. Source checks and human judgment remain essential. These exact plans were not tested."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Requirements and vendor evidence",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "sheets",
+          "purpose": "Comparison table",
+          "suggested": "google_sheets",
+          "required": true
+        },
+        {
+          "group": "research",
+          "purpose": "Public source research",
+          "suggested": "web_search",
+          "required": false
+        },
+        {
+          "group": "research",
+          "purpose": "Read source pages",
+          "suggested": "web_reader",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Requirements and vendor evidence",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "google_sheets",
+          "purpose": "Comparison table",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "research-brief",
+      "name": "Build an evidence-backed brief",
+      "purpose": "Prepare a brief on reducing repeat support contacts without overstating the evidence.",
+      "example": "Prepare a brief on reducing repeat support contacts without overstating the evidence.",
+      "members": [
+        {
+          "id": "analyst",
+          "name": "Comparison analyst",
+          "preset": "analyst",
+          "tools": [
+            "calculate"
+          ]
+        },
+        {
+          "id": "researcher",
+          "name": "Source researcher",
+          "preset": "researcher",
+          "tools": [
+            "web_search",
+            "web_fetch",
+            "read_file"
+          ]
+        },
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "calculate",
+        "web_search",
+        "web_fetch",
+        "read_file"
+      ],
+      "outputs": [
+        {
+          "key": "scope",
+          "name": "Research scope",
+          "owner": "analyst",
+          "kind": "findings",
+          "task": "Define the question, outcomes and exclusions."
+        },
+        {
+          "key": "audit",
+          "name": "Audit findings",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Extract audit observations and limitations."
+        },
+        {
+          "key": "survey",
+          "name": "Survey findings",
+          "owner": "researcher",
+          "kind": "findings",
+          "task": "Extract survey findings without substituting preference for outcomes."
+        },
+        {
+          "key": "verification",
+          "name": "Source and claim checks",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check provenance, dates, conflicting definitions and unsupported causal claims."
+        },
+        {
+          "key": "brief",
+          "name": "Research brief",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Synthesize findings, uncertainty and a measurable next experiment."
+        },
+        {
+          "key": "approval",
+          "name": "Brief approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Review claims, limitations and the proposed measurement before sharing."
+        }
+      ],
+      "plan": [
+        {
+          "id": "scope",
+          "name": "Research scope",
+          "agent": "analyst",
+          "output": "scope",
+          "task": "Define the question, outcomes and exclusions."
+        },
+        {
+          "id": "audit",
+          "name": "Audit findings",
+          "agent": "researcher",
+          "output": "audit",
+          "task": "Extract audit observations and limitations."
+        },
+        {
+          "id": "survey",
+          "name": "Survey findings",
+          "agent": "researcher",
+          "output": "survey",
+          "task": "Extract survey findings without substituting preference for outcomes."
+        },
+        {
+          "id": "verification",
+          "name": "Source and claim checks",
+          "agent": "fact_checker",
+          "output": "verification",
+          "task": "Check provenance, dates, conflicting definitions and unsupported causal claims."
+        },
+        {
+          "id": "brief",
+          "name": "Research brief",
+          "agent": "creator",
+          "output": "brief",
+          "task": "Synthesize findings, uncertainty and a measurable next experiment."
+        },
+        {
+          "id": "approval",
+          "name": "Brief approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Review claims, limitations and the proposed measurement before sharing."
+        }
+      ],
+      "connections": [
+        {
+          "from": "scope",
+          "to": "audit"
+        },
+        {
+          "from": "scope",
+          "to": "survey"
+        },
+        {
+          "from": "audit",
+          "to": "verification"
+        },
+        {
+          "from": "survey",
+          "to": "verification"
+        },
+        {
+          "from": "verification",
+          "to": "brief"
+        },
+        {
+          "from": "brief",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "question",
+          "label": "Research question and audience",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "sources",
+          "label": "Source pack and dates",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "boundaries",
+          "label": "Scope and evidence rules",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Inspect source dates and definitions.",
+        "Keep observation separate from causation.",
+        "Preserve limitations in the final brief."
+      ],
+      "research": {
+        "audience": "Research and strategy analyst",
+        "url": "https://doi.org/10.1287/orsc.2025.21838",
+        "summary": "An experiment with 758 consultants found faster, higher-quality work on suitable tasks, but poorer correctness on a task outside AI capabilities. Source checks and human judgment remain essential. These exact plans were not tested."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Source pack and final brief",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "research",
+          "purpose": "Find public sources",
+          "suggested": "web_search",
+          "required": false
+        },
+        {
+          "group": "research",
+          "purpose": "Read and cite sources",
+          "suggested": "web_reader",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Source pack and final brief",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "launch-content-production",
+      "name": "Produce reviewed content",
+      "purpose": "Draft a launch article for your product using only approved claims.",
+      "example": "Draft a launch article for your product using only approved claims.",
+      "members": [
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "brand_editor",
+          "name": "Brand editor",
+          "preset": "brand_editor",
+          "tools": [
+            "read_brand_guide"
+          ]
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "read_brand_guide"
+      ],
+      "outputs": [
+        {
+          "key": "brief",
+          "name": "Writing brief",
+          "owner": "creator",
+          "kind": "findings",
+          "task": "Identify audience, structure, approved facts and unsupported requested claims."
+        },
+        {
+          "key": "draft",
+          "name": "First draft",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Draft using approved facts and mark unresolved claims explicitly."
+        },
+        {
+          "key": "facts",
+          "name": "Fact review",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check each material claim against the source pack."
+        },
+        {
+          "key": "brand",
+          "name": "Brand review",
+          "owner": "brand_editor",
+          "kind": "findings",
+          "task": "Check tone, accessibility and prohibited language."
+        },
+        {
+          "key": "final",
+          "name": "Revised article",
+          "owner": "creator",
+          "kind": "document",
+          "task": "Revise against both fact and brand reviews, preserving limitations."
+        },
+        {
+          "key": "approval",
+          "name": "Editor approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Approve for manual publication or request changes. This step does not publish."
+        }
+      ],
+      "plan": [
+        {
+          "id": "brief",
+          "name": "Writing brief",
+          "agent": "creator",
+          "output": "brief",
+          "task": "Identify audience, structure, approved facts and unsupported requested claims."
+        },
+        {
+          "id": "draft",
+          "name": "First draft",
+          "agent": "creator",
+          "output": "draft",
+          "task": "Draft using approved facts and mark unresolved claims explicitly."
+        },
+        {
+          "id": "facts",
+          "name": "Fact review",
+          "agent": "fact_checker",
+          "output": "facts",
+          "task": "Check each material claim against the source pack."
+        },
+        {
+          "id": "brand",
+          "name": "Brand review",
+          "agent": "brand_editor",
+          "output": "brand",
+          "task": "Check tone, accessibility and prohibited language."
+        },
+        {
+          "id": "final",
+          "name": "Revised article",
+          "agent": "creator",
+          "output": "final",
+          "task": "Revise against both fact and brand reviews, preserving limitations."
+        },
+        {
+          "id": "approval",
+          "name": "Editor approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Approve for manual publication or request changes. This step does not publish."
+        }
+      ],
+      "connections": [
+        {
+          "from": "brief",
+          "to": "draft"
+        },
+        {
+          "from": "draft",
+          "to": "facts"
+        },
+        {
+          "from": "draft",
+          "to": "brand"
+        },
+        {
+          "from": "facts",
+          "to": "final"
+        },
+        {
+          "from": "brand",
+          "to": "final"
+        },
+        {
+          "from": "final",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "brief",
+          "label": "Audience, purpose and format",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "facts",
+          "label": "Approved facts and source material",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "brand",
+          "label": "Brand and publication rules",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Remove unsupported performance claims.",
+        "Complete both factual and brand reviews.",
+        "Keep publication a separate manual action."
+      ],
+      "research": {
+        "audience": "Content marketing manager",
+        "url": "https://doi.org/10.1126/science.adh2586",
+        "summary": "An experiment with 453 professionals found writing tasks took 40% less time and quality improved 18%. Results were pooled across professions; they do not prove campaign results or these exact plans."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Brief, approved claims and brand guide",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "publishing",
+          "purpose": "Website draft destination",
+          "suggested": "wordpress",
+          "required": true
+        },
+        {
+          "group": "notifications",
+          "purpose": "Editor notification",
+          "suggested": "slack",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Brief, approved claims and brand guide",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "wordpress",
+          "purpose": "Website draft destination",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    },
+    {
+      "id": "content-repurposing",
+      "name": "Repurpose approved content",
+      "purpose": "Adapt an approved your product article into LinkedIn, email and FAQ drafts.",
+      "example": "Adapt an approved your product article into LinkedIn, email and FAQ drafts.",
+      "members": [
+        {
+          "id": "fact_checker",
+          "name": "Fact checker",
+          "preset": "fact_checker",
+          "tools": [
+            "read_file"
+          ]
+        },
+        {
+          "id": "channel_writer",
+          "name": "Channel writer",
+          "preset": "channel_writer",
+          "tools": [
+            "read_channel_guidelines"
+          ]
+        },
+        {
+          "id": "creator",
+          "name": "Brief writer",
+          "preset": "creator",
+          "tools": []
+        },
+        {
+          "id": "approver",
+          "name": "Decision owner",
+          "preset": "approver",
+          "tools": []
+        }
+      ],
+      "tools": [
+        "read_file",
+        "read_channel_guidelines"
+      ],
+      "outputs": [
+        {
+          "key": "source",
+          "name": "Source boundaries",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Extract approved facts, caveats and forbidden additions."
+        },
+        {
+          "key": "linkedin",
+          "name": "LinkedIn draft",
+          "owner": "channel_writer",
+          "kind": "document",
+          "task": "Write a LinkedIn draft within the supplied length and preserve caveats."
+        },
+        {
+          "key": "email",
+          "name": "Email draft",
+          "owner": "channel_writer",
+          "kind": "document",
+          "task": "Write a subject and email within 150 words using only approved facts."
+        },
+        {
+          "key": "faq",
+          "name": "FAQ draft",
+          "owner": "channel_writer",
+          "kind": "document",
+          "task": "Write three source-backed questions and answers."
+        },
+        {
+          "key": "checks",
+          "name": "Cross-channel review",
+          "owner": "fact_checker",
+          "kind": "findings",
+          "task": "Check consistency, caveats, lengths and unsupported additions across all drafts."
+        },
+        {
+          "key": "package",
+          "name": "Content package",
+          "owner": "creator",
+          "kind": "artifact",
+          "task": "Package the reviewed drafts with channel labels; do not fabricate file links."
+        },
+        {
+          "key": "approval",
+          "name": "Package approval",
+          "owner": "approver",
+          "kind": "decision",
+          "task": "Approve each draft for manual delivery or request channel-specific changes."
+        }
+      ],
+      "plan": [
+        {
+          "id": "source",
+          "name": "Source boundaries",
+          "agent": "fact_checker",
+          "output": "source",
+          "task": "Extract approved facts, caveats and forbidden additions."
+        },
+        {
+          "id": "linkedin",
+          "name": "LinkedIn draft",
+          "agent": "channel_writer",
+          "output": "linkedin",
+          "task": "Write a LinkedIn draft within the supplied length and preserve caveats."
+        },
+        {
+          "id": "email",
+          "name": "Email draft",
+          "agent": "channel_writer",
+          "output": "email",
+          "task": "Write a subject and email within 150 words using only approved facts."
+        },
+        {
+          "id": "faq",
+          "name": "FAQ draft",
+          "agent": "channel_writer",
+          "output": "faq",
+          "task": "Write three source-backed questions and answers."
+        },
+        {
+          "id": "checks",
+          "name": "Cross-channel review",
+          "agent": "fact_checker",
+          "output": "checks",
+          "task": "Check consistency, caveats, lengths and unsupported additions across all drafts."
+        },
+        {
+          "id": "package",
+          "name": "Content package",
+          "agent": "creator",
+          "output": "package",
+          "task": "Package the reviewed drafts with channel labels; do not fabricate file links."
+        },
+        {
+          "id": "approval",
+          "name": "Package approval",
+          "agent": "approver",
+          "output": "approval",
+          "task": "Approve each draft for manual delivery or request channel-specific changes."
+        }
+      ],
+      "connections": [
+        {
+          "from": "source",
+          "to": "linkedin"
+        },
+        {
+          "from": "source",
+          "to": "email"
+        },
+        {
+          "from": "source",
+          "to": "faq"
+        },
+        {
+          "from": "linkedin",
+          "to": "checks"
+        },
+        {
+          "from": "email",
+          "to": "checks"
+        },
+        {
+          "from": "faq",
+          "to": "checks"
+        },
+        {
+          "from": "checks",
+          "to": "package"
+        },
+        {
+          "from": "package",
+          "to": "approval"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "source",
+          "label": "Approved source content",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "channels",
+          "label": "Channel requirements",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "id": "voice",
+          "label": "Audience and voice",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "review_checks": [
+        "Preserve source meaning and caveats in every channel.",
+        "Check edited lengths against channel requirements.",
+        "Review each draft before manual delivery."
+      ],
+      "research": {
+        "audience": "Content marketing manager",
+        "url": "https://doi.org/10.1126/science.adh2586",
+        "summary": "An experiment with 453 professionals found writing tasks took 40% less time and quality improved 18%. Results were pooled across professions; they do not prove campaign results or these exact plans."
+      },
+      "featured": true,
+      "connector_requirements": [
+        {
+          "group": "ai",
+          "purpose": "AI team",
+          "suggested": "openai",
+          "required": true
+        },
+        {
+          "group": "files",
+          "purpose": "Approved source article",
+          "suggested": "google_workspace",
+          "required": true
+        },
+        {
+          "group": "marketing",
+          "purpose": "Email draft destination",
+          "suggested": "mailchimp",
+          "required": true
+        },
+        {
+          "group": "marketing",
+          "purpose": "Social draft destination",
+          "suggested": "buffer",
+          "required": true
+        },
+        {
+          "group": "publishing",
+          "purpose": "FAQ destination",
+          "suggested": "wordpress",
+          "required": false
+        }
+      ],
+      "integrations": [
+        {
+          "connector": "openai",
+          "purpose": "AI team",
+          "scope": "",
+          "mode": "model"
+        },
+        {
+          "connector": "google_workspace",
+          "purpose": "Approved source article",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "mailchimp",
+          "purpose": "Email draft destination",
+          "scope": "",
+          "mode": "draft"
+        },
+        {
+          "connector": "buffer",
+          "purpose": "Social draft destination",
+          "scope": "",
+          "mode": "draft"
+        }
+      ]
+    }
+  ],
+  "outputPresets": [
+    {
+      "id": "case_summary",
+      "name": "Case summary",
+      "kind": "findings",
+      "task": "Summarize the dated case timeline, verified facts, customer reports and attempted fixes."
+    },
+    {
+      "id": "reply_draft",
+      "name": "Customer reply draft",
+      "kind": "document",
+      "task": "Draft a source-backed reply without unsupported promises or sensitive-data requests."
+    },
+    {
+      "id": "escalation_pack",
+      "name": "Escalation handoff",
+      "kind": "document",
+      "task": "Include impact, reproduction steps, attempted fixes, redacted evidence, missing details and proposed owner."
+    },
+    {
+      "id": "options_scorecard",
+      "name": "Options comparison",
+      "kind": "dataset",
+      "task": "Apply mandatory gates before weighted preferences; show unknowns and cite each assessment."
+    },
+    {
+      "id": "research_brief",
+      "name": "Research brief",
+      "kind": "document",
+      "task": "Answer the research question with dated sources, limitations, conflicting evidence and next questions."
+    },
+    {
+      "id": "claim_checks",
+      "name": "Claim checks",
+      "kind": "findings",
+      "task": "Mark each material claim supported, unsupported or contradicted with source references."
+    },
+    {
+      "id": "brand_checks",
+      "name": "Brand checks",
+      "kind": "findings",
+      "task": "Check voice, terminology, accessibility and prohibited claims with specific edits."
+    },
+    {
+      "id": "channel_package",
+      "name": "Channel draft package",
+      "kind": "artifact",
+      "task": "Collect channel-labelled drafts and their review notes. Do not invent file links or publish."
+    }
+  ],
+  "outputTypes": [
+    {
+      "id": "document",
+      "name": "Document",
+      "description": "A report, synthesis, proposal or draft message.",
+      "type": "text",
+      "layout": "prose",
+      "statuses": []
+    },
+    {
+      "id": "findings",
+      "name": "Structured findings",
+      "description": "Observations, issues, recommendations or extracted information.",
+      "type": "records",
+      "layout": "cards",
+      "statuses": []
+    },
+    {
+      "id": "decision",
+      "name": "Decision",
+      "description": "Options, criteria, a selected choice and its rationale.",
+      "type": "records",
+      "layout": "cards",
+      "statuses": [
+        "proposed",
+        "approved",
+        "rejected",
+        "changes_requested"
+      ]
+    },
+    {
+      "id": "tasks",
+      "name": "Tasks or plan",
+      "description": "Actions, owners, dependencies and completion criteria.",
+      "type": "records",
+      "layout": "board",
+      "statuses": [
+        "todo",
+        "in_progress",
+        "blocked",
+        "done"
+      ]
+    },
+    {
+      "id": "dataset",
+      "name": "Dataset",
+      "description": "Measurements, extracted rows or comparison data.",
+      "type": "records",
+      "layout": "table",
+      "statuses": [
+        "unverified",
+        "validated"
+      ]
+    },
+    {
+      "id": "artifact",
+      "name": "Artifact references",
+      "description": "References to code patches, files, images or diagrams supplied by the host.",
+      "type": "records",
+      "layout": "cards",
+      "statuses": [
+        "draft",
+        "reviewed"
+      ]
+    }
+  ],
+  "rolePresets": [
+    {
+      "id": "coordinator",
+      "name": "Coordinator",
+      "kind": "ai",
+      "description": "Frame the job, divide work and keep the team aligned.",
+      "instructions": "Define the question, completion criteria and work needed. Preserve uncertainty and assign clear responsibilities."
+    },
+    {
+      "id": "researcher",
+      "name": "Researcher",
+      "kind": "ai",
+      "description": "Gather information and trace its sources.",
+      "instructions": "Gather relevant observations with source locators. Separate observations from inference. Do not invent sources."
+    },
+    {
+      "id": "analyst",
+      "name": "Analyst",
+      "kind": "ai",
+      "description": "Compare options, explain patterns and assess implications.",
+      "instructions": "Compare the available findings, develop explanations and make assumptions explicit. Link conclusions to evidence."
+    },
+    {
+      "id": "creator",
+      "name": "Creator",
+      "kind": "ai",
+      "description": "Produce documents, code, designs or proposals.",
+      "instructions": "Produce the requested result from shared findings. Include sources, limitations and concrete next actions where relevant."
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "kind": "ai",
+      "description": "Challenge assumptions, quality and risks.",
+      "instructions": "Review the work critically. Identify unsupported claims, omissions, contradictions and practical risks."
+    },
+    {
+      "id": "verifier",
+      "name": "Verifier",
+      "kind": "ai",
+      "description": "Check claims through tests or independent evidence.",
+      "instructions": "Verify claims and results against independent evidence or explicit checks. Record what passed, failed or remains unverified."
+    },
+    {
+      "id": "approver",
+      "name": "Approver",
+      "kind": "human",
+      "description": "Accept, reject or request changes.",
+      "instructions": "Review the available results and record an explicit decision with a reason. Do not approve work that has not been checked."
+    },
+    {
+      "id": "case_analyst",
+      "name": "Case analyst",
+      "kind": "ai",
+      "description": "Build a dated case timeline, distinguish customer reports from verified facts, and list attempted fixes.",
+      "instructions": "Build a dated case timeline, distinguish customer reports from verified facts, and list attempted fixes."
+    },
+    {
+      "id": "policy_checker",
+      "name": "Policy checker",
+      "kind": "ai",
+      "description": "Check the supplied current policy. Cite clauses, identify missing eligibility facts, and never promise refunds or exceptions.",
+      "instructions": "Check the supplied current policy. Cite clauses, identify missing eligibility facts, and never promise refunds or exceptions."
+    },
+    {
+      "id": "support_writer",
+      "name": "Support writer",
+      "kind": "ai",
+      "description": "Draft an empathetic reply grounded in case evidence. Ask only for necessary information; never request passwords or full card details.",
+      "instructions": "Draft an empathetic reply grounded in case evidence. Ask only for necessary information; never request passwords or full card details."
+    },
+    {
+      "id": "escalation_manager",
+      "name": "Escalation coordinator",
+      "kind": "ai",
+      "description": "Prepare a handoff with impact, reproduction steps, attempted fixes, missing evidence and proposed owner. Do not invent severity or root cause.",
+      "instructions": "Prepare a handoff with impact, reproduction steps, attempted fixes, missing evidence and proposed owner. Do not invent severity or root cause."
+    },
+    {
+      "id": "fact_checker",
+      "name": "Fact checker",
+      "kind": "ai",
+      "description": "Check every material claim against supplied sources. Label unsupported and conflicting claims; do not manufacture references.",
+      "instructions": "Check every material claim against supplied sources. Label unsupported and conflicting claims; do not manufacture references."
+    },
+    {
+      "id": "brand_editor",
+      "name": "Brand editor",
+      "kind": "ai",
+      "description": "Check the supplied voice guide, accessibility and prohibited claims. Give specific edits without introducing new facts.",
+      "instructions": "Check the supplied voice guide, accessibility and prohibited claims. Give specific edits without introducing new facts."
+    },
+    {
+      "id": "channel_writer",
+      "name": "Channel writer",
+      "kind": "ai",
+      "description": "Adapt approved material to the requested channel and length. Preserve caveats, attribution and meaning; prepare drafts without publishing.",
+      "instructions": "Adapt approved material to the requested channel and length. Preserve caveats, attribution and meaning; prepare drafts without publishing."
+    }
+  ],
+  "toolDescriptors": [
+    {
+      "id": "list_files",
+      "name": "Browse file names",
+      "category": "Information access",
+      "description": "Find files made available by the host.",
+      "permission": "read",
+      "origin": "bundled"
+    },
+    {
+      "id": "read_file",
+      "name": "Read files",
+      "category": "Information access",
+      "description": "Read the contents of available files.",
+      "permission": "read",
+      "origin": "bundled"
+    },
+    {
+      "id": "search_files",
+      "name": "Search file contents",
+      "category": "Information access",
+      "description": "Find relevant passages in available files.",
+      "permission": "read",
+      "origin": "bundled"
+    },
+    {
+      "id": "web_search",
+      "name": "Search the web",
+      "category": "Information access",
+      "description": "Find relevant web pages.",
+      "permission": "read",
+      "origin": "bundled"
+    },
+    {
+      "id": "web_fetch",
+      "name": "Read web pages",
+      "category": "Information access",
+      "description": "Read a page at a supplied URL.",
+      "permission": "read",
+      "origin": "bundled"
+    },
+    {
+      "id": "knowledge_search",
+      "name": "Search a knowledge base",
+      "category": "Information access",
+      "description": "Retrieve relevant internal knowledge.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "query_database",
+      "name": "Query a database",
+      "category": "Data access",
+      "description": "Run queries through a host-supplied read-only connection.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "read_spreadsheet",
+      "name": "Read spreadsheets",
+      "category": "Data access",
+      "description": "Read sheets and structured tables.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "api_read",
+      "name": "Read from an API",
+      "category": "Data access",
+      "description": "Retrieve records from an allowed API.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "calculate",
+      "name": "Calculate",
+      "category": "Computation",
+      "description": "Evaluate calculations and transformations.",
+      "permission": "compute",
+      "origin": "host"
+    },
+    {
+      "id": "run_code",
+      "name": "Run code",
+      "category": "Computation",
+      "description": "Execute code in a host-controlled environment.",
+      "permission": "compute",
+      "origin": "host"
+    },
+    {
+      "id": "run_tests",
+      "name": "Run tests",
+      "category": "Computation",
+      "description": "Run a registered test command.",
+      "permission": "compute",
+      "origin": "host"
+    },
+    {
+      "id": "write_file",
+      "name": "Write files",
+      "category": "Creation and modification",
+      "description": "Create or edit files within an approved scope.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "prepare_patch",
+      "name": "Prepare code changes",
+      "category": "Creation and modification",
+      "description": "Produce a patch for review.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "generate_artifact",
+      "name": "Create an artifact",
+      "category": "Creation and modification",
+      "description": "Generate a document, image, diagram or other file.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "manage_ticket",
+      "name": "Manage tickets",
+      "category": "Business applications",
+      "description": "Create or update a ticket.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "manage_calendar",
+      "name": "Manage calendar entries",
+      "category": "Business applications",
+      "description": "Create or change calendar entries.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "update_crm",
+      "name": "Update CRM records",
+      "category": "Business applications",
+      "description": "Change customer or opportunity records.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "send_message",
+      "name": "Send messages",
+      "category": "Communication",
+      "description": "Send a message through an approved account.",
+      "permission": "send",
+      "origin": "host"
+    },
+    {
+      "id": "send_email",
+      "name": "Send email",
+      "category": "Communication",
+      "description": "Send email through an approved account.",
+      "permission": "send",
+      "origin": "host"
+    },
+    {
+      "id": "delegate_work",
+      "name": "Delegate work",
+      "category": "Collaboration",
+      "description": "Delegate within host-enforced member and context boundaries.",
+      "permission": "coordinate",
+      "origin": "host"
+    },
+    {
+      "id": "request_review",
+      "name": "Request a review",
+      "category": "Collaboration",
+      "description": "Ask an allowed team member to review work.",
+      "permission": "coordinate",
+      "origin": "host"
+    },
+    {
+      "id": "ask_human",
+      "name": "Ask for human input",
+      "category": "Collaboration",
+      "description": "Request input through the host\u2019s human handoff.",
+      "permission": "coordinate",
+      "origin": "host"
+    },
+    {
+      "id": "read_ticket",
+      "name": "Read a support case",
+      "category": "Support and content",
+      "description": "Read the selected case and its attachments; redact personal information.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "read_customer_history",
+      "name": "Read customer history",
+      "category": "Support and content",
+      "description": "Read relevant previous contacts and attempted fixes.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "read_policy",
+      "name": "Read current policies",
+      "category": "Support and content",
+      "description": "Retrieve dated support policies and approved guidance.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "read_brand_guide",
+      "name": "Read brand guidance",
+      "category": "Support and content",
+      "description": "Read tone, terminology and prohibited claims.",
+      "permission": "read",
+      "origin": "host"
+    },
+    {
+      "id": "read_channel_guidelines",
+      "name": "Read channel guidance",
+      "category": "Support and content",
+      "description": "Read format, length and accessibility requirements.",
+      "permission": "read",
+      "origin": "host"
+    }
+  ],
+  "workflowConnectorRequirements": {
+    "case-resolution": [
+      {
+        "group": "ai",
+        "purpose": "AI team",
+        "suggested": "openai",
+        "required": true
+      },
+      {
+        "group": "support",
+        "purpose": "Customer case",
+        "suggested": "zendesk",
+        "required": true
+      },
+      {
+        "group": "knowledge",
+        "purpose": "Current support policy",
+        "suggested": "confluence",
+        "required": true
+      },
+      {
+        "group": "payments",
+        "purpose": "Billing evidence when needed",
+        "suggested": "stripe",
+        "required": false
+      },
+      {
+        "group": "crm",
+        "purpose": "Customer account context",
+        "suggested": "hubspot_crm",
+        "required": false
+      }
+    ],
+    "escalation-preparation": [
+      {
+        "group": "ai",
+        "purpose": "AI team",
+        "suggested": "openai",
+        "required": true
+      },
+      {
+        "group": "support",
+        "purpose": "Case and attachments",
+        "suggested": "zendesk",
+        "required": true
+      },
+      {
+        "group": "knowledge",
+        "purpose": "Escalation rules",
+        "suggested": "confluence",
+        "required": true
+      },
+      {
+        "group": "issues",
+        "purpose": "Engineering handoff",
+        "suggested": "jira",
+        "required": true
+      },
+      {
+        "group": "notifications",
+        "purpose": "Lead notification",
+        "suggested": "slack",
+        "required": false
+      }
+    ],
+    "options-comparison": [
+      {
+        "group": "ai",
+        "purpose": "AI team",
+        "suggested": "openai",
+        "required": true
+      },
+      {
+        "group": "files",
+        "purpose": "Requirements and vendor evidence",
+        "suggested": "google_workspace",
+        "required": true
+      },
+      {
+        "group": "sheets",
+        "purpose": "Comparison table",
+        "suggested": "google_sheets",
+        "required": true
+      },
+      {
+        "group": "research",
+        "purpose": "Public source research",
+        "suggested": "web_search",
+        "required": false
+      },
+      {
+        "group": "research",
+        "purpose": "Read source pages",
+        "suggested": "web_reader",
+        "required": false
+      }
+    ],
+    "research-brief": [
+      {
+        "group": "ai",
+        "purpose": "AI team",
+        "suggested": "openai",
+        "required": true
+      },
+      {
+        "group": "files",
+        "purpose": "Source pack and final brief",
+        "suggested": "google_workspace",
+        "required": true
+      },
+      {
+        "group": "research",
+        "purpose": "Find public sources",
+        "suggested": "web_search",
+        "required": false
+      },
+      {
+        "group": "research",
+        "purpose": "Read and cite sources",
+        "suggested": "web_reader",
+        "required": false
+      }
+    ],
+    "launch-content-production": [
+      {
+        "group": "ai",
+        "purpose": "AI team",
+        "suggested": "openai",
+        "required": true
+      },
+      {
+        "group": "files",
+        "purpose": "Brief, approved claims and brand guide",
+        "suggested": "google_workspace",
+        "required": true
+      },
+      {
+        "group": "publishing",
+        "purpose": "Website draft destination",
+        "suggested": "wordpress",
+        "required": true
+      },
+      {
+        "group": "notifications",
+        "purpose": "Editor notification",
+        "suggested": "slack",
+        "required": false
+      }
+    ],
+    "content-repurposing": [
+      {
+        "group": "ai",
+        "purpose": "AI team",
+        "suggested": "openai",
+        "required": true
+      },
+      {
+        "group": "files",
+        "purpose": "Approved source article",
+        "suggested": "google_workspace",
+        "required": true
+      },
+      {
+        "group": "marketing",
+        "purpose": "Email draft destination",
+        "suggested": "mailchimp",
+        "required": true
+      },
+      {
+        "group": "marketing",
+        "purpose": "Social draft destination",
+        "suggested": "buffer",
+        "required": true
+      },
+      {
+        "group": "publishing",
+        "purpose": "FAQ destination",
+        "suggested": "wordpress",
+        "required": false
+      }
+    ]
+  },
+  "version": 1,
+  "manualPlanning": {
+    "fallback": "research-desk",
+    "goalRules": [
+      {
+        "application": "escalation-preparation",
+        "pattern": "escalat|handoff",
+        "flags": "i",
+        "priority": true,
+        "weight": 1
+      },
+      {
+        "application": "content-repurposing",
+        "pattern": "repurpos|adapt.*(content|article)|linkedin.*email",
+        "flags": "i",
+        "priority": true,
+        "weight": 1
+      },
+      {
+        "application": "case-resolution",
+        "pattern": "(customer|support|ticket|complaint).*(reply|resolv|refund)|resolv.*(case|ticket)",
+        "flags": "i",
+        "priority": true,
+        "weight": 1
+      },
+      {
+        "application": "research-brief",
+        "pattern": "research.*brief|evidence.*brief",
+        "flags": "i",
+        "priority": true,
+        "weight": 1
+      },
+      {
+        "application": "options-comparison",
+        "pattern": "compare.*options|options.*compar",
+        "flags": "i",
+        "priority": true,
+        "weight": 1
+      },
+      {
+        "application": "launch-content-production",
+        "pattern": "launch.*article|content.*production",
+        "flags": "i",
+        "priority": true,
+        "weight": 1
+      },
+      {
+        "application": "incident-response",
+        "pattern": "\\b(incident|outage|postmortem|on-call)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 3
+      },
+      {
+        "application": "document-review",
+        "pattern": "\\b(review|proofread|edit|contracts?|proposals?)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 1
+      },
+      {
+        "application": "due-diligence",
+        "pattern": "\\b(vendors?|suppliers?|due diligence|procurement)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 3
+      },
+      {
+        "application": "software-delivery",
+        "pattern": "\\b(code|software|patch|bug|test suite|implement)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 3
+      },
+      {
+        "application": "data-analysis",
+        "pattern": "\\b(data|spreadsheet|csv|statistics|sales|metrics)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 3
+      },
+      {
+        "application": "content-production",
+        "pattern": "\\b(write|content|article|blog|campaign|newsletter)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 1
+      },
+      {
+        "application": "support-resolution",
+        "pattern": "\\b(support|customer|ticket|complaint)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 3
+      },
+      {
+        "application": "project-coordination",
+        "pattern": "\\b(project|milestone|schedule|coordinate|team tasks)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 3
+      },
+      {
+        "application": "planning-simulation",
+        "pattern": "\\b(simulate|scenario|migration|forecast)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 3
+      },
+      {
+        "application": "decision-support",
+        "pattern": "\\b(compare|choose|recommend|decision|options)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 1
+      },
+      {
+        "application": "investigation",
+        "pattern": "\\b(investigate|why|cause|latency|evidence)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 1
+      },
+      {
+        "application": "research-desk",
+        "pattern": "\\b(research|explore|learn|survey)\\b",
+        "flags": "gi",
+        "priority": false,
+        "weight": 1
+      }
+    ],
+    "outputRules": [
+      {
+        "pattern": "\\b(report|brief|summary|document)\\b",
+        "output": "document"
+      },
+      {
+        "pattern": "\\b(tasks|action plan|checklist)\\b",
+        "output": "tasks"
+      }
+    ],
+    "roleTools": {
+      "researcher": {
+        "permissions": [
+          "read",
+          "coordinate"
+        ]
+      },
+      "verifier": {
+        "ids": [
+          "read_file",
+          "search_files",
+          "web_fetch",
+          "calculate",
+          "run_tests"
+        ]
+      },
+      "reviewer": {
+        "permissions": [
+          "read"
+        ],
+        "unlessRole": "researcher"
+      },
+      "analyst": {
+        "ids": [
+          "calculate",
+          "run_code",
+          "read_spreadsheet",
+          "query_database"
+        ]
+      },
+      "creator": {
+        "ids": [
+          "generate_artifact",
+          "prepare_patch",
+          "write_file"
+        ]
+      }
+    },
+    "outputLabels": {
+      "document": "Written report",
+      "findings": "Findings",
+      "decision": "Decision",
+      "tasks": "Task list",
+      "dataset": "Data table",
+      "artifact": "Files and links"
+    },
+    "commands": {
+      "move": "^move (.+?) (before|after) (.+)$",
+      "tool": "^add (.+?) to (.+)$",
+      "insert": "^add (?:an? )?(?:independent )?(.+?)(?: (before|after) (.+))?$"
+    },
+    "approvalAliases": [
+      "approval",
+      "human approval",
+      "human checkpoint"
+    ],
+    "humanAliases": [
+      "human checkpoint",
+      "human approval",
+      "human reviewer"
+    ],
+    "aiAliases": [
+      "work step",
+      "ai work step",
+      "ai step"
+    ],
+    "outputOwners": {
+      "document": "creator",
+      "artifact": "creator",
+      "dataset": "analyst",
+      "tasks": "coordinator",
+      "decision": "analyst",
+      "findings": "researcher"
+    }
+  }
+}

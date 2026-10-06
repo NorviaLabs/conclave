@@ -34,11 +34,81 @@ rather than a chat transcript.
 uv sync
 ```
 
+## Run the Conclave REST backend and Studio
+
+Conclave exposes a general application CLI and REST API built on the same core.
+Studio uses the REST API exclusively for persistence, proposals and execution.
+
+Start both together with Node.js 24+ available:
+
+```sh
+uv run python dev.py --provider codex
+```
+
+Press Ctrl+C to stop both. Use `--backend-port`, `--studio-port` or `--node` to
+override ports or the Node executable. Existing `CONCLAVE_*` settings, including
+the API token and data directory, are inherited by both services.
+
+Or start them independently:
+
+```sh
+# Terminal 1, repository root:
+uv run conclave serve --provider codex --port 8080
+
+# Terminal 2:
+cd studio
+CONCLAVE_API_URL=http://127.0.0.1:8080 npm run dev
+```
+
+See [REST endpoints and interface boundaries](REST_API.md)
+for the endpoint list, configuration, existing-data compatibility and local-host
+limits. Studio is at http://127.0.0.1:8787; Conclave stays running independently.
+
+## Create and run an application
+
+The `conclave` command runs application definitions through the same runtime used
+by Studio. It does not require the investigation application or a web server.
+
+```bash
+uv run conclave create release-notes.json --name "Release writer" \
+  --instructions "Write release notes for the supplied changes."
+uv run conclave run release-notes.json --provider codex \
+  --task "Version one adds CSV export and fixes duplicate notifications."
+```
+
+Edit the JSON to define your agents, tools, inputs, output schemas, workflow and
+views, or export an application from Studio and pass that file to `conclave run`.
+Use `--inputs inputs.json` for declared request values. Every run pins its
+definition and reports its ID, status, events and actual output as JSON.
+Provider authentication remains with the backend; model IDs pass through.
+`--model` is optional for Codex/OpenCode and required for Ollama.
+
+Runs persist in the same local database as Studio by default. Use `--database
+/absolute/path/runs.sqlite` to select another database consistently across commands.
+The same `CONCLAVE_SOURCE_DIR`, `CONCLAVE_WEB`, `CONCLAVE_EXTENSIONS` and custom provider
+factory settings apply. Tools must be registered on the host; write/unknown
+capability approvals retain their existing gates.
+
+```bash
+uv run conclave status RUN_ID
+# For a waiting human step, supply JSON matching its output schema:
+uv run conclave review RUN_ID REVIEW_ID --output review.json
+uv run conclave resume RUN_ID --provider codex
+uv run conclave cancel RUN_ID
+```
+
+Human reviews are durable; resume continues from the saved checkpoint without
+replaying completed steps. `cancel` applies to waiting runs; stop an active CLI
+run with Ctrl+C. The command waits until the run completes or pauses for review.
+The `applications` Python package also exports `run_application` and
+`validate_definition`. Importing `conclave` itself remains a reusable core import.
+
 ## Run the investigation application
 
-Conclave is a library, not an application runner. The `investigation` command
+Conclave's core is a library. The `investigation` command
 belongs to the application built on top of it; all flags below, including
-`--repo`, are that application's interface. There is no `conclave` command.
+`--repo`, are that application's interface. For other applications, use the
+definition-driven `conclave` command above.
 
 ```bash
 # ask a specific question about a repository

@@ -39,7 +39,14 @@ with Path(os.environ["FIXTURE_CALLS"]).open("a") as log:
     log.write("call\n")
 if "SLOW_FIXTURE" in prompt:
     time.sleep(60)
-if '"read_file"' in prompt and 'TOOL RESULT for read_file' not in prompt:
+if "Design or edit a Conclave Studio application" in prompt:
+    context = json.loads(prompt.split("USER:\n", 1)[1])
+    definition = context["base"]
+    for member in definition["agents"]:
+        member["tools"] = []
+    definition["name"] = "Proposed domain team"
+    action = {"definition": definition, "summary": "A team proposed for the supplied goal"}
+elif '"read_file"' in prompt and 'TOOL RESULT for read_file' not in prompt:
     action = {"type": "tool", "name": "read_file", "arguments": {"path": "source.md"}}
 elif '"text" string' in prompt:
     action = {"type": "final", "content": "Done", "text": "Offline fixture brief. The supplied observations do not establish causality."}
@@ -47,6 +54,10 @@ else:
     match = re.search(r'Allowed status values: (\[[^\n]*\])', prompt)
     statuses = json.loads(match.group(1)) if match else ["recorded"]
     action = {"type": "final", "content": "Done", "records": [{"id": "fixture", "title": "Offline source check", "body": "The supplied observations do not establish causality.", "status": statuses[0], "source_refs": ["source.md:1"]}]}
+fields_match = re.search(r'Additional typed record fields: (\[[^\n]*\])', prompt)
+if fields_match and "records" in action:
+    for field in json.loads(fields_match.group(1)):
+        action["records"][0][field["key"]] = (0 if field["type"] == "number" else False if field["type"] == "boolean" else "2024-02-29" if field["type"] == "date" else field["options"][0] if field["type"] == "enum" else "Offline custom field")
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(action)}}))
 print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 8, "output_tokens": 4}}))
 ''')
@@ -59,7 +70,11 @@ print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 8, "output
                    "STUDIO_PORT": str(port), "STUDIO_PROVIDER": "codex", "STUDIO_SOURCE_DIR": str(source),
                    "STUDIO_WEB": "0", "FIXTURE_CALLS": str(calls), "UV_NO_SYNC": "1",
                    "UV_PROJECT_ENVIRONMENT": sys.prefix}
-    process = None
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        api_port = sock.getsockname()[1]
+    environment.update(CONCLAVE_API_URL=f"http://127.0.0.1:{api_port}", CONCLAVE_DATA_DIR=str(root / "studio/.studio-local"))
+    process = rest_service = None
     log = root / "check.log"
 
     def call(path, method="GET", value=None, origin=True):
@@ -74,7 +89,15 @@ print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 8, "output
         except urllib.error.HTTPError as response:
             return response.code, json.loads(response.read())
 
+    def stop():
+        for child in (process, rest_service):
+            if child is not None and child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
     def start(output):
+        global rest_service
+        rest_service = subprocess.Popen([sys.executable, "-m", "conclave", "serve", "--port", str(api_port)], cwd=root, env=environment, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
         worker = subprocess.Popen(["node", "scripts/dev.mjs"], cwd=root / "studio", env=environment,
                                   stdin=subprocess.DEVNULL, stdout=output, stderr=output)
         for _ in range(100):
@@ -131,8 +154,7 @@ print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 8, "output
             assert any(item["event"]["type"] == "ToolCalled" and item["event"]["ok"] for item in record["events"])
             assert all("checkpoint" not in item["event"] for item in record["events"])
             before_review = calls.read_text().splitlines()
-            process.terminate()
-            process.wait(timeout=5)
+            stop()
             process = start(output)
             _, restored = call("/api/runs/" + run["id"])
             assert restored["status"] == "waiting_for_human"
@@ -155,8 +177,6 @@ print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 8, "output
             assert status == 201
             status, cancelled = call("/api/runs/" + slow["id"] + "/cancel", "POST", {})
             assert status == 200 and cancelled["status"] == "interrupted"
-            print("PASS: saved snapshots, origin/revision gates, Worker/Python/fake-CLI bridge, actual source read, restart/review/resume, no replay, reported metrics and cancellation.")
+            print("PASS: saved snapshots, origin/revision gates, Studio/REST/fake-CLI service, actual source read, restart/review/resume, no replay, reported metrics and cancellation.")
         finally:
-            if process is not None and process.poll() is None:
-                process.terminate()
-                process.wait(timeout=5)
+            stop()

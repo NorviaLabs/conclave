@@ -15,6 +15,13 @@
       "when": 1791126566817,
       "tag": "0001_tough_living_lightning",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791183251558,
+      "tag": "0002_low_agent_brand",
+      "breakpoints": true
     }
   ]
 }

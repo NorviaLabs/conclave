@@ -8,8 +8,8 @@ import pytest
 
 from conclave import Capability, Tool, ToolRegistry, Usage
 from conftest import CONFIG, ScriptedProvider
-from studio.runtime.application import run_application, validate_request_inputs
-from studio.runtime.runs import RunRepository, validate_run_request
+from conclave.application.definition import run_application, validate_request_inputs
+from conclave.application.runs import RunRepository, validate_run_request
 
 
 def request():
@@ -356,3 +356,56 @@ def test_review_migration_preserves_existing_local_run_records(tmp_path):
     assert restored["request"] == request()
     assert restored["status"] == "pending"
     assert restored["events"] == restored["reviews"] == []
+
+
+def test_custom_record_fields_survive_live_execution_review_and_restart(tmp_path):
+    value = request()
+    collection = {"key": "brief", "type": "records", "merge": "upsert", "statuses": [], "fields": [
+        {"key": "score", "label": "Score", "type": "number", "required": True},
+        {"key": "verified", "label": "Verified", "type": "boolean", "required": True},
+        {"key": "observed", "label": "Observed date", "type": "date", "required": False},
+        {"key": "category", "label": "Category", "type": "enum", "required": True, "options": ["a", "b"]},
+    ]}
+    value["definition"]["state"] = [collection]
+    value["definition"]["views"][0]["layout"] = "table"
+    record = {"id": "observation", "title": "Observation", "body": "Source observation", "status": "recorded", "source_refs": [],
+              "score": 0, "verified": False, "observed": "2024-02-29", "category": "a"}
+    class FieldProvider(ScriptedProvider):
+        async def complete(self, messages):
+            assert "Additional typed record fields" in messages[0]["content"]
+            assert '"score"' in messages[0]["content"]
+            return await super().complete(messages)
+
+    provider = FieldProvider(default={"type": "final", "content": "Done", "records": [record]})
+    path = tmp_path / "fields.sqlite"
+    repository = RunRepository(path)
+    run_id = repository.create(value)
+
+    async def exercise():
+        events = [event async for event in repository.execute(run_id, provider, ToolRegistry(20000))]
+        state = next(event["state"] for event in events if event["type"] == "ApplicationStateChanged")
+        assert state["brief"][0]["score"] == 0 and state["brief"][0]["verified"] is False
+        restored = RunRepository(path)
+        review = restored.get(run_id)["reviews"][0]
+        invalid = {**record, "score": True}
+        with pytest.raises(ValueError, match="record field"):
+            restored.submit_review(run_id, review["id"], reviewer="operator", output={"records": [invalid]})
+        restored.submit_review(run_id, review["id"], reviewer="operator", output={"records": [{**record, "score": 2}]})
+        resumed = [event async for event in restored.resume(run_id, provider, ToolRegistry(20000))]
+        assert resumed[-1]["state"]["brief"][0]["score"] == 2
+        assert restored.get(run_id)["status"] == "completed"
+        assert len(provider.prompts) == 1
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("field,value", [
+    ({"key": "score", "label": "Score", "type": "number", "required": True}, True),
+    ({"key": "date", "label": "Date", "type": "date", "required": True}, "2026-02-30"),
+    ({"key": "choice", "label": "Choice", "type": "enum", "required": True, "options": ["a"]}, "b"),
+    ({"key": "score", "label": "Score", "type": "number", "required": True}, None),
+])
+def test_invalid_custom_record_values(field, value):
+    from conclave.application.definition import record_fields
+    with pytest.raises(ValueError):
+        record_fields({field["key"]: value}, [field])

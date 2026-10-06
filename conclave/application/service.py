@@ -1,8 +1,6 @@
-"""Development-only JSON-lines host, reachable through the Node preview's pipe.
+"""Shared application execution service for the Conclave CLI and REST adapter.
 
-There is no listening Python port. Browser definitions and identities are not
-accepted: the Node host supplies the saved snapshot and the local OS operator
-owns reviews. Production authentication/workspaces require another host.
+Providers, tools and reviewer identity are owned by the host.
 """
 from __future__ import annotations
 
@@ -17,8 +15,14 @@ import sys
 from pathlib import Path
 
 from conclave import CodexProvider, OpenCodeProvider, OllamaProvider, Tool, ToolRegistry, Capability
-from .application import validate_host_tools
+from .definition import validate_host_tools
 from .runs import RunRepository, validate_run_request
+from .extensions import ConnectorAdapter, load_extensions, load_provider_factory
+from .planning import propose
+
+def setting(name, default=None):
+    return os.environ.get("CONCLAVE_" + name, os.environ.get("STUDIO_" + name, default))
+
 
 
 def public_record(record):
@@ -32,16 +36,19 @@ def public_record(record):
             metrics = checkpoint["budget"]["spent"]
             if event["type"] == "ApplicationStateChanged":
                 event["patch"] = checkpoint["patches"][event["stage"]]
+        if event.get("metrics"):
+            metrics = event["metrics"]
         events.append({"sequence": item["sequence"], "event": event})
     record["events"], record["metrics"] = events, metrics
     return record
 
 
 class LocalRunHost:
-    def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, unavailable=None):
+    def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, unavailable=None, adapters=()):
         self.repository, self.provider, self.tools = repository, provider, tools
         self.reviewer, self.provider_name, self.unavailable = reviewer, provider_name, unavailable
         self.tasks = {}
+        self.adapters = tuple(adapters)
 
     async def _consume(self, stream):
         try:
@@ -75,12 +82,44 @@ class LocalRunHost:
         if not isinstance(value, dict):
             raise ValueError("Provide a JSON request object")
         if command == "runtime":
+            connectors = []
+            for adapter in self.adapters:
+                try:
+                    connectors.append(await adapter.describe(self.tools))
+                except Exception:
+                    connectors.append({"id": adapter.id, "name": adapter.name, "group": adapter.group,
+                                       "category": "Host connections", "description": "Connection check failed",
+                                       "default_mode": adapter.mode, "status": "unavailable", "available": False,
+                                       "tools": list(adapter.tools), "origin": "host"})
             return 200, {"local": True, "service": True, "available": self.provider is not None, "provider": self.provider_name,
-                         "reason": self.unavailable, "tools": sorted(self.tools.tools), "reviewer": self.reviewer}
+                         "connectors": connectors, "reason": self.unavailable, "tools": sorted(self.tools.tools), "reviewer": self.reviewer,
+                         "tool_descriptors": [{"id": tool.name, "name": tool.name, "description": tool.description,
+                                               "parameters": tool.parameters, "capabilities": sorted(tool.capabilities),
+                                               "requires_approval": tool.destructive,
+                                               "permission": "write" if tool.destructive else "read",
+                                               "origin": "host", "category": "Host tools", "available": True}
+                                              for tool in self.tools.tools.values()],
+                         "features": {"dag": True, "durable_reviews": True, "manual": True,
+                                      "schedules": False, "events": False, "budget_warnings": True}}
+        if command == "propose":
+            self._require_provider()
+            return 200, await propose(self.provider, self.tools, value)
         if command == "start":
             self._require_provider()
             value = validate_run_request(value)
             validate_host_tools(value["definition"], self.tools)
+            selected = {item["connector"]: item for item in value["definition"].get("integrations", [])}
+            for adapter in self.adapters:
+                if adapter.id in selected:
+                    try:
+                        descriptor = await adapter.describe(self.tools)
+                    except Exception:
+                        raise ValueError("Selected host connector is unavailable: " + adapter.id) from None
+                    if not descriptor["available"]:
+                        raise ValueError("Selected host connector is unavailable: " + adapter.id)
+                    mode = selected[adapter.id]["mode"]
+                    if adapter.mode == "read" and mode != "read" or adapter.mode == "model" and mode != "model":
+                        raise ValueError("Selected connector does not support these actions: " + adapter.id)
             run_id = self.repository.create(value)
             await self._schedule(run_id)
             return 201, public_record(self.repository.get(run_id))
@@ -125,10 +164,21 @@ class LocalRunHost:
             await stream.aclose()
 
 
-def configured_host():
-    studio = Path(__file__).resolve().parents[1]
-    source = os.environ.get("STUDIO_SOURCE_DIR")
-    tools = ToolRegistry(20000)
+def configured_host(*, workspace=None):
+    studio = Path(__file__).resolve().parents[2] / "studio"
+    workspace = Path(workspace).resolve() if workspace is not None else Path.cwd()
+    source = setting("SOURCE_DIR")
+    defaults_path = Path(setting("DEFAULTS_FILE", Path(__file__).parent / "data" / "defaults.json"))
+    defaults = json.loads(defaults_path.read_text())
+    from .definition import validate_definition
+    validate_definition(defaults)
+    output_limit = defaults["run_config"]["max_tool_output_chars"]
+    tools = ToolRegistry(output_limit)
+    adapters = []
+    source_extensions = {item.strip().lower() for item in setting("SOURCE_EXTENSIONS", ".txt,.md,.csv,.html").split(',')}
+    import re
+    if not source_extensions or any(not re.fullmatch(r"\.[a-z0-9_-]+", item) for item in source_extensions):
+        raise ValueError("STUDIO_SOURCE_EXTENSIONS must contain comma-separated file suffixes")
     if source:
         from conclave.tools.local import LocalTools
         root = Path(source).resolve()
@@ -138,56 +188,46 @@ def configured_host():
 
         async def read_source(path, start_line=1, end_line=200):
             resolved = local._safe_path(path)
-            if any(part.startswith('.') for part in resolved.relative_to(root).parts) or resolved.suffix.lower() not in {".txt", ".md", ".csv", ".html"}:
+            if any(part.startswith('.') for part in resolved.relative_to(root).parts) or resolved.suffix.lower() not in source_extensions:
                 raise ValueError("Choose a plain-text source document in the source folder")
             return await local.read_file(path, start_line=start_line, end_line=end_line)
 
         tools.register(Tool("read_file", "Read a supplied source document in the host's source folder", {"path": "string", "start_line": "integer, optional", "end_line": "integer, optional"}, read_source, frozenset({Capability.READ})))
-    if os.environ.get("STUDIO_WEB") == "1":
+    if source:
+        adapters.append(ConnectorAdapter("local_files", "Local source folder", "files", ("read_file",), lambda: root.is_dir()))
+    if setting("WEB") == "1":
         from conclave.tools import build_tool_registry
-        bundled = build_tool_registry(Path(source or studio), 20000)
+        bundled = build_tool_registry(Path(source or studio), output_limit)
         for name in ("web_search", "web_fetch"):
             tools.register(bundled.tool(name))
-    name, model = os.environ.get("STUDIO_PROVIDER"), os.environ.get("STUDIO_MODEL") or None
+        adapters.extend([ConnectorAdapter("web_search", "Public web search", "research", ("web_search",), lambda: True),
+                         ConnectorAdapter("web_reader", "Public web reader", "research", ("web_fetch",), lambda: True)])
+    adapters.extend(load_extensions(setting("EXTENSIONS", ""), tools))
+    name, model = setting("PROVIDER"), setting("MODEL") or None
     provider, reason = None, None
-    timeout = float(os.environ.get("STUDIO_MODEL_TIMEOUT", "300"))
+    timeout = float(setting("MODEL_TIMEOUT", "300"))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("STUDIO_MODEL_TIMEOUT must be finite and positive")
-    if name in {"codex", "opencode"} and shutil.which(name) is None:
+    factory = setting("PROVIDER_FACTORY")
+    if factory:
+        provider = load_provider_factory(factory)(model=model, timeout=timeout, workspace=workspace)
+        if not callable(getattr(provider, "complete", None)):
+            raise ValueError("The configured provider must implement complete(messages)")
+        name = name or factory.split(':')[0]
+    elif name in {"codex", "opencode"} and shutil.which(name) is None:
         reason = f"The configured {name} command is unavailable on this host"
     elif name == "codex":
         provider = CodexProvider(model, timeout)
     elif name == "opencode":
-        provider = OpenCodeProvider(studio, model, timeout)
+        provider = OpenCodeProvider(workspace, model, timeout)
     elif name == "ollama" and model:
-        provider = OllamaProvider(model, timeout, os.environ.get("STUDIO_OLLAMA_URL", "http://127.0.0.1:11434"))
+        provider = OllamaProvider(model, timeout, setting("OLLAMA_URL", "http://127.0.0.1:11434"))
     else:
-        reason = "Set STUDIO_PROVIDER to codex, opencode or ollama; Ollama also needs STUDIO_MODEL"
-    return LocalRunHost(RunRepository(studio / ".studio-local" / "runs.sqlite"), provider, tools,
-                        reviewer=getpass.getuser(), provider_name=name, unavailable=reason)
-
-
-async def main():
-    host = configured_host()
-    try:
-        while line := await asyncio.to_thread(sys.stdin.readline):
-            message_id = None
-            try:
-                message = json.loads(line)
-                message_id = message["id"]
-                status, result = await host.handle(message["command"], message.get("value", {}))
-            except KeyError:
-                status, result = 404, {"error": "Saved request not found"}
-            except ValueError as error:
-                status, result = 400, {"error": str(error)}
-            except TypeError:
-                status, result = 400, {"error": "The local request could not be accepted. Check its fields, review status and available tools."}
-            except Exception:
-                status, result = 503, {"error": "The local runtime is unavailable"}
-            print(json.dumps({"id": message_id, "status": status, "result": result}, allow_nan=False), flush=True)
-    finally:
-        await host.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        reason = "Set STUDIO_PROVIDER to codex, opencode or ollama, or set STUDIO_PROVIDER_FACTORY; Ollama also needs STUDIO_MODEL"
+    history_limit = int(setting("HISTORY_LIMIT", "30"))
+    if history_limit < 1:
+        raise ValueError("STUDIO_HISTORY_LIMIT must be positive")
+    repository = RunRepository(Path(setting("RUN_DATABASE") or Path(setting("DATA_DIR", studio / ".studio-local" if studio.is_dir() else Path.cwd() / ".conclave")) / "runs.sqlite"))
+    repository.history_limit = history_limit
+    return LocalRunHost(repository, provider, tools,
+                        reviewer=getpass.getuser(), provider_name=name, unavailable=reason, adapters=adapters)

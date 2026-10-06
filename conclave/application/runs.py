@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .application import run_application, validate_definition, validate_request_inputs, validate_human_output
+from .definition import run_application, validate_definition, validate_request_inputs, validate_human_output
 
 
 def validate_run_request(request: dict) -> dict:
@@ -41,7 +41,10 @@ def validate_run_request(request: dict) -> dict:
 class RunRepository:
     """One SQLite connection per operation; events commit before they are yielded."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, history_limit: int = 30):
+        if type(history_limit) is not int or history_limit < 1:
+            raise ValueError("history_limit must be a positive integer")
+        self.history_limit = history_limit
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -97,7 +100,7 @@ class RunRepository:
             rows = connection.execute("SELECT id, request, status, created_at FROM studio_runs ORDER BY created_at DESC, id DESC").fetchall()
         # ponytail: scan local run records; index application_id if history grows.
         return [{"id": row[0], "revision": request["revision"], "status": row[2], "created_at": row[3]}
-                for row in rows if (request := json.loads(row[1]))["application_id"] == application_id][:30]
+                for row in rows if (request := json.loads(row[1]))["application_id"] == application_id][:self.history_limit]
 
     def cancel_waiting(self, run_id: str) -> None:
         with self._connect() as connection:

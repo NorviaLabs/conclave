@@ -1,0 +1,96 @@
+"""Backend validation cannot depend on Studio's browser-side checks."""
+import copy
+
+import pytest
+
+from conclave.application.catalogue import configured_data, validate_catalogue, validate_member
+from conclave.application.definition import validate_definition, validate_fields, record_fields
+from test_studio_runs import request
+
+
+def change(definition, path, value):
+    for key in path[:-1]:
+        definition = definition[key]
+    definition[path[-1]] = value
+
+
+@pytest.mark.parametrize("path,value", [
+    (("version",), 2), (("version",), True), (("agents",), []), (("agents",), [None]),
+    (("agents", 0, "id"), "bad id"), (("agents", 1, "id"), "writer"),
+    (("agents", 0, "kind"), "unknown"), (("agents", 0, "instructions"), ""),
+    (("agents", 0, "tools"), [1]), (("agents", 0, "tools"), ["bad/tool"]),
+    (("agents", 1, "tools"), ["read_file"]),
+    (("state", 0, "fields"), [{"key": "score", "label": "Score", "type": "number", "required": False}]),
+    (("state", 0, "type"), "unknown"), (("state", 0, "merge"), "append"),
+    (("state", 0, "kind"), "findings"), (("state", 0, "statuses"), [""]),
+    (("workflow", 0, "agent"), "missing"), (("workflow", 0, "task"), ""),
+    (("views", 0, "layout"), "board"), (("views", 0, "collection"), "missing"),
+    (("connections",), {}), (("connections",), [{"from": "draft", "to": "draft"}]),
+    (("connections",), [{"from": "draft", "to": "review"}] * 2),
+    (("canvas",), {}), (("canvas",), {"positions": {"missing": {"x": 1, "y": 2}}}),
+    (("run_config",), {}), (("run_config", "max_tool_steps"), 0),
+    (("run_budget", "tool_calls"), -1), (("run_budget", "tool_calls"), 1.5),
+    (("budget_warnings",), {"unknown": 1}), (("budget_warnings",), {"tokens": -1}),
+    (("inputs",), {}), (("inputs",), [None]),
+    (("inputs", 0, "id"), "invalid id"), (("inputs", 0, "type"), "secret"),
+    (("start_mode",), "unsupported"), (("integrations",), {}),
+    (("integrations",), [{"connector": "x", "purpose": "", "scope": "", "mode": "read", "password": "secret"}]),
+    (("integrations",), [{"connector": "bad/id", "purpose": "", "scope": "", "mode": "read"}]),
+    (("integrations",), [{"connector": "files", "purpose": "", "scope": "", "mode": "unknown"}]),
+])
+def test_backend_rejects_malformed_definitions(path, value):
+    definition = request()["definition"]
+    change(definition, path, value)
+    with pytest.raises(ValueError):
+        validate_definition(definition)
+
+
+def test_backend_accepts_valid_canvas_connectors_and_finite_warnings():
+    definition = request()["definition"]
+    definition.update(canvas={"positions": {"draft": {"x": 0, "y": 10000}}},
+                      integrations=[{"connector": "files", "purpose": "Read supplied files", "scope": "Selected folder", "mode": "read"}],
+                      budget_warnings={"tokens": 20})
+    definition["run_budget"]["tokens"] = 30
+    validate_definition(definition)
+
+
+@pytest.mark.parametrize("fields", [None, [None], [{"key": "id", "label": "ID", "type": "string", "required": True}],
+    [{"key": "x", "label": "", "type": "number", "required": True}],
+    [{"key": "x", "label": "X", "type": "enum", "required": True, "options": []}],
+    [{"key": "x", "label": "X", "type": "string", "required": True, "options": ["a"]}],
+])
+def test_backend_rejects_invalid_field_schemas(fields):
+    with pytest.raises(ValueError):
+        validate_fields(fields)
+
+
+@pytest.mark.parametrize("kind,value,options", [("number", True, None), ("string", 1, None), ("enum", "unknown", ["allowed"]), ("date", "2025-02-30", None), ("date", "20250101", None)])
+def test_backend_rejects_invalid_typed_values(kind, value, options):
+    field = {"key": "value", "label": "Value", "type": kind, "required": True}
+    if options is not None:
+        field["options"] = options
+    with pytest.raises(ValueError):
+        record_fields({"value": value}, [field])
+
+
+@pytest.mark.parametrize("member", [None, {}, {"id": "bad/id"},
+    {"id": "custom", "name": "", "instructions": "Task"},
+    {"id": "custom", "name": "Custom", "instructions": "Task", "kind": "human", "tools": ["read_file"]},
+])
+def test_backend_rejects_invalid_members(member):
+    with pytest.raises(ValueError):
+        validate_member(member)
+
+
+def test_workspace_catalogue_valid_custom_outputs_and_invalid_variants():
+    bundled = configured_data("catalogue")
+    valid = {"version": 1, "roles": [], "starters": [], "outputs": [{"id": "custom_result", "name": "Custom result", "kind": "document", "task": "Write a result"}]}
+    assert validate_catalogue(valid, bundled) == valid
+    invalids = [None, {**valid, "roles": None}, {**valid, "fixtures": []}]
+    for path, value in [(("outputs", 0, "id"), bundled["outputPresets"][0]["id"]), (("outputs", 0, "name"), ""), (("outputs", 0, "kind"), "unknown")]:
+        invalid = copy.deepcopy(valid)
+        change(invalid, path, value)
+        invalids.append(invalid)
+    for invalid in invalids:
+        with pytest.raises(ValueError):
+            validate_catalogue(invalid, bundled)

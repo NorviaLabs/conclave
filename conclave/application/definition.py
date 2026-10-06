@@ -25,12 +25,61 @@ from conclave import (
 
 CONFIG_KEYS = {"max_tool_steps", "max_notes", "max_note_chars", "max_tool_output_chars", "fan_out_limit"}
 BUDGET_KEYS = {"max_delegations", "max_per_agent", "max_depth", "tool_calls", "wall_clock_seconds", "tokens", "cost_usd"}
+RECORD_RESERVED = {"id", "title", "body", "status", "source_refs", "contributions", "constructor", "prototype", "__proto__"}
+TYPES = {"string", "number", "boolean", "date", "enum"}
+
+
+def validate_fields(fields):
+    if not isinstance(fields, list) or len(fields) > 24:
+        raise ValueError("Use up to 24 record fields")
+    seen = set()
+    for field in fields:
+        if not isinstance(field, dict) or set(field) - {"key", "label", "type", "required", "options"}:
+            raise ValueError("Invalid record field")
+        key = field.get("key")
+        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", key) or key in RECORD_RESERVED or key in seen:
+            raise ValueError("Record field keys must be unique and valid")
+        seen.add(key)
+        if not isinstance(field.get("label"), str) or not field["label"].strip() or len(field["label"]) > 100 or field.get("type") not in TYPES or type(field.get("required")) is not bool:
+            raise ValueError("Invalid record field label, type or requirement")
+        if field["type"] == "enum":
+            options = field.get("options")
+            if not isinstance(options, list) or not 1 <= len(options) <= 50 or any(not isinstance(value, str) or not value or len(value) > 100 for value in options) or len(set(options)) != len(options):
+                raise ValueError("Enum fields require unique bounded choices")
+        elif "options" in field:
+            raise ValueError("Only enum fields accept choices")
+
+
+def record_fields(record, fields):
+    validate_fields(fields)
+    result = {}
+    for field in fields:
+        key, kind = field["key"], field["type"]
+        value = record.get(key)
+        if value is None or value == "":
+            if field["required"]:
+                raise ValueError("Provide record field: " + field["label"])
+            continue
+        valid = (kind in {"string", "date", "enum"} and isinstance(value, str) and len(value) <= 20000
+                 or kind == "number" and type(value) in {int, float} and math.isfinite(value)
+                 or kind == "boolean" and type(value) is bool)
+        if not valid or kind == "enum" and value not in field["options"]:
+            raise ValueError("Invalid record field: " + field["label"])
+        if kind == "date":
+            try:
+                if date.fromisoformat(value).isoformat() != value:
+                    raise ValueError()
+            except ValueError:
+                raise ValueError("Invalid record date: " + field["label"]) from None
+        result[key] = value
+    return result
+
+
 OUTPUT_KINDS = {"document", "findings", "decision", "tasks", "dataset", "artifact"}
 APPROVAL_TOOLS = {"write_file", "prepare_patch", "generate_artifact", "manage_ticket", "manage_calendar", "update_crm", "send_message", "send_email"}
 
 
-def validate_request_inputs(definition: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
-    """Validate request data at the host boundary; never use sample defaults."""
+def validate_input_schema(definition):
     fields = definition.get("inputs", [])
     if not isinstance(fields, list) or len(fields) > 12:
         raise ValueError("Use at most 12 request fields")
@@ -44,6 +93,13 @@ def validate_request_inputs(definition: dict[str, Any], values: dict[str, Any]) 
         identifiers.add(key)
         if not isinstance(field.get("label"), str) or not field["label"].strip() or len(field["label"]) > 100 or field.get("type") not in {"text", "textarea", "number", "date"} or type(field.get("required")) is not bool:
             raise ValueError("Invalid request field settings")
+    return fields
+
+
+def validate_request_inputs(definition: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    """Validate request data at the host boundary; never use sample defaults."""
+    fields = validate_input_schema(definition)
+    identifiers = {field["id"] for field in fields}
     if not isinstance(values, dict) or set(values) - identifiers:
         raise ValueError("Request values must contain only declared fields")
     result = {}
@@ -77,14 +133,18 @@ def validate_request_inputs(definition: dict[str, Any], values: dict[str, Any]) 
 
 
 def validate_definition(definition: dict[str, Any]) -> None:
-    if definition.get("version") != 1:
+    if not isinstance(definition, dict):
+        raise ValueError("Provide an application definition")
+    validate_input_schema(definition)
+    if type(definition.get("version")) is not int or definition["version"] != 1:
         raise ValueError("Unsupported definition version")
     for section, field in (("agents", "id"), ("state", "key"), ("workflow", "id"), ("views", "id")):
         entries = definition.get(section)
-        if not isinstance(entries, list) or not entries:
+        maximum = {"agents": 16, "state": 12, "workflow": 24, "views": 12}[section]
+        if not isinstance(entries, list) or not 1 <= len(entries) <= maximum or any(not isinstance(entry, dict) for entry in entries):
             raise ValueError(f"{section} must be a nonempty list")
         ids = [entry.get(field) for entry in entries]
-        if any(not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", key) or key in {"constructor", "prototype"} for key in ids):
+        if any(not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", key) or key in {"constructor", "prototype", "__proto__"} for key in ids):
             raise ValueError(f"Invalid identifiers in {section}")
         if len(set(ids)) != len(ids):
             raise ValueError(f"Duplicate identifiers in {section}")
@@ -93,13 +153,16 @@ def validate_definition(definition: dict[str, Any]) -> None:
     for agent in definition["agents"]:
         if agent.get("kind", "ai") not in {"ai", "human"}:
             raise ValueError("Members must be AI or human")
-        if not isinstance(agent.get("instructions"), str) or not agent["instructions"].strip():
+        if not isinstance(agent.get("instructions"), str) or not agent["instructions"].strip() or len(agent["instructions"]) > 8000:
             raise ValueError("Agent instructions are required")
-        if not isinstance(agent.get("tools"), list) or any(not isinstance(tool, str) for tool in agent["tools"]):
+        if not isinstance(agent.get("tools"), list) or len(agent["tools"]) > 100 or any(not isinstance(tool, str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]{0,99}", tool) for tool in agent["tools"]) or len(set(agent["tools"])) != len(agent["tools"]):
             raise ValueError("Tool references must be strings")
         if agent.get("kind") == "human" and agent["tools"]:
             raise ValueError("Human members do not execute agent tools")
     for item in collections.values():
+        validate_fields(item.get("fields", []))
+        if item.get("type") == "text" and item.get("fields"):
+            raise ValueError("Text collections do not accept record fields")
         if item.get("type") not in {"records", "text"} or item.get("merge") not in {"replace", "append", "upsert"}:
             raise ValueError("Invalid collection type or merge policy")
         if item["type"] == "text" and item["merge"] != "replace":
@@ -140,6 +203,12 @@ def validate_definition(definition: dict[str, Any]) -> None:
     config, budget = definition.get("run_config", {}), definition.get("run_budget", {})
     if set(config) != CONFIG_KEYS or set(budget) != BUDGET_KEYS:
         raise ValueError("Explicit supported configuration and budget fields are required")
+    warnings = definition.get("budget_warnings", {})
+    if not isinstance(warnings, dict) or set(warnings) - {"tool_calls", "wall_clock_seconds", "tokens", "cost_usd"}:
+        raise ValueError("Invalid warning budgets")
+    for dimension, value in warnings.items():
+        if value is not None and (type(value) not in {int, float} or not math.isfinite(value) or value < 0 or budget.get(dimension) is not None and value >= budget[dimension]):
+            raise ValueError("Warning thresholds must be nonnegative and below hard stops")
     if any(type(value) is not int or value < 1 for value in config.values()):
         raise ValueError("Configuration limits must be positive integers")
     for key, value in budget.items():
@@ -149,6 +218,21 @@ def validate_definition(definition: dict[str, Any]) -> None:
             raise ValueError("Budget limits must be finite and nonnegative")
         if key in {"max_delegations", "max_per_agent", "max_depth", "tool_calls"} and type(value) is not int:
             raise ValueError("Count limits must be integers")
+    if definition.get("start_mode", "manual") not in {"manual", "event", "schedule"}:
+        raise ValueError("Unsupported start method")
+    integrations = definition.get("integrations", [])
+    if not isinstance(integrations, list) or len(integrations) > 40:
+        raise ValueError("Use up to 40 connector selections")
+    seen = set()
+    for item in integrations:
+        if not isinstance(item, dict) or set(item) != {"connector", "purpose", "scope", "mode"}:
+            raise ValueError("Connector setup accepts choices only, not credentials")
+        identifier = item["connector"]
+        if not isinstance(identifier, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", identifier) or identifier in seen | {"constructor", "prototype", "__proto__"}:
+            raise ValueError("Use unique valid connector identifiers")
+        seen.add(identifier)
+        if item["mode"] not in {"read", "draft", "approved", "model"} or any(not isinstance(item[key], str) or len(item[key]) > 1000 for key in ("purpose", "scope")):
+            raise ValueError("Invalid connector choices")
 
 
 def _merge_records(policy: str):
@@ -168,6 +252,14 @@ def _merge_records(policy: str):
     return merge
 
 
+def _budget_warning_events(thresholds, budget, warned):
+    for dimension, threshold in thresholds.items():
+        if threshold is not None and dimension in budget.spent and dimension not in warned and budget.spent[dimension] >= threshold:
+            warned.add(dimension)
+            yield {"type": "BudgetWarning", "dimension": dimension, "threshold": threshold,
+                   "used": budget.spent[dimension], "metrics": copy.deepcopy(budget.spent)}
+
+
 def _output_contract(collection: dict[str, Any]) -> str:
     if collection["type"] == "text":
         return 'The final JSON action must include a "text" string containing your output.'
@@ -177,6 +269,8 @@ def _output_contract(collection: dict[str, Any]) -> str:
                 'Leave source_refs empty if no source supports the record. Do not supply author metadata.')
     if collection["statuses"]:
         contract += " Allowed status values: " + json.dumps(collection["statuses"])
+    if collection.get("fields"):
+        contract += " Additional typed record fields: " + json.dumps(collection["fields"])
     return contract
 
 
@@ -202,7 +296,7 @@ def _validated_output(result: Any, collection: dict[str, Any], contribution: dic
             raise ValueError("Source references must be bounded strings")
         if collection["statuses"] and record["status"] not in collection["statuses"]:
             raise ValueError("Record status does not match the collection")
-        normalized.append({**{key: record[key] for key in ("id", "title", "body", "status")}, "source_refs": refs, "contributions": [copy.deepcopy(contribution)]})
+        normalized.append({**{key: record[key] for key in ("id", "title", "body", "status")}, "source_refs": refs, **record_fields(record, collection.get("fields", [])), "contributions": [copy.deepcopy(contribution)]})
     return normalized
 
 
@@ -365,6 +459,8 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
     human_stages = {stage["id"] for stage in definition["workflow"] if members[stage["agent"]].get("kind") == "human"}
     if not isinstance(human_inputs, dict) or set(human_inputs) - (human_stages - set(patches)):
         raise ValueError("Recorded human inputs must belong to pending human steps")
+    thresholds = definition.get("budget_warnings", {})
+    warned = {dimension for dimension, threshold in thresholds.items() if checkpoint is not None and threshold is not None and dimension in budget.spent and budget.spent[dimension] >= threshold}
     runtime = ToolAgentRuntime(provider, tools, budget, agents, config=config, approver=approver)
     yield {"type": "ApplicationResumed" if checkpoint is not None else "ApplicationStarted", "name": definition["name"], "state": store.snapshot(), "views": project_views(definition, store.snapshot())}
     for stage in _execution_order(definition):
@@ -421,6 +517,8 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
                 projected = public_runtime_event(event)
                 if projected is not None:
                     yield {**projected, "stage": stage["id"]}
+                for warning in _budget_warning_events(thresholds, budget, warned):
+                    yield {**warning, "stage": stage["id"]}
         except Exception:
             yield {"type": "ApplicationFinished", "status": "failed", "reason": "Agent execution failed on the runtime host", "state": store.snapshot()}
             return

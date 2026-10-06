@@ -10,3 +10,8 @@ export const memberTemplates = sqliteTable('member_templates', {
  member: text('member').notNull(),
  updatedAt: text('updated_at').notNull(),
 });
+export const workspaceCatalogue = sqliteTable('workspace_catalogue', {
+ id: integer('id').primaryKey(),
+ catalogue: text('catalogue').notNull(),
+ revision: integer('revision').notNull().default(1),
+});
