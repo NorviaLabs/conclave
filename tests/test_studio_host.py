@@ -117,7 +117,7 @@ def test_host_sources_stay_in_explicit_folder_and_hide_credentials(tmp_path, mon
     monkeypatch.delenv("STUDIO_WEB", raising=False)
     monkeypatch.setattr(host_module, "RunRepository", lambda path: RunRepository(tmp_path / "test.sqlite"))
     host = host_module.configured_host()
-    assert list(host.tools.tools) == ["read_file"]
+    assert set(host.tools.tools) == {"list_files", "read_file", "search_files", "knowledge_search"}
 
     async def exercise():
         assert "Supplied real evidence" in await host.tools.execute("read_file", {"path": "brief.md"})
@@ -398,5 +398,5 @@ def test_conclave_host_invalid_settings_and_explicit_web_tools(tmp_path, monkeyp
     monkeypatch.setattr(conclave.tools, "build_tool_registry", lambda *args: tools)
     monkeypatch.setenv("CONCLAVE_WEB", "1")
     host = host_module.configured_host()
-    assert sorted(host.tools.tools) == ["web_fetch", "web_search"]
+    assert set(host.tools.tools) == {"list_files", "read_file", "search_files", "knowledge_search", "web_fetch", "web_search"}
     assert [adapter.id for adapter in host.adapters] == ["web_search", "web_reader"]

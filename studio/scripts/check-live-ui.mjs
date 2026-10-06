@@ -38,3 +38,13 @@ assert.match(markup,/LOCAL RUN/);assert.match(markup,/Actual|Results are ready/)
 assert.ok(!markup.includes('<script>untrusted</script>'));assert.match(markup,/&lt;script&gt;/);
 assert.ok(!markup.includes('Sample complete'));assert.ok(markup.includes('Not reported'));
 console.log('PASS: live UI restores actual state/provenance, branch isolation, review inputs, final results, escaped messages and unreported metrics.');
+const sourced=structuredClone(d);sourced.agents[0].tools=['read_file'];
+const options={escape,requestForm:'',outputs:'',human:'',progress:'',history:[],busy:false,error:'',applicationId:'app',runtime:{available:true,tools:['read_file'],resource_tools:['read_file'],resources:[{id:'case-a',name:'<Case A>',applications:['app']},{id:'private',name:'Private',applications:['another-app']}]}};
+const unbound=liveRunMarkup(sourced,null,options);
+assert.match(unbound,/data-source-resource/);assert.match(unbound,/&lt;Case A&gt;/);assert.ok(!unbound.includes('Private'));
+assert.match(unbound,/data-action="start-live" disabled/);
+assert.ok(!liveRunMarkup(sourced,null,{...options,source:'case-a'}).includes('data-action="start-live" disabled'));
+run.request.resources={source:'case-a'};
+assert.deepEqual(projectLiveRun(run).resources,{source:'case-a'});
+assert.match(liveRunMarkup(sourced,projectLiveRun(run),{...options,source:'case-a'}),/Source resource/);
+console.log('PASS: named resource selection, authorization filtering, escaping, start validation and saved resource display.');

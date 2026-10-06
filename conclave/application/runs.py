@@ -18,8 +18,12 @@ from .definition import run_application, validate_definition, validate_request_i
 
 def validate_run_request(request: dict) -> dict:
     """Version 1 pins a saved application revision and its complete definition."""
-    if not isinstance(request, dict) or set(request) != {"version", "application_id", "revision", "definition", "task", "inputs"}:
+    required = {"version", "application_id", "revision", "definition", "task", "inputs"}
+    if not isinstance(request, dict) or not required <= set(request) or set(request) - required - {"resources"}:
         raise ValueError("Use the version 1 run request fields")
+    resources = request.get("resources", {})
+    if not isinstance(resources, dict) or set(resources) - {"source", "source_revision"} or "source_revision" in resources and "source" not in resources or any(not isinstance(value, str) or not value or len(value) > 64 for value in resources.values()):
+        raise ValueError("Run resources must contain a named source resource, not a path")
     if type(request["version"]) is not int or request["version"] != 1:
         raise ValueError("Unsupported run request version")
     if not isinstance(request["application_id"], str) or not request["application_id"].strip() or len(request["application_id"]) > 100:

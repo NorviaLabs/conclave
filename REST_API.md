@@ -85,7 +85,7 @@ and application before running.
 
 Provider and execution settings belong to Conclave: `CONCLAVE_PROVIDER`,
 `CONCLAVE_MODEL`, `CONCLAVE_MODEL_TIMEOUT`, `CONCLAVE_OLLAMA_URL`,
-`CONCLAVE_PROVIDER_FACTORY`, `CONCLAVE_SOURCE_DIR`, `CONCLAVE_SOURCE_EXTENSIONS`,
+`CONCLAVE_PROVIDER_FACTORY`, `CONCLAVE_SOURCE_DIR`, `CONCLAVE_SOURCE_EXTENSIONS`, `CONCLAVE_RESOURCES_FILE`,
 `CONCLAVE_WEB`, `CONCLAVE_EXTENSIONS`, `CONCLAVE_DEFAULTS_FILE`,
 `CONCLAVE_CATALOGUE_FILE`, `CONCLAVE_FIXTURES_FILE`, `CONCLAVE_MEMBER_LIMIT`,
 `CONCLAVE_HISTORY_LIMIT`, `CONCLAVE_DATA_DIR`, `CONCLAVE_DATABASE` and
@@ -113,6 +113,44 @@ capabilities require the existing core approval gate; connector metadata and
 HTTP clients cannot grant capabilities. Files remain contained in the configured
 source folder. The core import does not load these application/HTTP adapters,
 bundled tools, optional web dependencies or subprocesses.
+
+### Multiple applications on one backend
+
+File-tool implementations are registered once. Each run selects a host-owned
+resource ID, and receives its own scoped registry; concurrent runs never rebind
+the shared registry. Configure the shared backend once with
+`CONCLAVE_RESOURCES_FILE=/absolute/path/to/resources.json`:
+
+```json
+{
+  "case-a": {"name": "Case A documents", "path": "/data/case-a", "applications": ["saved-application-id"]},
+  "case-b": {"name": "Case B documents", "path": "/data/case-b"}
+}
+```
+
+`applications` is an optional allowlist of saved application IDs. Omission allows
+any application used by the trusted local operator; an empty list allows none.
+The browser receives resource IDs and labels, never paths. Select **Source
+documents** in Run, or add `"resources": {"source": "case-a"}` to the existing
+`POST /api/runs` body. Missing, unknown or unauthorized selections fail before
+creating a run. The server pins the resource ID and root revision in saved run
+requests; resume rechecks authorization and refuses a changed or removed root.
+Changing document contents is permitted; this is not a document snapshot.
+
+`CONCLAVE_SOURCE_DIR` remains a compatibility resource named `default`, used when
+file tools are requested without an explicit selection. It is not necessary when
+using named resources. Source tools are `list_files`, `read_file`, `search_files`
+and `knowledge_search`. All enforce resolved path containment, hidden-file denial
+and `CONCLAVE_SOURCE_EXTENSIONS` (default `.txt,.md,.csv,.html`). Built-in knowledge
+search is keyword search over the selected documents, not semantic retrieval;
+trusted extensions can replace it without losing their capability declarations.
+
+Enable `CONCLAVE_WEB=1` once on the shared host for applications that request
+`web_search` or `web_fetch`. Web search requires the optional tools dependency
+(`uv sync --extra tools`). Applications retain their individual agent tool
+allowlists and approval gates. No application-specific backend is required.
+Resource isolation applies to these Conclave file tools, not arbitrary provider
+subprocesses or trusted extensions; this local host is not an OS sandbox.
 
 ## Source boundaries
 

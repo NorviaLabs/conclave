@@ -59,6 +59,14 @@ Provider, tool, source and database settings belong to the backend process. Set
 accepted by Conclave as compatibility aliases, but Studio no longer interprets them.
 Set the same `CONCLAVE_API_TOKEN` on both processes to enable backend authentication.
 
+One backend can run multiple applications with different document folders.
+Configure `CONCLAVE_RESOURCES_FILE` once with named, host-approved folders, then
+select **Source documents** separately for each request in Run. Selections are
+saved with runs and revalidated on resume; concurrent runs have isolated file-tool
+registries. See [Multiple applications on one backend](../REST_API.md#multiple-applications-on-one-backend)
+for the resource JSON format and application allowlists. Enable `CONCLAVE_WEB=1`
+once if web tools are needed; no per-application backend process is necessary.
+
 ## Application workflows
 
 Create a new application, customize its agents, tools, workflow and output schema,

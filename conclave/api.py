@@ -114,7 +114,9 @@ class ApplicationAPI:
                     raise ValueError("Choose an application")
                 return await self.host.handle("list", {"application_id": identifiers[0]})
             if method == "POST":
-                self.fields(value, {"version", "application_id", "revision", "task", "inputs"})
+                self.fields(value, {"version", "application_id", "revision", "task", "inputs"} | ({"resources"} if isinstance(value, dict) and "resources" in value else set()))
+                if "resources" in value and (not isinstance(value["resources"], dict) or set(value["resources"]) - {"source"}):
+                    raise ValueError("Select a named source resource")
                 saved = self.workspace.get(value["application_id"])
                 if type(value["revision"]) is not int or value["revision"] != saved["revision"]:
                     raise Conflict("This application changed. Reload its saved version before starting.")

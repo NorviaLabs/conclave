@@ -18,6 +18,29 @@ def make_api(tmp_path, provider=None):
     return ApplicationAPI(host, Workspace(tmp_path / "applications.sqlite"))
 
 
+def test_rest_named_resource_binding_is_pinned_and_paths_are_not_accepted(tmp_path):
+    from test_application_resources import setup_resources, source_request
+
+    async def exercise():
+        tools, resources, _, _ = setup_resources(tmp_path)
+        api = make_api(tmp_path)
+        api.host.tools, api.host.resources, api.host.source_extensions = tools, resources, {'.md'}
+        value = source_request('beta')
+        _, saved = await api.dispatch('POST', '/api/applications', {'definition': value['definition']})
+        value = {key: item for key, item in value.items() if key != 'definition'}
+        value.update(application_id=saved['id'], revision=saved['revision'])
+        for invalid in ({'path': str(tmp_path)}, {'source': 'missing'}, {'source': 'alpha'}, {'source': 'beta', 'source_revision': 'fake'}):
+            assert (await api.dispatch('POST', '/api/runs', {**value, 'resources': invalid}))[0] == 400
+        assert api.host.repository.list(saved['id']) == []
+        status, run = await api.dispatch('POST', '/api/runs', value)
+        assert status == 201
+        assert run['request']['resources'] == {'source': 'beta', 'source_revision': resources['beta']['revision']}
+        assert str(resources['beta']['path']) not in json.dumps(run)
+        await api.host.close()
+
+    asyncio.run(exercise())
+
+
 def test_rest_application_revision_run_events_reviews_and_restart(tmp_path):
     async def exercise():
         api = make_api(tmp_path)

@@ -14,11 +14,12 @@ import shutil
 import sys
 from pathlib import Path
 
-from conclave import CodexProvider, OpenCodeProvider, OllamaProvider, Tool, ToolRegistry, Capability
+from conclave import CodexProvider, OpenCodeProvider, OllamaProvider, ToolRegistry
 from .definition import validate_host_tools
 from .runs import RunRepository, validate_run_request
 from .extensions import ConnectorAdapter, load_extensions, load_provider_factory
 from .planning import propose
+from .resources import load_resources, register_source_tools, bind_resources, SourceTools, SOURCE_TOOLS
 
 def setting(name, default=None):
     return os.environ.get("CONCLAVE_" + name, os.environ.get("STUDIO_" + name, default))
@@ -44,11 +45,16 @@ def public_record(record):
 
 
 class LocalRunHost:
-    def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, unavailable=None, adapters=()):
+    def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, unavailable=None, adapters=(), resources=None, source_extensions=()):
         self.repository, self.provider, self.tools = repository, provider, tools
         self.reviewer, self.provider_name, self.unavailable = reviewer, provider_name, unavailable
         self.tasks = {}
         self.adapters = tuple(adapters)
+        self.resources = resources
+        self.source_extensions = source_extensions
+
+    def run_tools(self, request):
+        return bind_resources(self.tools, self.resources, request, self.source_extensions) if self.resources is not None else self.tools
 
     async def _consume(self, stream):
         try:
@@ -63,7 +69,8 @@ class LocalRunHost:
     async def _schedule(self, run_id, *, resume=False):
         if run_id in self.tasks:
             raise ValueError("This request is already running")
-        stream = self.repository.resume(run_id, self.provider, self.tools) if resume else self.repository.execute(run_id, self.provider, self.tools)
+        tools = self.run_tools(self.repository.get(run_id)["request"])
+        stream = self.repository.resume(run_id, self.provider, tools) if resume else self.repository.execute(run_id, self.provider, tools)
         # Claim and commit the first event before returning success to Node.
         try:
             await anext(stream)
@@ -93,6 +100,11 @@ class LocalRunHost:
                                        "tools": list(adapter.tools), "origin": "host"})
             return 200, {"local": True, "service": True, "available": self.provider is not None, "provider": self.provider_name,
                          "connectors": connectors, "reason": self.unavailable, "tools": sorted(self.tools.tools), "reviewer": self.reviewer,
+                         "resources": [{"id": key, "name": item["name"], "applications": item["applications"],
+                                        "tools": ["list_files", "read_file", "search_files", "knowledge_search"]}
+                                       for key, item in (self.resources or {}).items()],
+                         "resource_tools": sorted(name for name in SOURCE_TOOLS if self.tools.tool(name) is not None
+                                                  and getattr(self.tools.tool(name).func, "__module__", None) == SourceTools.__module__) if self.resources is not None else [],
                          "tool_descriptors": [{"id": tool.name, "name": tool.name, "description": tool.description,
                                                "parameters": tool.parameters, "capabilities": sorted(tool.capabilities),
                                                "requires_approval": tool.destructive,
@@ -108,6 +120,13 @@ class LocalRunHost:
             self._require_provider()
             value = validate_run_request(value)
             validate_host_tools(value["definition"], self.tools)
+            self.run_tools(value)
+            # Pin the compatibility default just like an explicit selection.
+            if self.resources is not None and not value.get("resources") and "default" in self.resources:
+                if any(SOURCE_TOOLS.intersection(agent["tools"]) for agent in value["definition"]["agents"]):
+                    value["resources"] = {"source": "default"}
+            if self.resources is not None and value.get("resources", {}).get("source"):
+                value["resources"]["source_revision"] = self.resources[value["resources"]["source"]]["revision"]
             selected = {item["connector"]: item for item in value["definition"].get("integrations", [])}
             for adapter in self.adapters:
                 if adapter.id in selected:
@@ -179,22 +198,13 @@ def configured_host(*, workspace=None):
     import re
     if not source_extensions or any(not re.fullmatch(r"\.[a-z0-9_-]+", item) for item in source_extensions):
         raise ValueError("STUDIO_SOURCE_EXTENSIONS must contain comma-separated file suffixes")
+    resources = load_resources(setting("RESOURCES_FILE"), source)
+    register_source_tools(tools)
     if source:
-        from conclave.tools.local import LocalTools
-        root = Path(source).resolve()
-        if not root.is_dir():
-            raise ValueError("STUDIO_SOURCE_DIR must be an existing source folder")
-        local = LocalTools(root)
-
-        async def read_source(path, start_line=1, end_line=200):
-            resolved = local._safe_path(path)
-            if any(part.startswith('.') for part in resolved.relative_to(root).parts) or resolved.suffix.lower() not in source_extensions:
-                raise ValueError("Choose a plain-text source document in the source folder")
-            return await local.read_file(path, start_line=start_line, end_line=end_line)
-
-        tools.register(Tool("read_file", "Read a supplied source document in the host's source folder", {"path": "string", "start_line": "integer, optional", "end_line": "integer, optional"}, read_source, frozenset({Capability.READ})))
-    if source:
-        adapters.append(ConnectorAdapter("local_files", "Local source folder", "files", ("read_file",), lambda: root.is_dir()))
+        # Retain direct trusted-host access for legacy callers. Run execution
+        # always builds its own registry from the pinned resource selection.
+        register_source_tools(tools, SourceTools(resources["default"]["path"], source_extensions))
+        adapters.append(ConnectorAdapter("local_files", "Local source folder", "files", ("read_file",), lambda: resources["default"]["path"].is_dir()))
     if setting("WEB") == "1":
         from conclave.tools import build_tool_registry
         bundled = build_tool_registry(Path(source or studio), output_limit)
@@ -230,4 +240,5 @@ def configured_host(*, workspace=None):
     repository = RunRepository(Path(setting("RUN_DATABASE") or Path(setting("DATA_DIR", studio / ".studio-local" if studio.is_dir() else Path.cwd() / ".conclave")) / "runs.sqlite"))
     repository.history_limit = history_limit
     return LocalRunHost(repository, provider, tools,
-                        reviewer=getpass.getuser(), provider_name=name, unavailable=reason, adapters=adapters)
+                        reviewer=getpass.getuser(), provider_name=name, unavailable=reason, adapters=adapters,
+                        resources=resources, source_extensions=source_extensions)
