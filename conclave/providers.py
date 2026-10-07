@@ -15,6 +15,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 
 # =============================================================================
@@ -55,6 +56,20 @@ class ModelProvider(ABC):
         messages: list[dict[str, str]],
     ) -> Completion:
         raise NotImplementedError
+
+
+class ProviderRouter(Protocol):
+    """A provider that serves more than one backend.
+
+    One run can mix backends when a team member or a step asks for one. The
+    authority asks `for_call` for the backend a call names, so a single
+    provider object can stand for every backend this host can reach. A router
+    that cannot serve the choice returns `None`, and the call is refused rather
+    than sent somewhere else: a declared backend is honoured or refused, never
+    silently replaced.
+    """
+
+    def for_call(self, provider: str, model: str) -> ModelProvider | None: ...
 
 
 class OpenCodeProvider(ModelProvider):
@@ -440,3 +455,131 @@ def resolve_provider(
         )
 
     return None, None, "No AI backend was found on this computer; install codex or opencode, or start Ollama"
+
+
+# =============================================================================
+# Every backend one machine can reach
+# =============================================================================
+
+
+BACKEND_NAMES = {"codex": "Codex", "opencode": "OpenCode", "ollama": "Ollama"}
+
+
+class LocalBackends(ModelProvider):
+    """The backends this machine can reach, served one per call.
+
+    A host hands this to a run instead of a single backend, so a team member or
+    a step can name its own. The default backend answers every call that names
+    none, which is what a caller who chose nothing gets.
+
+    A backend that is not installed, or a model the backend does not report, is
+    refused here rather than replaced: `for_call` returns `None`, and the
+    authority turns that into a refused call.
+    """
+
+    def __init__(
+        self,
+        workspace: Path,
+        default: ModelProvider,
+        name: str | None,
+        *,
+        model: str | None = None,
+        timeout: float = 300.0,
+        ollama_url: str = OLLAMA_DEFAULT_URL,
+    ):
+        self.workspace = workspace
+        self.default = default
+        self.name = name or ""
+        self.model = model or ""
+        self.timeout = timeout
+        self.ollama_url = ollama_url
+        self.built: dict[tuple[str, str], ModelProvider | None] = {}
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+    ) -> Completion:
+        """The default backend, for callers that named none."""
+
+        return await self.default.complete(messages)
+
+    def for_call(self, provider: str, model: str) -> ModelProvider | None:
+        """The backend one call asked for, or nothing if it cannot be served."""
+
+        name = provider or self.name
+        chosen = model or (self.model if name == self.name else "")
+
+        if not name:
+            return None
+
+        # The backend the host already runs is not rebuilt for its own default.
+        if name == self.name and chosen == self.model:
+            return self.default
+
+        key = (name, chosen)
+
+        if key not in self.built:
+            self.built[key] = self._build(name, chosen)
+
+        return self.built[key]
+
+    def _build(self, name: str, model: str) -> ModelProvider | None:
+        if name not in BACKEND_NAMES and name not in COMMAND_PROVIDERS:
+            return None
+
+        if name == "ollama":
+            installed = installed_ollama_models(self.ollama_url)
+
+            # A model name is only a name until the server confirms it has it.
+            if model and model not in installed:
+                return None
+
+            if not installed:
+                return None
+
+        provider, _, _ = resolve_provider(
+            self.workspace,
+            name,
+            model or None,
+            self.timeout,
+            self.ollama_url,
+        )
+
+        return provider
+
+    def catalogue(self) -> list[dict[str, object]]:
+        """What to offer in a picker, including why something is unavailable.
+
+        Only backends that can be *chosen* are listed. A model list is only
+        reported by a backend that can report one, so a command backend leaves
+        it empty and the caller keeps its own default.
+        """
+
+        entries = []
+
+        for name in COMMAND_PROVIDERS + ("ollama",):
+            reason, models, available = None, [], False
+
+            if name == "ollama":
+                models = installed_ollama_models(self.ollama_url)
+                available = bool(models)
+                if not available:
+                    reason = "No models are installed on the Ollama server this host was told about"
+            elif shutil.which(name) is None:
+                reason = f"The {name} command is not installed on this host"
+            else:
+                available = True
+
+            entries.append(
+                {
+                    "id": name,
+                    "name": BACKEND_NAMES.get(name, name),
+                    "available": available,
+                    "models": models,
+                    "default_model": models[0] if name == "ollama" and models else None,
+                    "reason": reason,
+                    "default": name == self.name,
+                }
+            )
+
+        return entries

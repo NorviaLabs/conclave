@@ -52,7 +52,8 @@ exists so they cannot leak into the hosted path by accident.
 | Local assumption | Where | Hosted replacement |
 | --- | --- | --- |
 | Tools are in-process Python callables | `Tool.func` (`conclave/spec.py`), executed by the registry; file/Git/GitHub tools shell out in-process (`conclave/tools/local.py`) | `ToolExecutor` over a transport; the call round-trips to a sandbox |
-| Provider is a local CLI or localhost Ollama | `resolve_provider` (`conclave/providers.py`), Codex/OpenCode subprocess backends | HTTP providers with credentials from a secret store, injected by a factory |
+| Provider is a local CLI or localhost Ollama | `resolve_provider` and `LocalBackends` (`conclave/providers.py`), Codex/OpenCode subprocess backends | HTTP providers with credentials from a secret store, injected by a factory. A factory-backed host serves one backend, so it refuses a member or step that names another one rather than substituting it |
+| A member or step chooses its backend, and the picker offers what this machine reports | `/api/runtime` `backends` (`conclave/application/service.py`), Ollama's installed models read from its own server | The deployment's own catalogue and model list; the UI renders from whatever the host reports and offers no invented model IDs |
 | Identity is the OS user | `reviewer=getpass.getuser()` (`conclave/application/service.py`) | Principal from authentication, threaded through every route |
 | Storage is local SQLite in a data dir | `conclave/application/runs.py`, `conclave/application/workspace.py`, `sources.json` | Managed database plus object storage, keyed by tenant |
 | Transport is loopback-only | `start_server` binds `127.0.0.1` and rejects any other Host (`conclave/api.py`) | ASGI adapter; the loopback Host check stays in the local adapter |
@@ -196,12 +197,23 @@ provider, the budget and the approver are not.
   permission, the approval) and `InProcessAuthority` — today's behavior, with
   all four in one process. `ToolAgentRuntime(..., authority=...)` defaults to
   it, so nothing existing changed.
-- `ModelCall` carries the run, the agent and the messages; a deployment decides
-  where a prompt may be assembled and sent.
+- `ModelCall` carries the run, the agent, the messages and the backend the
+  agent declared; a deployment decides where a prompt may be assembled and sent,
+  and which backend serves it.
 - `conclave/application/sandbox.py`: `ControlPlaneAuthority` holds the provider,
   the budget and the approver and answers over a transport; `SandboxAuthority`
   asks; `sandboxed_loop(...)` builds the loop as a sandbox runs it — no
   provider, no budget, no approver, only a transport.
+- **A declared backend is served or refused, never replaced.** A team member or
+  a single step may name the backend that runs it (`provider`/`model` on the
+  definition). `InProcessAuthority.complete` asks the provider object for that
+  backend (`for_call`) and raises when it cannot serve it, so a run never
+  quietly moves to another backend. `LocalBackends` is the local answer: every
+  backend this machine can reach, with the default one answering calls that
+  name nothing. A host that runs exactly one configured backend has no
+  `for_call`, so it refuses the choice — and `LocalRunHost._validate_backends`
+  refuses it before the run starts, naming the step, the member and what the
+  host has instead.
 - **The control plane decides from its own declaration.** An approval request
   carries a tool *name*; the control plane looks it up in its own registry, so a
   sandbox that reports a write tool as harmless changes nothing, and a tool the

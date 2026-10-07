@@ -43,6 +43,20 @@ def test_launcher_stops_its_children():
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Uses POSIX process groups")
+@pytest.mark.parametrize("force", [False, True])
+def test_launcher_stops_child_without_own_process_group(force):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        dev.stop_service(child, force=force)
+        child.wait(timeout=5)
+        assert child.returncode == -(signal.SIGKILL if force else signal.SIGTERM)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Uses POSIX process groups")
 def test_launcher_leaves_nothing_that_can_hold_the_port(tmp_path):
     """A service that ignores SIGTERM, and the process it started, must both go."""
     marker = tmp_path / "started"
@@ -123,6 +137,29 @@ def test_launcher_ends_the_whole_tree_on_windows(monkeypatch):
     monkeypatch.setattr(subprocess, "run", missing)
     dev.stop_service(service, force=False)
     assert service.killed
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Uses POSIX terminal hangup")
+def test_launcher_forces_shutdown_on_repeated_signal(monkeypatch, capfd):
+    handlers, stops = {}, []
+    service = SimpleNamespace(pid=4321)
+
+    def stop_when_ready(*arguments, **keywords):
+        handlers[signal.SIGHUP](signal.SIGHUP, None)
+        assert not stops
+        handlers[signal.SIGINT](signal.SIGINT, None)
+
+    monkeypatch.setattr(dev, "port_error", lambda number: None)
+    monkeypatch.setattr(dev, "wait_ready", stop_when_ready)
+    monkeypatch.setattr(dev, "stop_children", lambda children, **keywords: stops.append((list(children), keywords)))
+    monkeypatch.setattr(signal, "signal", handlers.__setitem__)
+    monkeypatch.setattr(subprocess, "run", lambda *arguments, **keywords: SimpleNamespace(stdout="v24.0.0"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *arguments, **keywords: service)
+    assert dev.main(["--backend-port", "18080", "--studio-port", "18787"]) == 0
+    assert stops == [([service], {"grace": 0.0}), ([service], {})]
+    error = capfd.readouterr().err
+    assert "Stopping both services" in error
+    assert "Forcing both services to stop." in error
 
 
 def test_launcher_names_the_port_that_stays_in_use(monkeypatch, capsys):

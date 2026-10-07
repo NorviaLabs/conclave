@@ -16,9 +16,9 @@ export function validateDefinition(d){
  if(d.resources!==undefined){if(!d.resources||typeof d.resources!=='object'||Array.isArray(d.resources)||Object.keys(d.resources).some(key=>key!=='source'))fail('Application resources must select a named source.');if(d.resources.source!==undefined)identifier(d.resources.source,'Source resource');}
  str(d.name,'Application name',100);str(d.description,'Purpose',2000,false);array(d.agents,'Agents',16);array(d.state,'State collections',12);array(d.workflow,'Workflow stages',24);array(d.views,'Views',12);
  unique(d.agents,'id','Agent identifiers');unique(d.state,'key','State keys');unique(d.workflow,'id','Stage identifiers');unique(d.views,'id','View identifiers');
- for(const a of d.agents){identifier(a.id,'Agent identifier');if(a.kind!==undefined&&!['ai','human'].includes(a.kind))fail('Choose AI or human members.');if(a.kind==='human'&&Array.isArray(a.tools)&&a.tools.length)fail('Human members do not execute agent tools.');str(a.name,'Agent name',100);str(a.instructions,'Agent instructions',8000);if(!Array.isArray(a.tools)||a.tools.length>100||a.tools.some(t=>typeof t!=='string'||! /^[a-zA-Z][a-zA-Z0-9_.-]{0,99}$/.test(t))||new Set(a.tools).size!==a.tools.length)fail('Use unique valid tool identifiers.');}
+ for(const a of d.agents){identifier(a.id,'Agent identifier');if(a.kind!==undefined&&!['ai','human'].includes(a.kind))fail('Choose AI or human members.');if(a.kind==='human'&&Array.isArray(a.tools)&&a.tools.length)fail('Human members do not execute agent tools.');if(a.kind==='human'&&(a.provider||a.model))fail('Human members do not run on a model backend.');backend(a,'Member');str(a.name,'Agent name',100);str(a.instructions,'Agent instructions',8000);if(!Array.isArray(a.tools)||a.tools.length>100||a.tools.some(t=>typeof t!=='string'||! /^[a-zA-Z][a-zA-Z0-9_.-]{0,99}$/.test(t))||new Set(a.tools).size!==a.tools.length)fail('Use unique valid tool identifiers.');}
  for(const s of d.state){validateRecordFields(s.fields||[]);if(s.type==='text'&&s.fields?.length)fail('Text collections do not accept record fields.');identifier(s.key,'State key');str(s.label,'State label',100);if(s.kind!==undefined&&!outputTypes.some(k=>k.id===s.kind))fail('Choose a supported output type.');if(s.kind!==undefined&&(s.kind==='document')!==(s.type==='text'))fail('Documents require text; other output types require records.');if(!['records','text'].includes(s.type))fail('Choose records or text state.');if(!['upsert','append','replace'].includes(s.merge)||(s.type==='text'&&s.merge!=='replace'))fail('Text state requires replace; records support upsert, append or replace.');if(!Array.isArray(s.statuses)||s.statuses.length>12||s.statuses.some(x=>typeof x!=='string'||!x.trim()||x.length>40)||new Set(s.statuses).size!==s.statuses.length)fail('Statuses must be unique nonempty labels.');}
- for(const w of d.workflow){identifier(w.id,'Stage identifier');str(w.name,'Stage name',100);str(w.task,'Stage task',4000);if(!d.agents.some(a=>a.id===w.agent))fail(`Stage “${w.name}” needs an existing agent.`);if(!d.state.some(s=>s.key===w.output))fail(`Stage “${w.name}” needs an existing output collection.`);}
+ for(const w of d.workflow){identifier(w.id,'Stage identifier');str(w.name,'Stage name',100);str(w.task,'Stage task',4000);if(!d.agents.some(a=>a.id===w.agent))fail(`Stage “${w.name}” needs an existing agent.`);if(!d.state.some(s=>s.key===w.output))fail(`Stage “${w.name}” needs an existing output collection.`);if(d.agents.some(a=>a.id===w.agent&&a.kind==='human')&&(w.provider||w.model))fail('Human steps do not run on a model backend.');backend(w,`Step “${w.name}”`);}
  for(const v of d.views){identifier(v.id,'View identifier');str(v.title,'View title',100);const s=d.state.find(s=>s.key===v.collection);if(!s)fail(`View “${v.title}” needs an existing state collection.`);if(!['cards','table','board','prose'].includes(v.layout)||(s.type==='text')!==(v.layout==='prose'))fail(`View “${v.title}” must use prose for text, or cards/table/board for records.`);}
  const rc=d.run_config,rb=d.run_budget;if(!rc||!rb)fail('Explicit runtime limits are required.');if(Object.keys(rc).sort().join(',')!==Object.keys(runtimeConfig).sort().join(',')||Object.keys(rb).sort().join(',')!==Object.keys(runBudget).sort().join(','))fail('Use the supported runtime configuration and budget fields.');
  for(const key of Object.keys(runtimeConfig)){const value=rc[key];if(!Number.isInteger(value)||value<1||value>1000000)fail(`Runtime limit ${key} must be a positive integer.`);}
@@ -31,6 +31,42 @@ export function validateDefinition(d){
  if(d.start_mode!==undefined&&!['manual','event','schedule'].includes(d.start_mode))fail('Choose a supported start method.');
  if(d.integrations!==undefined){if(!Array.isArray(d.integrations)||d.integrations.length>40)fail('Choose up to 40 connectors.');unique(d.integrations,'connector','Connector selections');for(const item of d.integrations){if(!item||Object.keys(item).some(k=>!['connector','purpose','scope','mode'].includes(k)))fail('Connector setup accepts choices only, not account credentials.');const connector=connectorDescriptors.find(c=>c.id===item.connector);identifier(item.connector,'Connector identifier');str(item.purpose,'Connector purpose',1000,false);str(item.scope,'Connector source or destination',1000,false);const modes=connector?.default_mode==='model'?['model']:connector?.default_mode==='read'?['read']:['read','draft','approved','model'];if(!modes.includes(item.mode))fail('Choose supported actions for this connector.');}}
  return d;
+}
+// What runs one member or one step. The host answers which backends this
+// machine can reach; a name is only ever offered or refused, never invented.
+const backendPattern=/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/,modelPattern=/^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,119}$/;
+function backend(entry,what){
+  if(entry.provider!==undefined&&(typeof entry.provider!=='string'||entry.provider!==entry.provider.trim()||entry.provider&&!backendPattern.test(entry.provider)))fail(`${what} has an invalid backend: use a plain name.`);
+  if(entry.model!==undefined&&(typeof entry.model!=='string'||entry.model!==entry.model.trim()||entry.model&&!modelPattern.test(entry.model)))fail(`${what} has an invalid model: use a plain name, not a sentence.`);
+}
+// The backend one step runs on: its own choice, else its member's. Mirrors the
+// host's rule, including that a model never follows a backend it was not
+// chosen for.
+export function stageBackend(member,step={}){
+  const provider=step.provider||member.provider||'';
+  const inherited=provider===(member.provider||'')?(member.model||''):'';
+  return [provider,step.model||inherited];
+}
+export function backendOptions(backends,current,{inherit='This host’s default'}={}){
+  const options=inherit===null?[]:[['',inherit]];
+  for(const backend of backends||[])options.push([backend.id,backend.available?backend.name:`${backend.name} · unavailable`,!backend.available]);
+  // A choice made on another machine is shown as itself, never as the first
+  // option in the list: the picker must not misreport what the step runs on.
+  if(current&&!options.some(([value])=>value===current))options.push([current,`${current} · not offered by this host`]);
+  return options;
+}
+export function defaultBackend(backends){return (backends||[]).find(backend=>backend.default)||null;}
+export function backendModels(backends,provider){return (backends||[]).find(backend=>backend.id===provider)?.models||[];}
+export function backendIssue(backends,provider){
+  if(!provider)return '';
+  const known=(backends||[]).find(backend=>backend.id===provider);
+  if(!known)return 'This host does not offer that backend.';
+  return known.available?'':(known.reason||'This host cannot run that backend.');
+}
+export function backendLabel(backends,provider,model){
+  const known=(backends||[]).find(backend=>backend.id===provider);
+  const name=known?known.name:(provider||'This host’s default');
+  return model?`${name} · ${model}`:name;
 }
 export function initialState(definition){return Object.fromEntries(definition.state.map(s=>[s.key,s.type==='text'?'':[]]));}
 export function validateMember(member){
@@ -45,9 +81,71 @@ export function validateRequestInputs(definition,values={}){const result={};for(
 
 export function planConnections(d){return d.connections===undefined?d.workflow.slice(1).map((w,i)=>({from:d.workflow[i].id,to:w.id})):d.connections;}
 export function executionOrder(d){const links=planConnections(d),pending=new Set(d.workflow.map(w=>w.id)),order=[];while(pending.size){const id=d.workflow.find(w=>pending.has(w.id)&&!links.some(e=>e.to===w.id&&pending.has(e.from)))?.id;if(!id)throw new Error('That connection creates a loop. Remove it so work can finish.');pending.delete(id);order.push(id);}return order;}
+// Which steps' recorded results no longer describe the plan in front of you.
+// A step is stale when its own definition changed since the run, when it is new
+// since the run, or when anything it runs after changed: its input came from
+// that older step. Editing one step therefore marks the work downstream of it,
+// which is the honest reading of "this result is out of date".
+export function staleRunSteps(runDefinition,currentDefinition){
+  const before=new Map((runDefinition?.workflow||[]).map(step=>[step.id,step]));
+  const sources=definition=>{
+    const map=new Map(definition.workflow.map(step=>[step.id,[]]));
+    for(const link of planConnections(definition))map.get(link.to)?.push(link.from);
+    return new Map([...map].map(([id,list])=>[id,[...list].sort().join(',')]));
+  };
+  const beforeSources=sources(runDefinition||{workflow:[],connections:[]}),afterSources=sources(currentDefinition);
+  const changed=new Set();
+  for(const step of currentDefinition.workflow){
+    const previous=before.get(step.id);
+    // A step is out of date when it changed, when it is new, or when what it
+    // runs after changed: adding, removing or rewiring a step changes the input
+    // of the step on the other end of that connection.
+    if(!previous||['name','task','agent','output'].some(field=>previous[field]!==step[field])||beforeSources.get(step.id)!==afterSources.get(step.id))changed.add(step.id);
+  }
+  const links=planConnections(currentDefinition);
+  let grew=true;
+  while(grew){
+    grew=false;
+    for(const link of links){
+      if(changed.has(link.from)&&!changed.has(link.to)){changed.add(link.to);grew=true;}
+    }
+  }
+  return changed;
+}
 export function ancestorSteps(d,id){const ancestors=new Set(),links=planConnections(d);const visit=node=>{for(const edge of links.filter(e=>e.to===node)){if(!ancestors.has(edge.from)){ancestors.add(edge.from);visit(edge.from);}}};visit(id);return ancestors;}
 export function dependencyState(d,id,traces,runId){let state=initialState(d);const ancestors=ancestorSteps(d,id);for(const sid of executionOrder(d)){if(!ancestors.has(sid))continue;const index=d.workflow.findIndex(w=>w.id===sid),trace=traces[index];if(trace?.patch!==undefined)state=applyStage(state,d,d.workflow[index],trace.patch,runId);}return state;}
-export function canvasPositions(d){const positions={},levels={},counts={};for(const id of executionOrder(d)){const parents=planConnections(d).filter(e=>e.to===id).map(e=>e.from);const level=parents.length?Math.max(...parents.map(p=>levels[p]))+1:0;levels[id]=level;const column=counts[level]||0;counts[level]=column+1;positions[id]=d.canvas?.positions?.[id]||{x:60+column*410,y:50+level*400};}return positions;}
+// How many dependency levels the plan has, and how many steps the widest one
+// holds: the canvas needs both to size itself before anything is drawn.
+export function planShape(d){
+  const levels={},counts={};
+  for(const id of executionOrder(d)){
+    const parents=planConnections(d).filter(edge=>edge.to===id).map(edge=>edge.from);
+    const level=parents.length?Math.max(...parents.map(parent=>levels[parent]))+1:0;
+    levels[id]=level;counts[level]=(counts[level]||0)+1;
+  }
+  const rows=Object.keys(counts).length?Math.max(...Object.values(counts)):1;
+  const depth=Object.keys(counts).length?Math.max(...Object.keys(counts).map(Number))+1:1;
+  return {levels:depth,columns:rows};
+}
+export function canvasPositions(d){const positions={},levels={},counts={};for(const id of executionOrder(d)){const parents=planConnections(d).filter(e=>e.to===id).map(e=>e.from);const level=parents.length?Math.max(...parents.map(p=>levels[p]))+1:0;levels[id]=level;const column=counts[level]||0;counts[level]=column+1;const saved=d.canvas?.positions?.[id];positions[id]=saved?{x:Number(saved.x)||0,y:Number(saved.y)||0}:{x:canvasMetrics.padX+level*(canvasMetrics.nodeWidth+canvasMetrics.gapX),y:canvasMetrics.padY+column*(canvasMetrics.nodeHeight+canvasMetrics.gapY)};}return positions;}
+// Both canvases draw dependencies from the right of one node to the left of
+// the next, so geometry lives here rather than in either view.
+export let canvasNodeWidth=350,canvasNodeHeight=220;
+// Keep cards readable; the board grows and scrolls when the plan outgrows it.
+let canvasMetrics={nodeWidth:350,nodeHeight:220,gapX:60,gapY:60,padX:60,padY:50};
+export function currentCanvasMetrics(){return canvasMetrics;}
+export function setCanvasMetrics({width,height,levels,columns}){
+  const rows=Math.max(1,columns),cols=Math.max(1,levels);
+  const nodeWidth=350,nodeHeight=220,gapX=60,gapY=60;
+  // Centre what there is, so a short plan looks placed rather than abandoned.
+  const spanX=nodeWidth*cols+gapX*(cols-1),spanY=nodeHeight*rows+gapY*(rows-1);
+  canvasMetrics={nodeWidth,nodeHeight,gapX,gapY,padX:Math.max(40,Math.round((width-spanX)/2)),padY:Math.max(50,Math.round((height-spanY)/2)),width,height};
+  canvasNodeWidth=canvasMetrics.nodeWidth;canvasNodeHeight=canvasMetrics.nodeHeight;
+  return canvasMetrics;
+}
+export function canvasEdgeCurve(from,to){if(!from||!to)return '';const x1=from.x+canvasNodeWidth,y1=from.y+canvasNodeHeight/2,x2=to.x,y2=to.y+canvasNodeHeight/2,bend=Math.max(40,Math.abs(x2-x1)/2);return `M ${x1} ${y1} C ${x1+bend} ${y1}, ${x2-bend} ${y2}, ${x2} ${y2}`;}
+// The point halfway along that curve, where a handle on the edge belongs.
+export function canvasEdgeMidpoint(from,to){if(!from||!to)return null;const x1=from.x+canvasNodeWidth,y1=from.y+canvasNodeHeight/2,x2=to.x,y2=to.y+canvasNodeHeight/2;return {x:(x1+x2)/2,y:(y1+y2)/2};}
 
 export function emptyWorkspaceCatalogue(){return {version:1,roles:[],starters:[],outputs:[]};}
 export function validateWorkspaceCatalogue(value){

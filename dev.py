@@ -62,10 +62,12 @@ def stop_service(service, force):
         except OSError:
             service.kill()
         return
-    try:
-        os.killpg(service.pid, signal.SIGKILL if force else signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    for target in (-service.pid, service.pid):
+        try:
+            os.kill(target, sig)
+        except OSError:
+            pass
 
 
 def stop_children(children, grace=5):
@@ -80,7 +82,10 @@ def stop_children(children, grace=5):
         except subprocess.TimeoutExpired:
             stop_service(child, force=True)
     for child in children:
-        child.wait()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def wait_ready(url, children, stopped, *, token=None, timeout=30):
@@ -111,6 +116,16 @@ def main(argv=None):
     children, stopped = [], threading.Event()
     root = Path(__file__).resolve().parent
     ports = (args.backend_port, args.studio_port)
+
+    def handle_signal(signum, _frame):
+        # A signal handler may only do signal-safe work: os.write, not print.
+        if stopped.is_set():
+            os.write(2, b"\nForcing both services to stop.\n")
+            stop_children(children, grace=0.0)
+            return
+        stopped.set()
+        os.write(2, f"\nStopping both services (signal {signum}); Ctrl+C again to force.\n".encode())
+
     try:
         if args.backend_port == args.studio_port:
             raise RuntimeError("Backend and Studio must use different ports.")
@@ -125,7 +140,7 @@ def main(argv=None):
         if os.name == "posix":
             stop_signals.append(signal.SIGHUP)  # A closed terminal would otherwise orphan both services.
         for sig in stop_signals:
-            signal.signal(sig, lambda *_: stopped.set())
+            signal.signal(sig, handle_signal)
         api_url = f"http://127.0.0.1:{args.backend_port}"
         environment = {**os.environ, "CONCLAVE_API_URL": api_url, "STUDIO_PORT": str(args.studio_port)}
         backend = [sys.executable, "-m", "conclave", "serve", "--port", str(args.backend_port)]
@@ -147,7 +162,8 @@ def main(argv=None):
               "\nPress Ctrl+C to stop both services.", flush=True)
         while not stopped.wait(0.25):
             if any(child.poll() is not None for child in children):
-                raise RuntimeError("A service exited; stopping the other service.")
+                print("A service stopped; stopping the other.", file=sys.stderr)
+                return 1
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError, RuntimeError) as error:
         print(f"Unable to start both services: {error}", file=sys.stderr)

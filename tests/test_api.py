@@ -132,6 +132,62 @@ def test_rest_application_revision_run_events_reviews_and_restart(tmp_path):
     asyncio.run(exercise())
 
 
+def test_an_arranged_application_keeps_its_version_and_tracks_the_layout(tmp_path):
+    """Where the cards sit is a change of its own, not a new application version."""
+
+    async def exercise():
+        api = make_api(tmp_path)
+        status, saved = await api.dispatch("POST", "/api/applications", {"definition": with_final_stage()["definition"]})
+        assert status == 201
+        assert (saved["revision"], saved["layout_revision"]) == (1, 0)
+        path = "/api/applications/" + saved["id"]
+
+        # The same plan, arranged: the layout advances and the version a request
+        # reads does not, so moving a card cannot make a request look older.
+        arranged = copy.deepcopy(saved["definition"])
+        arranged["canvas"] = {"positions": {step["id"]: {"x": 40 * index, "y": 20 * index} for index, step in enumerate(arranged["workflow"])}}
+        status, layout = await api.dispatch("PUT", path, {"definition": arranged, "revision": 1})
+        assert status == 200 and (layout["revision"], layout["layout_revision"]) == (1, 1)
+        assert layout["definition"]["canvas"] == arranged["canvas"]
+        assert (await api.dispatch("GET", path))[1]["layout_revision"] == 1
+
+        # A content edit still needs the version it read, and still advances it.
+        revised = copy.deepcopy(layout["definition"])
+        revised["workflow"][0]["task"] = "Read the supplied evidence once more"
+        status, updated = await api.dispatch("PUT", path, {"definition": revised, "revision": 1})
+        assert status == 200 and (updated["revision"], updated["layout_revision"]) == (2, 1)
+
+        # Rearranging from the version before that edit is refused like any save,
+        # and nothing of it is written.
+        assert (await api.dispatch("PUT", path, {"definition": arranged, "revision": 1}))[0] == 409
+        stored = (await api.dispatch("GET", path))[1]
+        assert (stored["revision"], stored["layout_revision"]) == (2, 1)
+        assert stored["definition"]["canvas"] == arranged["canvas"]
+        await api.host.close()
+
+    asyncio.run(exercise())
+
+
+def test_legacy_application_layout_migration_preserves_content(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite"
+    definition = with_final_stage()["definition"]
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE applications (id TEXT PRIMARY KEY, definition TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)")
+        connection.execute("INSERT INTO applications VALUES (?, ?, ?, ?)", ("legacy", json.dumps(definition), 7, "before"))
+    store = Workspace(path)
+    saved = store.get("legacy")
+    assert (saved["revision"], saved["layout_revision"]) == (7, 0)
+    assert saved["definition"] == definition
+    definition["canvas"] = {"positions": {"draft": {"x": 100, "y": 80}}}
+    store.save(definition, identifier="legacy", revision=7)
+    restored = Workspace(path).get("legacy")
+    assert (restored["revision"], restored["layout_revision"]) == (7, 1)
+    assert restored["definition"] == definition
+    assert store.save(with_final_stage()["definition"])["layout_revision"] == 0
+
+
 def test_rest_catalogue_members_config_and_bad_inputs(tmp_path):
     async def exercise():
         api = make_api(tmp_path)

@@ -1,4 +1,4 @@
-import {validateDefinition,validateMember,planConnections,canvasPositions} from '/definition.js';
+import {validateDefinition,validateMember,planConnections,executionOrder,canvasPositions} from '/definition.js';
 
 function newId(prefix,items,key='id'){let n=items.length+1;while(items.some(item=>item[key]===prefix+'_'+n))n++;return prefix+'_'+n;}
 export function reorderPlan(definition,stepId,slot){
@@ -8,7 +8,7 @@ export function reorderPlan(definition,stepId,slot){
 }
 export function duplicatePlanStep(definition,stepId){
   const d=structuredClone(definition),index=d.workflow.findIndex(step=>step.id===stepId);if(index<0)throw new Error('Choose an existing step.');
-  const original=d.workflow[index],copy={...original,id:newId('step',d.workflow),name:(original.name+' copy').slice(0,100)};d.workflow.splice(index+1,0,copy);if(d.connections!==undefined)d.connections.push(...d.connections.filter(e=>e.to===stepId).map(e=>({from:e.from,to:copy.id})));if(d.canvas){const pos=canvasPositions(definition)[stepId];d.canvas.positions[copy.id]={x:Math.min(10000,pos.x+410),y:pos.y};}validateDefinition(d);return d;
+  const original=d.workflow[index],copy={...original,id:newId('step',d.workflow),name:(original.name+' copy').slice(0,100)};d.workflow.splice(index+1,0,copy);if(d.connections!==undefined)d.connections.push(...d.connections.filter(e=>e.to===stepId).map(e=>({from:e.from,to:copy.id})));if(d.canvas){const pos=canvasPositions(definition)[stepId];d.canvas.positions[copy.id]={x:pos.x,y:Math.min(10000,pos.y+280)};}validateDefinition(d);return d;
 }
 export function removePlanStep(definition,stepId){
   const d=structuredClone(definition);if(d.workflow.length<2)throw new Error('Keep at least one work step.');if(!d.workflow.some(step=>step.id===stepId))throw new Error('Choose an existing step.');d.workflow=d.workflow.filter(step=>step.id!==stepId);if(d.connections!==undefined)d.connections=d.connections.filter(e=>e.from!==stepId&&e.to!==stepId);if(d.canvas)delete d.canvas.positions[stepId];validateDefinition(d);return d;
@@ -36,7 +36,18 @@ export function attachPlanTool(definition,stepId,toolId){
   if(!member.tools.includes(toolId))member.tools.push(toolId);validateDefinition(d);return d;
 }
 
-export function connectPlanSteps(definition,from,to){const d=structuredClone(definition);d.connections=structuredClone(planConnections(d));if(d.connections.some(e=>e.from===from&&e.to===to))return d;d.connections.push({from,to});validateDefinition(d);return d;}
+// A connection is only accepted if the plan can still be executed in some
+// order: the canvas draws every edge, so a loop would leave nothing to render.
+export function connectPlanSteps(definition,from,to){const d=structuredClone(definition);d.connections=structuredClone(planConnections(d));if(d.connections.some(e=>e.from===from&&e.to===to))return d;d.connections.push({from,to});executionOrder(d);validateDefinition(d);return d;}
 export function disconnectPlanSteps(definition,from,to){const d=structuredClone(definition);d.connections=planConnections(d).filter(e=>e.from!==from||e.to!==to);validateDefinition(d);return d;}
 export function moveCanvasStep(definition,id,x,y){const d=structuredClone(definition);d.connections=structuredClone(planConnections(d));d.canvas={positions:structuredClone(canvasPositions(d))};d.canvas.positions[id]={x:Math.round(Math.max(0,Math.min(10000,x))),y:Math.round(Math.max(0,Math.min(10000,y)))};validateDefinition(d);return d;}
 export function tidyCanvas(definition){const d=structuredClone(definition);delete d.canvas;d.canvas={positions:canvasPositions(d)};return validateDefinition(d);}
+
+// The arrangement is stored with the definition, so keeping it means writing the
+// definition back. Only the positions travel: work the person has not finished
+// editing stays in their draft, and an arrangement that places a step the
+// application does not hold yet waits for the next save.
+export function layoutSaveDefinition(saved,draft){
+  if(!draft?.canvas)throw new Error('There is no arrangement to save.');
+  return validateDefinition({...structuredClone(saved),canvas:structuredClone(draft.canvas)});
+}

@@ -29,10 +29,17 @@ Keep the runtime reusable and domain-neutral.
 4. Provide no-code visual planning: add, edit, copy, delete and assign steps;
    drag cards; edit connections; inspect a selected step. Support any DAG with
    multiple roots, branches and joins. Reject cycles and dangling references.
-   The stored card layout must not determine execution dependencies.
-5. Offer accessible keyboard and list alternatives to canvas interactions.
-   Retain zoom, panning and tidy layout. Avoid hiding essential work behind a
-   complicated graph editor.
+   The stored card layout must not determine execution dependencies. Arranging
+   the canvas saves itself, without the Save button and without carrying
+   unfinished edits along with it.
+5. Offer accessible keyboard alternatives to canvas interactions: arrow keys
+   move a step, ports and edges are real buttons, and reordering lives in the
+   selected step's settings. A step is dragged and connected on the canvas
+   itself, so it carries no drag handle and no Connect button; double-clicking
+   it, or pressing Enter on it, opens its settings. Fit the whole graph by
+   default, with zoom, full screen, Tidy layout and adding a step all on the
+   canvas rather than in the page header above it. Avoid hiding essential work
+   behind a complicated graph editor.
 6. Human team members are distinct from AI members. They contribute explicit
    decisions or typed input and can approve, reject or request changes.
    Automated actions are implemented through host tools.
@@ -41,13 +48,53 @@ Keep the runtime reusable and domain-neutral.
 8. Make the UI calmer through progressive disclosure, short labels, compact
    summaries, a selected-step inspector and one clear next action. Avoid walls
    of explanation, duplicated instructions and equally prominent controls.
-9. Separate building, testing a draft and using a saved application. Every real
-   run should retain the definition version it used. Sample mode stays explicit.
+9. Keep building, testing a draft and using a saved application on one screen.
+   The canvas is the plan while you edit it and the run while it runs; one
+   play/stop control starts and stops a run and reads Run again once a run is
+   open, and the setup questions are what an application with no steps opens to.
+   What a run needs — its request, its context and its source — is configured in
+   a modal over that canvas rather than on a screen of its own. Every real run
+   retains the definition version it used, and the request list names the version
+   each one ran.
 10. Show source-backed results, limitations and actual human review. Do not
     invent sources, files, usage, cost, performance gains or connected accounts.
 11. Users select intended sources, destinations and allowed actions. Account
     setup, execution permissions and approval enforcement belong on the server.
     Draft review and per-action tool authorization remain separate.
+12. Show a run the same way the plan is shown: one canvas with a node per step,
+    its status, the tools each agent used and who it delegated to, with every
+    exchange labelled by what actually crossed. Keep the work plan list as the
+    fallback when a saved plan cannot be laid out, and read both from the saved
+    run record rather than from a second account of the run. While a run is on
+    screen the request form stays behind one button, and one quiet control
+    returns to editing the plan. Clicking Run again opens that form prefilled
+    with the request that ran, and starting it creates a new run rather than
+    resuming the old one. A step whose recorded result came from an
+    earlier version of the plan is marked as out of date rather than shown as
+    current.
+
+## Which model runs a member
+
+Provider and model are chosen where the team is chosen: each AI member carries
+the backend that runs it, in the Setup step's Team panel, and one step may
+override its member's choice in the step settings. The host answers what this
+machine can reach, so the picker offers only real backends and only the models a
+backend reports; where a backend reports none, the model is a typed name and a
+blank means that backend's own default. The plan canvas says what runs each
+step and the run canvas says what actually ran it.
+
+A choice is honoured or refused, never quietly replaced. A member or step that
+names a backend this machine cannot run stops the run before it starts, naming
+the step, the member and what the host has instead — the same rule the runtime
+enforces per call.
+
+## Requests
+
+Requests are listed apart from the canvas, in the page header: one row per
+request with when it started, its status, the definition version it ran, and the
+request text. Opening a row shows that run on the canvas. The list is where the
+distinction between versions lives, because every request runs a saved version
+and none of them is a throwaway test.
 
 ## Six priority starters
 
@@ -94,6 +141,24 @@ marketing, payment reads and advanced custom APIs/webhooks/tool servers.
 Implement a small set for a complete first workflow before widening coverage.
 
 ## Design references supplied by the user
+
+### Postman Flows-inspired editor
+
+The editor uses a light neutral canvas-first shell, compact cards, labeled
+left/right dependency ports, a floating in-canvas Run/Add a step/Tidy layout
+dock, and contextual step settings. Double-click or keyboard activation edits
+a step. No PRIVATE label, Connect button, or card drag handle is restored.
+See [research and scope](POSTMAN_FLOWS_RESEARCH.md) for the source evidence.
+
+Connections remain dependencies, not typed data routing or Success/Fail ports.
+Existing saved coordinates are preserved; horizontal arrangement is applied
+only to new automatic positions or on explicit Tidy layout. Groups, minimap,
+undo/redo, and deployment/sharing controls are not part of this pass.
+
+Layout autosaves separately from content. A layout-only save increments
+`layout_revision`, not the content `revision`; clean status reads “Layout
+saved”. Unsaved content retains “Unsaved changes”; content saves read “Saved ·
+version N”. Moving cards does not make recorded requests older.
 
 - https://docs-platform.crewai.com/platform/en/features/crew-studio
 - https://astropods.com

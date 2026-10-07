@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 
 from conclave import ToolRegistry
-from conclave.providers import OLLAMA_DEFAULT_URL, resolve_provider
-from .definition import validate_host_tools
+from conclave.providers import OLLAMA_DEFAULT_URL, LocalBackends, resolve_provider
+from .definition import stage_backend, validate_host_tools
 from .runs import RunRepository, validate_run_request
 from .extensions import ConnectorAdapter, load_extensions, load_provider_factory
 from .planning import propose
@@ -50,8 +50,12 @@ def public_record(record):
 class LocalRunHost:
     def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, provider_source=None,
                  unavailable=None, adapters=(), resources=None, source_extensions=(), profile=None,
-                 principal=None, paths=None, sandbox=None, loop=None):
+                 principal=None, paths=None, sandbox=None, loop=None, backends=None):
         self.repository, self.provider, self.tools = repository, provider, tools
+        # `provider` is the backend this host runs by default. `backends` is the
+        # router a run gets when a member or a step names its own, and it is
+        # absent when this host can only run the one backend it was told about.
+        self.backends = backends
         # `reviewer` names the actor recorded on a human contribution; the
         # principal also carries the tenant whose storage this host holds.
         self.principal = principal or resolve_principal(reviewer, source="host")
@@ -105,8 +109,10 @@ class LocalRunHost:
         if run_id in self.tasks:
             raise ValueError("This request is already running")
         tools = self.run_tools(self.repository.get(run_id)["request"])
-        stream = (self.repository.resume(run_id, self.provider, tools, loop=self.loop) if resume
-                  else self.repository.execute(run_id, self.provider, tools, loop=self.loop))
+        # A run may mix backends, so it is handed the router when there is one.
+        provider = self.backends or self.provider
+        stream = (self.repository.resume(run_id, provider, tools, loop=self.loop) if resume
+                  else self.repository.execute(run_id, provider, tools, loop=self.loop))
         # Claim and commit the first event before returning success to Node.
         try:
             await anext(stream)
@@ -120,6 +126,47 @@ class LocalRunHost:
     def _require_provider(self):
         if self.provider is None:
             raise ValueError(self.unavailable or "Configure an AI provider on the local host")
+
+    def _validate_backends(self, definition):
+        """Refuse a run whose team asks for a backend this host cannot run.
+
+        A declared backend is honoured or refused, never silently replaced, so
+        this is where the person finds out — before the run starts, told which
+        member and step asked, and what this host has instead.
+        """
+
+        members = {item["id"]: item for item in definition["agents"]}
+        catalogue = {item["id"]: item for item in self.backends.catalogue()} if self.backends is not None else {}
+
+        for stage in definition["workflow"]:
+            member = members[stage["agent"]]
+
+            if member.get("kind", "ai") == "human":
+                continue
+
+            provider, model = stage_backend(member, stage)
+
+            if not provider and not model:
+                continue
+
+            where = f"Step “{stage.get('name') or stage['id']}” ({member.get('name') or member['id']})"
+            wanted = provider or self.provider_name or ""
+
+            if not catalogue:
+                raise ValueError(f"{where} asks for {provider or model}, but this host runs one configured backend and cannot choose"
+                                 + (f" ({self.provider_name})" if self.provider_name else ""))
+
+            entry = catalogue.get(wanted)
+
+            if entry is None:
+                raise ValueError(f"{where} asks for the {wanted} backend, which this host does not offer")
+
+            if not entry["available"]:
+                raise ValueError(f"{where} asks for {entry['name']}, which this host cannot run: {entry['reason']}")
+
+            if model and entry["models"] and model not in entry["models"]:
+                raise ValueError(f"{where} asks for the model {model}, which {entry['name']} does not report"
+                                 + f"; it has {', '.join(entry['models'][:6])}")
 
     async def handle(self, command, value, *, principal=None, streaming=False):
         """Answer one command. `principal` names the actor for this request,
@@ -143,6 +190,11 @@ class LocalRunHost:
             return 200, {"local": self.profile.name == "local", "service": True,
                          "available": self.provider is not None, "provider": self.provider_name,
                          "provider_source": self.provider_source,
+                         # What this host can be asked to run, per member and
+                         # per step. Empty when the host runs one backend it
+                         # was configured with, which cannot be chosen.
+                         "backends": self.backends.catalogue() if self.backends is not None else [],
+
                          "profile": self.profile.name,
                          "tenant": self.principal.tenant,
                          "connectors": connectors, "reason": self.unavailable, "tools": sorted(self.tools.tools), "reviewer": self.reviewer,
@@ -168,6 +220,8 @@ class LocalRunHost:
             if "resources" not in value and value["definition"].get("resources"):
                 value["resources"] = dict(value["definition"]["resources"])
             validate_host_tools(value["definition"], self.tools)
+            self._validate_backends(value["definition"])
+
             self.run_tools(value)
             # Pin the compatibility default just like an explicit selection.
             if self.resources is not None and not value.get("resources") and "default" in self.resources:
@@ -298,7 +352,7 @@ def configured_host(*, workspace=None, source_dir=None, principal=None):
                      ConnectorAdapter("web_reader", "Public web reader", "research", ("web_fetch",), lambda: True)])
     adapters.extend(load_extensions(setting("EXTENSIONS", ""), tools))
     name, model = setting("PROVIDER") or None, setting("MODEL") or None
-    provider, reason, source = None, None, None
+    provider, reason, source, backends = None, None, None, None
     timeout = float(setting("MODEL_TIMEOUT", "300"))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("CONCLAVE_MODEL_TIMEOUT must be finite and positive")
@@ -322,6 +376,13 @@ def configured_host(*, workspace=None, source_dir=None, principal=None):
             provider, name, reason = resolve_provider(workspace, name, model, timeout,
                                                      setting("OLLAMA_URL", OLLAMA_DEFAULT_URL))
             source = "configured" if chosen else ("detected" if provider is not None else None)
+            if provider is not None and profile.detect_backend:
+                # A host that inspects its own machine can offer a choice, so a
+                # run is handed every backend it can reach; the default one
+                # answers whatever names nothing. A hosted host is told which
+                # backend to use and offers nothing to choose.
+                backends = LocalBackends(workspace, provider, name, model=model, timeout=timeout,
+                                         ollama_url=setting("OLLAMA_URL", OLLAMA_DEFAULT_URL))
             if provider is None:
                 reason = f"{reason}. Set CONCLAVE_PROVIDER to choose a backend explicitly."
     history_limit = int(setting("HISTORY_LIMIT", "30"))
@@ -332,4 +393,4 @@ def configured_host(*, workspace=None, source_dir=None, principal=None):
     return LocalRunHost(repository, provider, tools,
                         reviewer=principal.name, provider_name=name, unavailable=reason, adapters=adapters,
                         resources=resources, source_extensions=source_extensions, provider_source=source,
-                        profile=profile, principal=principal, paths=paths)
+                        profile=profile, principal=principal, paths=paths, backends=backends)

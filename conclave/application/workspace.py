@@ -24,14 +24,18 @@ class Workspace:
         with self.connect() as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS seeded_applications (id TEXT PRIMARY KEY);
-                CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, definition TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, definition TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, layout_revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS member_templates (id TEXT PRIMARY KEY, member TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS workspace_catalogue (id INTEGER PRIMARY KEY, catalogue TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
             """)
+            # Where the cards sit has its own version. A database written before
+            # it existed keeps every saved application and starts at zero.
+            if "layout_revision" not in {row["name"] for row in connection.execute("PRAGMA table_info(applications)")}:
+                connection.execute("ALTER TABLE applications ADD COLUMN layout_revision INTEGER NOT NULL DEFAULT 0")
             for starter in starters:
                 if not connection.execute("INSERT OR IGNORE INTO seeded_applications VALUES (?)", (starter["id"],)).rowcount:
                     continue
-                connection.execute("INSERT OR IGNORE INTO applications VALUES (?, ?, 1, ?)", (starter["id"], json.dumps(starter["definition"]), "2026-10-04T00:00:00.000Z"))
+                connection.execute("INSERT OR IGNORE INTO applications (id, definition, revision, updated_at) VALUES (?, ?, 1, ?)", (starter["id"], json.dumps(starter["definition"]), "2026-10-04T00:00:00.000Z"))
 
     @contextmanager
     def connect(self):
@@ -58,6 +62,11 @@ class Workspace:
             raise KeyError(identifier)
         return self.application(row)
 
+    @staticmethod
+    def content_of(definition):
+        """A definition without where its cards sit: what a saved version means."""
+        return json.dumps({key: value for key, value in definition.items() if key != "canvas"}, sort_keys=True, allow_nan=False)
+
     def save(self, definition, *, identifier=None, revision=None):
         definition = {key: value for key, value in definition.items() if key not in {"sample_request", "sample_outputs", "sample_sources"}} if isinstance(definition, dict) else definition
         validate_definition(definition)
@@ -65,17 +74,27 @@ class Workspace:
         with self.connect() as connection:
             if identifier is None:
                 identifier, revision = str(uuid.uuid4()), 1
-                connection.execute("INSERT INTO applications VALUES (?, ?, ?, ?)", (identifier, json.dumps(definition, allow_nan=False), revision, updated_at))
+                connection.execute("INSERT INTO applications (id, definition, revision, layout_revision, updated_at) VALUES (?, ?, ?, 0, ?)", (identifier, json.dumps(definition, allow_nan=False), revision, updated_at))
+                return {"id": identifier, "definition": definition, "revision": revision, "layout_revision": 0, "updated_at": updated_at}
             else:
                 if type(revision) is not int or revision < 1:
                     raise ValueError("Provide a positive saved revision")
-                changed = connection.execute("UPDATE applications SET definition = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?", (json.dumps(definition, allow_nan=False), updated_at, identifier, revision)).rowcount
+                stored = connection.execute("SELECT definition, layout_revision FROM applications WHERE id = ?", (identifier,)).fetchone()
+                # The arrangement travels with the definition, so a save that only
+                # moves cards is recorded on its own: it keeps the application's
+                # version, which is what a request reads, and advances the layout.
+                layout = stored is not None and self.content_of(json.loads(stored["definition"])) == self.content_of(definition)
+                version, layouts = (0, 1) if layout else (1, 0)
+                changed = connection.execute(
+                    "UPDATE applications SET definition = ?, revision = revision + ?, layout_revision = layout_revision + ?, updated_at = ? WHERE id = ? AND revision = ?",
+                    (json.dumps(definition, allow_nan=False), version, layouts, updated_at, identifier, revision),
+                ).rowcount
                 if not changed:
                     if not connection.execute("SELECT 1 FROM applications WHERE id = ?", (identifier,)).fetchone():
                         raise KeyError(identifier)
                     raise Conflict("This application changed. Reload its saved version before saving.")
-                revision += 1
-        return {"id": identifier, "definition": definition, "revision": revision, "updated_at": updated_at}
+                revision += version
+        return {"id": identifier, "definition": definition, "revision": revision, "layout_revision": stored["layout_revision"] + layouts, "updated_at": updated_at}
 
     def delete(self, identifier, revision):
         if type(revision) is not int or revision < 1:

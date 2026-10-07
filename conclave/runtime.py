@@ -258,6 +258,8 @@ class ToolAgentRuntime:
                         run_id=run_id,
                         agent=spec.name,
                         messages=messages,
+                        provider=spec.provider,
+                        model=spec.model,
                     )
                 )
             )

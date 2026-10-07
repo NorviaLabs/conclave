@@ -15,7 +15,7 @@ page.on('pageerror',error=>errors.push(error.message));
 page.setDefaultTimeout(15000);
 const open=async id=>{
   await page.goto(`${base}/?application=${encodeURIComponent(id)}`);
-  await page.locator('[data-tab="use"][role="tab"]').click();
+  await page.locator('[data-action="play"]').click();
 };
 const fillRequest=async task=>{
   await page.locator('#live-request').fill(task);
@@ -57,7 +57,7 @@ try{
   await page.getByRole('button',{name:'Create this draft',exact:true}).click();
   assert((await page.locator('#application-name').innerText()).includes('Proposed domain team'));
   await open(applicationId);
-  await page.locator('[data-tab="build"][role="tab"]').click();
+  await page.locator('[data-action="back-to-plan"]').click();
   await page.locator('[data-action="toggle-plan-resources"]').click();
   await page.locator('[data-disclosure="plan-assistant"] summary').click();
   await page.locator('#plan-command').fill('Adapt this team to habitat restoration evidence');
@@ -115,7 +115,7 @@ try{
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Mobile layout overflows');
   await page.setViewportSize({width:1440,height:1000});
   // Production UI has no fictional runner or draft sample tab.
-  assert.equal(await page.locator('[data-action="use-samples"],[data-action="start-preview"],[data-tab="test"]').count(),0);
+  assert.equal(await page.locator('[data-action="use-samples"],[data-action="start-preview"],[data-tab],[role="tablist"]').count(),0,'no tabs and no legacy run controls');
   // Delete a saved application with revision protection, preserving run history.
   const deleteTarget=await page.evaluate(async()=>{
     const list=await (await fetch('/api/applications')).json();
@@ -132,10 +132,8 @@ try{
   await page.reload();assert.equal(await page.locator(`[data-select="${deleteTarget.id}"]`).count(),0);
   // Keyboard alternatives and dependency editing remain usable on the real canvas.
   await open(applicationId);
-  await page.locator('[data-tab="build"][role="tab"]').click();
+  await page.locator('[data-action="back-to-plan"]').click();
   await page.locator('[data-step="4"]').click();
-  await page.locator('[data-canvas-mode="list"]').click();
-  assert.equal(await page.locator('[data-canvas-mode="list"]').getAttribute('aria-pressed'),'true');
   const exportPlan=async()=>{
     const details=page.locator('.advanced-file-actions');
     if(await details.getAttribute('open')===null)await details.locator('summary').click();
@@ -143,12 +141,12 @@ try{
     return JSON.parse(await readFile(await file.path(),'utf8'));
   };
   const before=await exportPlan(),first=before.workflow[0].id,second=before.workflow[1].id;
+  await page.locator(`[data-plan-select="${first}"]`).click();
   await page.locator(`[data-plan-move="${first}"][data-direction="later"]`).focus();
   await page.keyboard.press('Enter');
   const reordered=await exportPlan();
   assert.notDeepEqual(reordered.workflow.map(step=>step.id),before.workflow.map(step=>step.id));
   assert.deepEqual(reordered.connections,before.connections,'List order changed workflow dependencies');
-  await page.locator('[data-canvas-mode="canvas"]').click();
   await page.locator(`[data-plan-select="${second}"]`).click();
   await page.locator(`[data-disclosure="step-parents-${second}"] summary`).click();
   await page.locator(`[data-step-parent="${first}"][data-step-child="${second}"]`).uncheck();
@@ -171,12 +169,12 @@ try{
   customDefinition.connections=[{from:'draft',to:'review'}];delete customDefinition.canvas;
   const customApp=await page.evaluate(async definition=>{const response=await fetch('/api/applications',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({definition})});if(!response.ok)throw new Error(await response.text());return response.json();},customDefinition);
   await open(customApp.id);
-  await page.locator('[data-tab="build"][role="tab"]').click();await page.locator('[data-disclosure="setup-more"] summary').click();
+  await page.locator('[data-action="back-to-plan"]').click();await page.locator('[data-action="set-up"]').click();await page.locator('[data-disclosure="setup-more"] summary').click();
   await page.locator('[data-action="advanced"]').click();await page.locator('#schema-0').locator('xpath=ancestor::details[1]/summary').click();
   const customFields=[...customDefinition.state[0].fields,{key:'notes',label:'Notes',type:'string',required:false}];
   await page.locator('#schema-0').fill(JSON.stringify(customFields));await page.locator('[data-apply-schema="0"]').click();
   await page.locator('[data-action="save"]').click();await page.locator('#save-state').filter({hasText:'Saved · version 2'}).waitFor();
-  await page.locator('[data-tab="use"][role="tab"]').click();await page.locator('#live-request').fill('Assess the observational evidence');
+  await page.locator('[data-action="play"]').click();await page.locator('#live-request').fill('Assess the observational evidence');
   await page.locator('[data-action="start-live"]').click();await status.filter({hasText:'Your review is needed'}).waitFor();
   await page.locator('#human-response').fill('Reviewed the evidence');
   await page.locator('[data-action="submit-live-review"]').click();
@@ -189,7 +187,7 @@ try{
   assert(await page.getByRole('cell',{name:'false',exact:true}).isVisible());
   await page.reload();await status.filter({hasText:'Results are ready'}).waitFor();
   assert(await page.getByRole('cell',{name:'2',exact:true}).isVisible());
-  await page.locator('[data-tab="build"][role="tab"]').click();
+  await page.locator('[data-action="back-to-plan"]').click();
   if(await page.locator('[data-disclosure="setup-more"]').getAttribute('open')===null)await page.locator('[data-disclosure="setup-more"] summary').click();
   await page.locator('[data-step="2"]').click();
   assert.deepEqual(await page.locator('[data-path="start_mode"] option').evaluateAll(options=>options.map(option=>option.value)),['manual']);

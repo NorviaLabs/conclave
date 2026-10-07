@@ -33,13 +33,31 @@ assert.deepEqual(projected.trace[3].input.findings,[a,b]);
 assert.equal(projected.trace[3].input.summary,'Human contribution');
 assert.equal(projected.state.summary,'Actual final text');assert.equal(projected.activeStep,null);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const markup=liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',history:[],runtime:{available:true,tools:[]},busy:false,error:'<script>untrusted</script>'});
+const form='<textarea id="live-request" data-live-input="task"></textarea>';
+const runOptions={escape,requestForm:form,outputs:'',human:'',progress:'',runtime:{available:true,tools:[]},busy:false,error:'<script>untrusted</script>'};
+// With a run open the screen is the canvas: the form and its messages stay out
+// of the way. Play in the page header brings them back; the form carries its own
+// way out. Requests are listed in the page's History dialog, not here.
+const markup=liveRunMarkup(d,projected,runOptions);
 assert.match(markup,/LOCAL RUN/);assert.match(markup,/Actual|Results are ready/);
-assert.ok(!markup.includes('<script>untrusted</script>'));assert.match(markup,/&lt;script&gt;/);
+assert.ok(!markup.includes('<script>untrusted</script>'));
+assert.ok(!markup.includes('id="live-request"'),'an open run does not repeat the request form');
+assert.match(markup,/&lt;script&gt;/,'run errors remain visible and escaped');
+assert.ok(!/data-live-history|id="live-history"/.test(markup),'the run screen holds no request list');
 assert.ok(!markup.includes('Sample complete'));assert.ok(markup.includes('Not reported'));
-console.log('PASS: live UI restores actual state/provenance, branch isolation, review inputs, final results, escaped messages and unreported metrics.');
+const reopened=liveRunMarkup(d,projected,{...runOptions,requestOnly:true});
+assert.ok(reopened.includes('id="live-request"'),'the form comes back when asked');
+// The header owns that toggle now: one control dismisses the form, not two.
+assert.doesNotMatch(reopened,/data-action="show-request-form"/,'the form offers no second way to dismiss itself');
+assert.match(reopened,/data-action="start-live"/,'and still starts the request');
+assert.ok(!reopened.includes('<script>untrusted</script>'));assert.match(reopened,/&lt;script&gt;/,'the form escapes what it renders');
+// Without a run there is nothing to look at, so the form is the screen.
+const start=liveRunMarkup(d,null,{...runOptions,requestOnly:true});
+assert.match(start,/data-action="start-live"/);assert.match(start,/>Run</);
+assert.ok(!start.includes('data-action="show-request-form"'),'nothing to cancel before a run exists');
+console.log('PASS: live UI restores actual state/provenance, branch isolation, review inputs, final results, escaped messages and unreported metrics; an open run shows the canvas with the request form behind one button.');
 const sourced=structuredClone(d);sourced.agents[0].tools=['read_file'];
-const options={escape,requestForm:'',outputs:'',human:'',progress:'',history:[],busy:false,error:'',applicationId:'app',runtime:{available:true,tools:['read_file'],resource_tools:['read_file'],resources:[{id:'case-a',name:'<Case A>',applications:['app']},{id:'private',name:'Private',applications:['another-app']}]}};
+const options={escape,requestOnly:true,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',applicationId:'app',runtime:{available:true,tools:['read_file'],resource_tools:['read_file'],resources:[{id:'case-a',name:'<Case A>',applications:['app']},{id:'private',name:'Private',applications:['another-app']}]}};
 const unbound=liveRunMarkup(sourced,null,options);
 assert.match(unbound,/data-source-resource/);assert.match(unbound,/&lt;Case A&gt;/);assert.ok(!unbound.includes('Private'));
 assert.match(unbound,/data-action="start-live" disabled/);
@@ -53,14 +71,17 @@ assert.ok(!webMarkup.includes('data-source-resource'));
 assert.ok(!webMarkup.includes('data-action="start-live" disabled'));
 run.request.resources={source:'case-a'};
 assert.deepEqual(projectLiveRun(run).resources,{source:'case-a'});
-assert.match(liveRunMarkup(sourced,projectLiveRun(run),{...options,source:'case-a'}),/Source resource/);
+assert.match(liveRunMarkup(sourced,projectLiveRun(run),{...options,source:'case-a',requestOnly:false}),/Source resource/);
 console.log('PASS: named resource selection, authorization filtering, escaping, start validation and saved resource display.');
 
 // The page must not claim to be running on this computer when the host says
 // otherwise, and a host that reports no profile is local by default.
-const hosted=liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',history:[],busy:false,error:'',runtime:{available:true,tools:[],profile:'hosted'}});
+const hostedRuntime={available:true,tools:[],profile:'hosted'};
+const hosted=liveRunMarkup(d,null,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:hostedRuntime});
 assert.match(hosted,/HOSTED RUN/);assert.match(hosted,/configured for this workspace/);
 assert.ok(!hosted.includes('on this computer'));
-const unprofiled=liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',history:[],busy:false,error:'',runtime:{available:false,tools:[],reason:'No model backend is configured for this host.'}});
+assert.match(liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:hostedRuntime}),/HOSTED RUN/,'an open run still states the profile it runs under');
+assert.ok(!liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:hostedRuntime}).includes('on this computer'));
+const unprofiled=liveRunMarkup(d,null,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:{available:false,tools:[],reason:'No model backend is configured for this host.'}});
 assert.match(unprofiled,/LOCAL RUN/);assert.match(unprofiled,/No AI provider was found on this computer/);
 console.log('PASS: the page renders from the reported host profile instead of assuming a local machine.');

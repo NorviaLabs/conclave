@@ -58,10 +58,18 @@ class Tool:
 
 @dataclass
 class AgentSpec:
-    """One agent: what it is told, and what it is allowed to touch."""
+    """One agent: what it is told, what it is allowed to touch, and what runs it.
+
+    `provider` and `model` are a *declared* choice rather than a connection:
+    the host resolves them, and a host that cannot serve the choice refuses the
+    call instead of quietly running the agent on another backend. Empty means
+    "whatever this host runs by default".
+    """
 
     name: str
     instructions: str
     tools: set[str] = field(
         default_factory=set
     )
+    provider: str = ""
+    model: str = ""

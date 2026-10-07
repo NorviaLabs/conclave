@@ -203,7 +203,8 @@ class ControlPlaneAuthority:
 
         if kind == "complete":
             completion = await self.inner.complete(ModelCall(run_id=str(request.get("run_id", "")), agent=str(request.get("agent", "")),
-                                                             messages=request.get("messages") or []))
+                                                             messages=request.get("messages") or [],
+                                                             provider=str(request.get("provider") or ""), model=str(request.get("model") or "")))
             usage = completion.usage
             return {"text": completion.text,
                     "usage": None if usage is None else {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}}
@@ -259,7 +260,8 @@ class SandboxAuthority(RunAuthority):
         return response
 
     async def complete(self, call: ModelCall) -> Completion:
-        response = await self.ask({"kind": "complete", "run_id": call.run_id, "agent": call.agent, "messages": call.messages})
+        response = await self.ask({"kind": "complete", "run_id": call.run_id, "agent": call.agent, "messages": call.messages,
+                                   "provider": call.provider, "model": call.model})
         usage = response.get("usage")
 
         return Completion(text=str(response.get("text", "")),

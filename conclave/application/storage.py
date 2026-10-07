@@ -68,7 +68,13 @@ class RunStore(Protocol):
 
 
 class WorkspaceStore(Protocol):
-    """Saved applications, reusable members and the workspace catalogue."""
+    """Saved applications, reusable members and the workspace catalogue.
+
+    Application records carry a content ``revision`` and a separate
+    ``layout_revision``. A save differing only in canvas layout keeps the
+    content revision, so rearranging cards does not age recorded runs.
+    Saves still require the content revision they read.
+    """
 
     path: Path
 

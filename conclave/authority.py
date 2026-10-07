@@ -41,11 +41,17 @@ class ModelCall:
     The messages are the prompt, so a deployment decides where a prompt may be
     assembled and sent; the run and agent are what an audit trail needs to
     attribute the call and its cost.
+
+    `provider` and `model` are the backend the agent declared, empty when it
+    declared none. They are a request, not a promise: the authority serves it
+    or refuses it, and never substitutes another backend silently.
     """
 
     run_id: str
     agent: str
     messages: list[dict[str, Any]]
+    provider: str = ""
+    model: str = ""
 
 
 class RunAuthority(Protocol):
@@ -133,7 +139,26 @@ class InProcessAuthority:
         self,
         call: ModelCall,
     ) -> Completion:
-        return await self.provider.complete(
+        provider = self.provider
+
+        # A declared backend is served or refused. Asking the provider object
+        # rather than a registry keeps one thing threaded through every path: a
+        # host that can only run one backend has no `for_call`, and a call that
+        # names another one fails here instead of running somewhere else.
+        if call.provider or call.model:
+            choose = getattr(provider, "for_call", None)
+            chosen = choose(call.provider, call.model) if callable(choose) else None
+
+            if chosen is None:
+                raise ValueError(
+                    "This host cannot run the model backend "
+                    + (call.provider or "requested")
+                    + (f" · {call.model}" if call.model else "")
+                )
+
+            provider = chosen
+
+        return await provider.complete(
             call.messages
         )
 
