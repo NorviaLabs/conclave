@@ -3,6 +3,7 @@
 `conclave serve` already serves the Studio page on one address; this launcher
 adds the Node dev server for UI work and stops both together. The backend finds
 the model provider already set up on this computer unless one is named here.
+Stopping the launcher stops both services, so neither keeps its port.
 """
 import argparse
 import os
@@ -24,25 +25,62 @@ def port(value):
     return number
 
 
-def stop_children(children):
+def port_error(number):
+    """Why no service could listen on this local port now, or None if one could.
+
+    SO_REUSEADDR is what the services set themselves, so sockets the previous
+    run left in TIME_WAIT do not look like a port something is holding.
+    """
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", number))
+        except OSError as error:
+            return error
+    return None
+
+
+def busy_ports(ports, timeout=1):
+    """The ports that stay unbindable, after a moment for a service to release them."""
+    deadline = time.monotonic() + timeout
+    while True:
+        busy = [number for number in ports if port_error(number) is not None]
+        if not busy or time.monotonic() >= deadline:
+            return busy
+        time.sleep(0.1)
+
+
+def stop_service(service, force):
+    """Stop one service and, when forced, everything it started.
+
+    A service that wraps another process can leave that process holding the
+    port, so the forced stop ends the whole process group, or tree on Windows.
+    """
+    if os.name != "posix":
+        try:  # Windows has no signal to catch, so the tree is ended outright.
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(service.pid)], capture_output=True, check=False)
+        except OSError:
+            service.kill()
+        return
+    try:
+        os.killpg(service.pid, signal.SIGKILL if force else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def stop_children(children, grace=5):
+    """Stop every service, so the ports they listen on come free."""
     for child in reversed(children):
         if child.poll() is None:
-            try:
-                if os.name == "posix":
-                    os.killpg(child.pid, signal.SIGTERM)
-                else:
-                    child.terminate()
-            except ProcessLookupError:
-                pass
+            stop_service(child, force=False)
+    deadline = time.monotonic() + grace
     for child in children:
         try:
-            child.wait(timeout=5)
+            child.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            if os.name == "posix":
-                os.killpg(child.pid, signal.SIGKILL)
-            else:
-                child.kill()
-            child.wait()
+            stop_service(child, force=True)
+    for child in children:
+        child.wait()
 
 
 def wait_ready(url, children, stopped, *, token=None, timeout=30):
@@ -72,16 +110,21 @@ def main(argv=None):
     args = parser.parse_args(argv)
     children, stopped = [], threading.Event()
     root = Path(__file__).resolve().parent
+    ports = (args.backend_port, args.studio_port)
     try:
         if args.backend_port == args.studio_port:
             raise RuntimeError("Backend and Studio must use different ports.")
-        for number in (args.backend_port, args.studio_port):
-            with socket.socket() as probe:
-                probe.bind(("127.0.0.1", number))
+        for number in ports:
+            error = port_error(number)
+            if error is not None:
+                raise RuntimeError(f"Port {number} is not available: {error}")
         version = subprocess.run([args.node, "--version"], capture_output=True, text=True, check=True)
         if int(version.stdout.strip().removeprefix('v').split('.')[0]) < 24:
             raise RuntimeError("Studio requires Node.js 24 or newer; choose it with --node.")
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        stop_signals = [signal.SIGINT, signal.SIGTERM]
+        if os.name == "posix":
+            stop_signals.append(signal.SIGHUP)  # A closed terminal would otherwise orphan both services.
+        for sig in stop_signals:
             signal.signal(sig, lambda *_: stopped.set())
         api_url = f"http://127.0.0.1:{args.backend_port}"
         environment = {**os.environ, "CONCLAVE_API_URL": api_url, "STUDIO_PORT": str(args.studio_port)}
@@ -111,6 +154,12 @@ def main(argv=None):
         return 1
     finally:
         stop_children(children)
+        if children:
+            stuck = busy_ports(ports)
+            if stuck:
+                held = ", ".join(str(number) for number in stuck)
+                print(f"Still in use after stopping the services: port {held}."
+                      " Stop whatever holds it before starting again.", file=sys.stderr)
 
 
 if __name__ == "__main__":
