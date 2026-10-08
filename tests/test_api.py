@@ -535,7 +535,16 @@ def test_serve_lifecycle_starts_http_and_closes_on_signal(tmp_path, monkeypatch,
 
         monkeypatch.setattr(module, "start_server", start)
         task = asyncio.create_task(module.serve(0))
-        await started.wait()
+        # Binding a real port is the one step here an environment can refuse. A
+        # server that never starts leaves the event unset and keeps its failure
+        # inside the task, so the wait is bounded and that failure is surfaced
+        # instead of blocking the suite forever.
+        try:
+            await asyncio.wait_for(started.wait(), timeout=10)
+        except TimeoutError:
+            if task.done():
+                task.result()
+            raise
         assert servers[0].is_serving()
         assert "Conclave REST API" in capsys.readouterr().out
         callbacks[signal.SIGTERM]()
