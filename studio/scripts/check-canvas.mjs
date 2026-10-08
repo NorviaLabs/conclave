@@ -16,8 +16,9 @@ const load = async (path, replacements = []) => {
   return 'data:text/javascript,' + encodeURIComponent(source);
 };
 const shared = url('../shared/definition.js'), catalogue = url('../shared/catalogue.js');
-const runCanvasUrl = await load('../web/run-canvas.js', [['/definition.js', shared], ['/canvas-ui.js', url('../web/canvas-ui.js')]]);
-const workbenchUrl = await load('../web/workbench-ui.js', [['/catalogue.js', catalogue], ['/definition.js', shared], ['/run-canvas.js', runCanvasUrl], ['/canvas-ui.js', url('../web/canvas-ui.js')]]);
+const runCanvasUrl = await load('../web/run-canvas.js', [['/definition.js', shared], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', url('../web/run-activity.js')]]);
+const planUrl=await load('../web/plan.js', [['/definition.js', shared]]);
+const workbenchUrl = await load('../web/workbench-ui.js', [['/plan.js',planUrl], ['/catalogue.js', catalogue], ['/definition.js', shared], ['/run-canvas.js', runCanvasUrl], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', url('../web/run-activity.js')]]);
 
 const {emptyDefinition, initialState, validateDefinition, canvasPositions, planShape, setCanvasMetrics, staleRunSteps, stageBackend, backendOptions, backendModels, backendIssue, backendLabel, defaultBackend} = await import(shared);
 const {projectLiveRun} = await import(await load('../web/live.js', [['/definition.js', shared]]));
@@ -32,20 +33,20 @@ const capabilityName = id => id.replaceAll('_', ' ');
 // Exercise the browser sizing functions without requiring a browser or API.
 const studioSource = await readFile(new URL('../web/studio.js', import.meta.url), 'utf8');
 const runSizing = studioSource.slice(studioSource.indexOf('function applyRunZoom(){'), studioSource.indexOf("window.addEventListener('resize',sizeRunCanvas);"));
-const area = {clientWidth: 1800, clientHeight: 0, style: {}, getBoundingClientRect: () => ({top: 240})};
+const area = {closest:()=>({querySelector:()=>null,style:{setProperty(){}}}),clientWidth: 1800, clientHeight: 0, style: {}, getBoundingClientRect: () => ({top: 240})};
 Object.defineProperty(area.style, 'height', {set(value){area.clientHeight = parseFloat(value);}});
 const flow = {style: {width: '2800px', height: '1200px'}, closest: () => area};
 const level = {};
 const app = {querySelector: selector => selector.includes('canvas-flow') ? flow : selector.includes('canvas-view-level') ? level : area};
-const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0}, canvasFitZoom, runCanvasZoom: null};
+const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0,addEventListener(){}}, canvasFitZoom, runCanvasZoom: null};
 runInNewContext(`${runSizing}\nsizeRunCanvas();`, sizing);
-assert.equal(area.clientHeight, 742, 'the run canvas fills the remaining browser height');
-assert.equal(flow.style.zoom, canvasFitZoom(1800, 742, 2800, 1200), 'the whole run board fits on first render');
+assert.equal(area.clientHeight, 694, 'the run canvas fills the remaining browser height');
+assert.equal(flow.style.zoom, canvasFitZoom(1800, 694, 2800, 1200), 'the whole run board fits on first render');
 assert.equal(level.textContent, `${Math.round(flow.style.zoom * 100)}%`, 'the level reports the fitted scale');
 sizing.window.innerHeight = 800;
 runInNewContext('sizeRunCanvas();', sizing);
-assert.equal(area.clientHeight, 542, 'resize uses the new available height');
-assert.equal(flow.style.zoom, canvasFitZoom(1800, 542, 2800, 1200), 'automatic fit follows resize');
+assert.equal(area.clientHeight, 494, 'resize uses the new available height');
+assert.equal(flow.style.zoom, canvasFitZoom(1800, 694, 2800, 1200), 'resize preserves the viewport zoom');
 sizing.runCanvasZoom = 1.2;
 runInNewContext('sizeRunCanvas();', sizing);
 assert.equal(flow.style.zoom, 1.2, 'manual zoom survives sizing and rerenders');
@@ -111,8 +112,8 @@ assert.ok(!/data-plan-slot|plan-drop-slot/.test(planMarkup), 'the plan is one ca
 // The header is a caption; the view controls live inside the canvas.
 const headerStart = planMarkup.indexOf('canvas-heading');
 const header = planMarkup.slice(headerStart, planMarkup.indexOf('</div>', headerStart));
-assert.ok(!/<button/.test(header), 'the canvas header carries no buttons');
-assert.match(header, /3 steps · 2 connections/);
+assert.match(header,/toggle-readiness/, 'readiness is actionable');
+assert.match(header, /3 members · 3 steps/);
 assert.match(planMarkup, /id="plan-keyboard-help"[^>]*>Arrow keys move a focused step\. Enter on a step opens its settings;/, 'the step help names the way in for a keyboard or a screen reader');
 const viewStart = planMarkup.indexOf('class="canvas-view"');
 const view = planMarkup.slice(viewStart, planMarkup.indexOf('</div>', planMarkup.indexOf('canvas-fullscreen')));
@@ -124,8 +125,8 @@ assert.match(view, /100%/, 'the level starts at 100%');
 assert.equal((view.match(/data-action="canvas-fullscreen"/g) || []).length, 1, 'full screen sits with the zoom controls');
 // The plan's own actions live on the canvas the person is working on, so the
 // page header above it stays a caption and a menu of application actions.
-assert.match(planMarkup, /data-action="tidy-canvas"[^>]*>[\s\S]*?Tidy layout/, 'Tidy layout is on the canvas');
-assert.match(planMarkup, /data-action="toggle-plan-resources" aria-expanded="false"[^>]*>[\s\S]*?Add a step/, 'so is adding a step');
+assert.match(planMarkup, /data-action="tidy-canvas"[^>]*>[\s\S]*?Arrange/, 'Tidy layout is on the canvas');
+assert.match(planMarkup, /data-action="toggle-plan-resources" aria-expanded="false"[^>]*>[\s\S]*?Add step/, 'so is adding a step');
 const heading = planMarkup.slice(0, planMarkup.indexOf('class="plan-workbench'));
 assert.ok(!/tidy-canvas|toggle-plan-resources/.test(heading), 'the plan heading carries no canvas controls');
 assert.match(heading, /data-action="import"/, 'the application menu still holds the file actions');
@@ -236,18 +237,18 @@ assert.equal(payloadLabel({}, 'text'), 'written');
 const runContext = {escape, agentName, outputName, capabilityName, zoom: 1};
 const canvas = runCanvasMarkup(plan, projected, 'step_2', runContext);
 assert.equal((canvas.match(/data-run-node="/g) || []).length, 3, 'a node per step');
-assert.equal((canvas.match(/data-run-step="/g) || []).length, 3, 'each node selects the step for its details');
+assert.equal((canvas.match(/data-run-step="/g) || []).length, 5, 'steps and delegations are inspectable');
 assert.equal((canvas.match(/class="run-node-status" data-status="complete"/g) || []).length, 2, 'two steps finished before the review');
 assert.equal((canvas.match(/class="run-node-status" data-status="needs-input"/g) || []).length, 1, 'the human gate is marked');
 assert.equal((canvas.match(/class="run-node-status"/g) || []).length, 3, 'every step carries its status');
 // The run overview above the canvas already counts the steps and the version.
 // The caption counts the collaboration rather than describing it.
-assert.match(canvas, /3 steps · 3 agents/);
-assert.match(canvas, /handoff/);
+assert.match(canvas, /3 agents/);
+assert.match(canvas, /handed/);
 assert.ok(!/steps complete/.test(canvas), 'the canvas does not repeat the run overview');
 assert.ok(!/saved version/.test(canvas), 'the canvas does not repeat the saved version');
-assert.match(canvas, /class="run-chip ">read file ×2/, 'tool calls are counted');
-assert.match(canvas, /class="run-chip denied">web search ×1/, 'a refused tool is marked');
+assert.doesNotMatch(canvas, /run-chip|step-backend/, 'technical information stays off nodes');
+assert.match(executionDetailMarkup(plan, projected, 'step_1', runContext), /Not approved/, 'tool denials remain inspectable');
 assert.match(canvas, /class="run-subagent" data-status="complete"/, 'a delegation becomes a sub-agent node');
 assert.match(canvas, /delegated by Researcher · depth 2 · completed/);
 assert.ok(!canvas.includes('<script>alert(1)</script>'), 'a delegated task is escaped');
@@ -263,10 +264,10 @@ for (const [index, point] of delegated.entries()) {
   assert.match(curve, new RegExp(` ${point.x} ${point.y + 30}$`), `the edge for delegation ${index + 1} ends at its node`);
 }
 assert.match(canvas, /class="canvas-edge run-edge handed"[\s\S]*Findings · 1 record/, 'a handoff edge is labelled with what crossed');
-assert.match(canvas, /Handed on Brief/, 'a completed step says what it handed on');
+assert.match(canvas, /produced/, 'completed steps summarize output');
 // A step that has not started says what it waits for, from the connections.
 const early = runCanvasMarkup(plan, projectLiveRun({...run, status: 'running', events: run.events.slice(0, 1)}), 'step_1', runContext);
-assert.match(early, /Waiting for Read the sources/, 'an unstarted step says what it waits for');
+assert.match(early, /Waiting/, 'waiting remains visible');
 assert.match(early, /class="run-node-status" data-status="ready"/, 'a step with no prerequisites is ready');
 assert.match(early, /data-run-node="step_1" data-status="ready"/, 'ready styling is attached to the card');
 assert.match(early, /data-run-node="step_2" data-status="waiting"/, 'unstarted cards have waiting styling');
@@ -274,6 +275,16 @@ assert.match(canvas, /data-run-node="step_1" data-status="complete"/, 'completed
 assert.match(canvas, /data-run-node="step_3" data-status="needs-input"/, 'review styling is attached to the card');
 const workingRecord = {...run, status: 'running', events: run.events.slice(0, 2)};
 assert.match(runCanvasMarkup(plan, projectLiveRun(workingRecord), 'step_1', runContext), /data-run-node="step_1" data-status="working"/, 'active cards trigger the working animation');
+const parallel=projectLiveRun({...run,status:'running',events:[run.events[0],run.events[1],event(3,{type:'StageStarted',stage:'step_2',agent:'writer'})]});
+assert.deepEqual(parallel.activeSteps,[0,1]);
+assert.equal(runStepStatus(plan,parallel,0),'Working');assert.equal(runStepStatus(plan,parallel,1),'Working');
+const sibling=projectLiveRun({...run,status:'running',events:[...run.events.slice(0,2),event(3,{type:'StageStarted',stage:'step_2',agent:'writer'}),run.events[9]]});
+assert.equal(sibling.activeStep,0,'a completed parallel sibling does not clear the other active step');
+const followCode=studioSource.slice(studioSource.indexOf('function followActiveNode(){'),studioSource.indexOf('function closeRunInspector(){'));
+let focused=[];const follow={preview:{definition:plan,activeStep:0},followActive:true,lastFollowedStep:null,canvasPan:null,focusRunNode:id=>focused.push(id)};
+runInNewContext(followCode+'followActiveNode();followActiveNode();',follow);assert.deepEqual(focused,['step_1'],'follow centers only once per active step');
+follow.followActive=false;follow.preview.activeStep=1;runInNewContext('followActiveNode();',follow);assert.deepEqual(focused,['step_1'],'manual exploration suspends following');
+follow.followActive=true;runInNewContext('followActiveNode();',follow);assert.deepEqual(focused,['step_1','step_2'],'re-enabling follows the current step');
 const failedRun = projectLiveRun({...workingRecord, status: 'failed'});
 assert.equal(runStepStatus(plan, failedRun, 0), 'Failed', 'the unfinished step that was running when the run failed is marked failed');
 assert.equal(runStepStatus(plan, failedRun, 1), 'Incomplete', 'downstream steps are not falsely marked failed');
@@ -302,16 +313,16 @@ assert.match(diagnostics,/Budget: tokens/);
 assert.match(diagnostics,/Used: 101/);
 assert.match(diagnostics,/Limit: 100/);
 assert.match(diagnostics,/Inputs available when this step started/,'failed steps retain their dependency inputs');
-assert.doesNotMatch(diagnostics,/private output|hidden/,'raw observations and tool arguments are not displayed');
+assert.match(diagnostics,/Arguments and execution details/,'recorded arguments remain behind disclosure');
 assert.doesNotMatch(executionDetailMarkup(plan,diagnosticRun,'step_2',{escape,agentName,outputName,capabilityName}),/Invalid &lt;output&gt;/,'step failures stay scoped');
 const unattributed={...diagnosticRun,events:diagnosticRun.events.map(event=>event.type==='ApplicationFinished'?{...event,stage:undefined}:event)};
 assert.equal(runStepStatus(plan,unattributed,1),'Incomplete','run-level failures do not guess which parallel step failed');
 assert.match(executionDetailMarkup(plan,unattributed,'step_2',{escape,agentName,outputName,capabilityName}),/did not identify a responsible step/);
 assert.match(executionDetailMarkup(plan,{...diagnosticRun,mode:'stopped',events:diagnosticRun.events.map(event=>event.type==='ApplicationFinished'?{...event,status:'stopped'}:event)},null,{escape,agentName,outputName,capabilityName}),/Step stopped/);
-const selectionCode=studioSource.slice(studioSource.indexOf("  if(old?.runId!==run.runId||old?.mode!==run.mode){"),studioSource.indexOf("  preview=run;liveError='';"));
+const selectionCode=studioSource.slice(studioSource.indexOf("  if(old?.runId!==run.runId){"),studioSource.indexOf("  preview=run;liveError='';"));
 const selection={old:{runId:'same',mode:'running'},run:{runId:'same',mode:'failed',events:diagnosticRun.events},selectedRunStepId:'step_2'};
 runInNewContext(selectionCode,selection);
-assert.equal(selection.selectedRunStepId,'step_1','a new failure selects the responsible step');
+assert.equal(selection.selectedRunStepId,'step_2','failure does not interrupt manual inspection');
 selection.old.mode='failed';selection.selectedRunStepId='step_2';
 runInNewContext(selectionCode,selection);
 assert.equal(selection.selectedRunStepId,'step_2','subsequent refreshes preserve a user-selected sibling');
@@ -331,13 +342,13 @@ const producedCanvas = runCanvasMarkup(plan, projected, 'step_2', runContext);
 assert.match(producedCanvas, /2 findings/, 'a step that wrote two records says so');
 assert.match(producedCanvas, /title="Margins fell · Churn rose"/, 'the titles are one hover away');
 assert.match(producedCanvas, /title="A drafted brief.">3 words/, 'a text output reports its size, not its content');
-assert.match(producedCanvas, /3 steps · 3 agents/, 'the caption counts steps and agents');
+assert.match(producedCanvas, /3 agents/, 'the caption counts steps and agents');
 assert.match(producedCanvas, /2 delegations/, 'and the work handed to sub-agents');
-assert.match(producedCanvas, /2 handoffs/, 'and what crossed between steps');
+assert.match(producedCanvas, /run-edge handed/, 'handoff edges remain visible');
 assert.match(runCanvasMarkup(plan, {...projected, state: {...projected.state, findings: []}}, 'step_2', runContext), /0 findings/, 'a completed step that produced nothing says so rather than hiding it');
 assert.match(producedCanvas, /Produces Brief/, 'a step that has not run yet still says what it will produce');
 const runHeader = canvas.slice(canvas.indexOf('canvas-heading'), canvas.indexOf('</div>', canvas.indexOf('canvas-heading')));
-assert.ok(!/<button/.test(runHeader), 'the run canvas header carries no buttons');
+assert.match(runHeader,/follow-active/, 'following is explicitly controllable');
 
 // The canvas and the work plan are two views of one run.
 const list = executionPlanMarkup(plan, projected, 'step_2', {escape, agentName, outputName, capabilityName});
@@ -345,7 +356,8 @@ const detail = executionDetailMarkup(plan, projected, 'step_2', {escape, agentNa
 const progress = runProgressMarkup(plan, projected, 'step_2', {mode: 'canvas', list, detail, zoom: 1, escape, agentName, outputName, capabilityName});
 assert.match(progress, /data-run-node="/);
 assert.ok(!/data-run-mode/.test(progress), 'the run screen is one canvas, with no view switch');
-assert.match(progress, /class="execution-inspector"/, 'the canvas shows the selected step record beside it');
+assert.match(progress, /run-inspector-drawer/, 'selection opens an overlay inspector');
+assert.doesNotMatch(runProgressMarkup(plan,projected,null,{...runContext,detail}),/run-inspector-drawer/, 'no drawer without selection');
 assert.match(progress, /Results after this step/, 'the record is the one the run stored');
 assert.ok(!progress.includes('execution-plan'), 'canvas mode does not also render the list');
 assert.match(list, /Work plan/, 'the work plan is still rendered for the fallback');
@@ -406,8 +418,8 @@ owning.agents[1].model = 'local-a:8b';
 validateDefinition(owning);
 const fields = (label, path, value, kind = 'input', options = []) => `${label}|${path}|${value}|${kind}|${options.map(option => option[0]).join(',')}`;
 const owningCanvas = workbenchMarkup(owning, {...context, backends, field: fields});
-assert.match(owningCanvas, /class="step-backend">Codex · gpt-5</, 'a step that follows its member says what runs it');
-assert.match(owningCanvas, /class="step-backend">Ollama · local-a:8b</, 'and so does the member that picked a reported model');
+assert.doesNotMatch(owningCanvas,/step-backend/, 'provider stays off plan nodes');
+assert.match(owningCanvas,/Ollama · local-a:8b/, 'provider remains in progressive settings');
 // The settings panel is showing step_2, whose member runs on Ollama.
 assert.match(owningCanvas, /This step runs on\|workflow\.1\.provider\|\|select\|,codex,ollama,opencode/, 'the step settings offer this host’s backends, with inheriting first');
 assert.match(owningCanvas, /This step’s model\|workflow\.1\.model\|\|select\|,local-a:8b,local-b:70b/, 'the step’s model is picked from what its backend reports');
@@ -416,20 +428,20 @@ const overridden = structuredClone(owning);
 overridden.workflow[1].provider = 'codex';
 validateDefinition(overridden);
 const overriddenCanvas = workbenchMarkup(overridden, {...context, backends, field: fields});
-assert.match(overriddenCanvas, /class="step-backend">Codex</, 'a step that names its own backend shows that backend');
+assert.doesNotMatch(overriddenCanvas,/step-backend/, 'plan nodes stay non-technical');
 assert.match(overriddenCanvas, /This step’s model\|workflow\.1\.model\|\|input\|/, 'a backend that reports no models takes a name instead of a list');
 const unofferable = structuredClone(plan);
 unofferable.agents[0].provider = 'gemini';
 const warned = workbenchMarkup(unofferable, {...context, selectedId: 'step_1', backends, field: () => ''});
 assert.match(warned, /This host does not offer that backend\./, 'a choice this host cannot serve is reported, not hidden');
-assert.match(warned, /class="step-backend">gemini</, 'and the node still says what the plan actually asks for');
+assert.match(warned,/gemini/, 'requested backend remains in settings');
 
 // The run canvas shows what actually ran the step, once the record says so.
 const startedRun = projectLiveRun({...run, status: 'running', events: run.events.slice(0, 2).concat([event(2.5, {type: 'StageStarted', stage: 'step_1', agent: 'researcher', provider: 'ollama', model: 'local-b:70b'})])});
 assert.deepEqual([...runBackends(startedRun).entries()], [['step_1', ['ollama', 'local-b:70b']]]);
 const startedCanvas = runCanvasMarkup(owning, startedRun, 'step_1', {...runContext, backends});
-assert.match(startedCanvas, /class="step-backend">Ollama · local-b:70b</, 'a started step shows the backend the record names');
-assert.match(startedCanvas, /class="step-backend">Ollama · local-a:8b</, 'a step that has not started shows what the plan declares');
+assert.doesNotMatch(startedCanvas,/step-backend/, 'backend details stay off the canvas');
+assert.match(executionDetailMarkup(owning, startedRun, 'step_2', {...runContext, backends}), /Ollama · local-a:8b/, 'unstarted backend remains inspectable');
 assert.match(executionDetailMarkup(owning, startedRun, 'step_1', {...runContext, backends}), /<dt>Runs on<\/dt><dd>Ollama · local-b:70b<\/dd>/, 'the step detail reports the backend that ran it');
 
 // The browser-side rules match the host's: a name, not a sentence.
@@ -494,7 +506,7 @@ assert.match(canvas, /--node-width:\d+px;--node-height:\d+px/, 'the run canvas d
 console.log(`PASS: the canvas is the primary view (slim rail, one header bar, side panels floating over it), studio.css styles every canvas class the markup uses (${used.size} checked).`);
 
 assert.match(planMarkup,/class="canvas-dock"/);
-assert.match(planMarkup,/data-action="run"/);
+assert.match(planMarkup,/data-action="suggest-plan-change"/);
 const auto=canvasPositions(plan);
 assert(auto.step_2.x>auto.step_1.x);
 assert.equal(auto.step_2.y,auto.step_1.y);

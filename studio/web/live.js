@@ -19,28 +19,28 @@ export const liveFollowMode=runtime=>runtime?.features?.events===true?'push':'po
 export const liveStreamPath=runId=>`/api/runs/${encodeURIComponent(runId)}/stream`;
 
 export function projectLiveRun(record){
-  const d=record.request.definition,patches=new Map(),completedSteps=[],trace=[],textOrigins={};
+  const d=record.request.definition,patches=new Map(),completedSteps=[],trace=[],textOrigins={},working=new Set();
   let state=initialState(d),activeStep=null,version=0;
-  const events=record.events.map(item=>({...item.event,sequence:item.sequence}));
+  const events=record.events.map(item=>({...item.event,sequence:item.sequence,timestamp:item.created_at||item.event.timestamp}));
   for(const event of events){
     const index=d.workflow.findIndex(step=>step.id===event.stage),step=d.workflow[index];
     if(event.state)state=event.state;
     if(event.type==='StageStarted'){
-      activeStep=index;
+      working.add(index);activeStep=index;
       if(step)trace[index]={input:inputState(d,step.id,patches),output:null};
     }
     if(event.type==='ApplicationStateChanged'&&step){
       trace[index]={input:inputState(d,step.id,patches),patch:event.patch,output:event.state[step.output]};
-      patches.set(step.id,event.patch);completedSteps.push(step.id);version=event.version;activeStep=null;
+      patches.set(step.id,event.patch);completedSteps.push(step.id);version=event.version;working.delete(index);activeStep=[...working].at(-1)??null;
       if(d.state.find(item=>item.key===step.output).type==='text')textOrigins[step.output]={agent:step.agent,stage:step.id};
     }
   }
   const review=record.reviews.find(item=>['pending','submitted'].includes(item.status));
-  if(record.status==='waiting_for_human'&&review){activeStep=d.workflow.findIndex(step=>step.id===review.stage);trace[activeStep]={input:review.request.state,output:null};}
-  if(!['running','waiting_for_human'].includes(record.status))activeStep=null;
+  if(record.status==='waiting_for_human'&&review){activeStep=d.workflow.findIndex(step=>step.id===review.stage);working.add(activeStep);trace[activeStep]={input:review.request.state,output:null};}
+  if(!['running','waiting_for_human'].includes(record.status)){activeStep=null;working.clear();}
   return {live:true,definition:d,task:record.request.task,inputs:record.request.inputs,revision:record.request.revision,
     runId:record.id,resources:record.request.resources||{},mode:record.status==='waiting_for_human'?'waiting_human':record.status,state,activeStep,version,
-    completedSteps,executionOrder:executionOrder(d),trace,textOrigins,events,review,metrics:record.metrics||{}};
+    activeSteps:[...working],completedSteps,executionOrder:executionOrder(d),trace,textOrigins,events,review,metrics:record.metrics||{}};
 }
 
 export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress,runtime,busy,error,source='',applicationId='',requestOnly=false,warningsReviewed=false}){
@@ -64,9 +64,10 @@ export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress
     const checks=`<section class="panel" aria-label="Pre-run checks"><h3>Validate application</h3><h4>Pre-run checks</h4>${issues.length?`<p>Review ${issues.length} finding${issues.length===1?'':'s'} before running. Errors block Run; warnings require review.</p>${issues.map((issue,index)=>`<div class="validation"><strong>${e(issue.severity.toUpperCase())} · ${e(d.workflow.find(step=>step.id===issue.stage)?.name||issue.stage)} · ${e(issue.label)}</strong><p>${e(issue.message)}</p><blockquote>${e(issue.evidence)}</blockquote>${issue.fix?`<pre class="code">${e(issue.fix.preview)}</pre><button type="button" class="button" data-preflight-fix="${index}">${e(issue.fix.label)}</button> `:''}<button type="button" class="button" data-preflight-edit="${e(issue.stage)}">Edit step instructions</button> <button type="button" class="button" data-preflight-settings>Open schema, tools and limits</button></div>`).join('')}<label><input type="checkbox" data-preflight-review ${warningsReviewed?'checked':''}> I reviewed the warnings and accept their risks for this saved version.</label>`:'<p>No known output-contract conflicts found.</p>'}<p class="field-help">Static checks cover explicit contract conflicts, tool/task compatibility, output dependencies, verification coverage and minimum budgets. Heuristics may miss issues or flag valid external inputs; they cannot guarantee valid model output. Source authorization and tool availability are checked below; document existence is checked by the host during execution.</p></section>`;
     return checks+configuration;
   }
-  return `<div class="runtime-banner"><span class="runtime-pill">${local?'LOCAL RUN':hostedPill}</span>${!run?`<p>${runtime.available?(local?'Uses the AI provider configured on this computer.':'Uses the AI provider configured for this workspace.'):'Live runs are unavailable on this host.'}</p>${configuration}`:''}</div>
-  ${error?`<p class="validation" role="alert">${e(error)}</p>`:''}
-  ${run?`<p class="run-request-line">${e(run.task.slice(0,160))}${run.task.length>160?'…':''}</p><details class="quiet-details" data-disclosure="live-request-details"><summary>Full request and context</summary><p>${e(run.task)}</p>${run.resources?.source?`<p><strong>Source resource</strong><br>${e(run.resources.source)}</p>`:''}${Object.entries(run.inputs).map(([key,value])=>`<p><strong>${e(run.definition.inputs?.find(field=>field.id===key)?.label||key)}</strong><br>${e(value)}</p>`).join('')}</details>`:''}
-  ${run?.mode==='waiting_human'?`<button class="button" data-action="cancel-live" ${busy?'disabled':''}>Stop</button>`:''}
-  ${run?`<div class="run-overview" role="status"><span class="run-status ${run.mode==='completed'?'complete':''}">${e(labels[run.mode]||run.mode)}</span><span>${run.completedSteps.length} of ${run.definition.workflow.length} steps complete</span><span>Saved version ${run.revision}</span></div>${last?.reason&&run.mode!=='waiting_human'?`<p class="version-note">${e(last.reason)}</p>`:''}${run.events.filter(event=>event.type==='BudgetWarning').map(event=>`<p class="version-note" role="status">${e(event.dimension.replaceAll('_',' '))} warning: ${e(event.used)} used (threshold ${e(event.threshold)}).</p>`).join('')}${human}${progress}${outputs}<details class="quiet-details" data-disclosure="live-details"><summary>Activity and usage</summary><p>Recorded through completed steps. Unreported measurements remain unavailable.</p><div class="metrics-grid">${[['wall_clock_seconds','AI execution seconds'],['tokens','AI text units'],['tool_calls','Tool attempts'],['cost_usd','Cost · USD']].map(([key,label])=>`<div><strong>${label}</strong><p>${e(run.metrics[key]??'Not reported')}</p></div>`).join('')}</div><ol>${run.events.filter(event=>['StageStarted','HumanInputRequested','HumanReviewSubmitted','ApplicationFinished'].includes(event.type)).map(event=>`<li>${e(event.type==='StageStarted'?'Work started':event.type==='HumanInputRequested'?'Review requested':event.type==='HumanReviewSubmitted'?'Review recorded':'Request '+(event.status||'').replaceAll('_',' '))}${event.stage?' · '+e(run.definition.workflow.find(step=>step.id===event.stage)?.name||event.stage):''}</li>`).join('')}</ol></details>`:''}`;
+  if(!run)return `<div class="runtime-banner"><span class="runtime-pill">${local?'LOCAL RUN':hostedPill}</span><p>${local?'Uses the AI provider configured on this computer.':'Uses the AI provider configured for this workspace.'}</p>${configuration}</div>`;
+  const current=d.workflow[run.activeStep],status=current?`${d.agents.find(agent=>agent.id===current.agent)?.name||current.agent} ${run.mode==='waiting_human'?'needs your input':'is working'}`:labels[run.mode]||run.mode;
+  return `<div class="run-overview" role="status"><span class="run-status ${run.mode==='completed'?'complete':''}">${e(labels[run.mode]||run.mode)}</span><span>${run.completedSteps.length} of ${run.definition.workflow.length} steps complete${current?` · ${e(status)}`:''}</span><div class="run-secondary-actions">${run.mode==='completed'?'<button class="button" data-action="view-results">View results</button>':''}${run.mode==='waiting_human'?'<button class="button" data-action="view-review">Review input</button>':''}<button class="text-button" data-action="view-run-info">Run information</button></div></div>
+  ${error?`<p class="validation" role="alert">${e(error)}</p>`:''}${progress}
+  <details class="quiet-details run-information" data-disclosure="live-request-details"><summary>Request, context and run information</summary><p>${e(run.task)}</p><p>${local?'LOCAL RUN':hostedPill} · Saved version ${e(run.revision)}</p>${run.resources?.source?`<p>Source resource: ${e(run.resources.source)}</p>`:''}${Object.entries(run.inputs).map(([key,value])=>`<p><strong>${e(run.definition.inputs?.find(field=>field.id===key)?.label||key)}</strong><br>${e(value)}</p>`).join('')}${last?.reason?`<p>${e(last.reason)}</p>`:''}<details data-disclosure="live-details"><summary>Usage and execution metrics</summary><p>Unreported measurements remain unavailable.</p><div class="metrics-grid">${[['wall_clock_seconds','AI execution seconds'],['tokens','AI text units'],['tool_calls','Tool attempts'],['cost_usd','Cost · USD']].map(([key,label])=>`<div><strong>${label}</strong><p>${e(run.metrics[key]??'Not reported')}</p></div>`).join('')}</div></details></details>
+  ${human}${outputs}`;
 }

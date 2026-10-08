@@ -258,3 +258,65 @@ Use Advanced in the left sidebar to delete the selected application. Deletion
 requires confirmation and checks the saved revision. Saved run history remains
 available through Conclave, and deleted starter applications stay deleted after
 restarting the backend. Unsaved drafts can also be removed.
+
+### Canvas-first Run screen
+
+Runs stay on the execution canvas. Agent cards show their recorded status and
+output summary; handoff edges and delegated agents remain visible. The bottom
+Activity dock starts collapsed. Expand it for newest-first recorded activity,
+filter by step, or select an entry to inspect its step. Repeated tool calls are
+grouped; arguments and payloads are available under execution details.
+
+Select a card to open its details drawer (a bottom sheet on small screens);
+Close or Escape dismisses it. Follow active step is enabled for a newly opened
+run and suspends after manual pan, zoom, or selection. Re-enable it explicitly
+to return to the current work. Live updates retain the canvas, selection,
+scroll positions, disclosure state, and focused input without rebuilding the
+application subtree. View results and Review input open the existing results
+and human checkpoint without replacing the graph. Context, version and usage
+metrics are under Run information. Timestamps appear only when recorded.
+
+Offline Run UX checks:
+
+```sh
+node studio/scripts/check-run-experience.mjs
+node studio/scripts/check-canvas.mjs
+node studio/scripts/check-live-ui.mjs
+node studio/scripts/check-run-actions.mjs
+```
+
+The optional `check-canvas-browser.mjs` also exercises live DOM identity,
+selection, activity scrolling, following, and tablet/mobile inspectors. Set
+`STUDIO_PLAYWRIGHT_MODULE` to an installed Playwright module and
+`STUDIO_BROWSER_ARTIFACTS` to an artifact directory; optionally set
+`STUDIO_BROWSER_CHANNEL=chrome` to use installed Chrome.
+
+### Canvas-first Plan screen
+
+The Plan canvas shows who does each step and what it produces. Click a step
+(or focus it and press Enter) to edit its task, member and output. Advanced
+member settings, tool access, provider/model, input dependencies, output
+structure and execution limits are expandable. Shared-member changes explicitly
+apply to every assigned step; choose **Make a separate copy** to isolate one.
+The drawer becomes a bottom sheet on mobile; Escape closes secondary panels.
+
+**Add step**, **Suggest change**, and **Arrange** are primary canvas actions.
+Add opens a compact picker for AI work, human review, existing members, presets
+and saved members. The editor offers **Add after** and **Add parallel branch**;
+select a connection to insert between its endpoints or remove it. Drag a
+connection handle, or press Enter on it and choose **Connect here**. Dragging a
+card changes only its position. List ordering also preserves dependencies.
+Adding an independent step never silently connects neighbouring list entries.
+
+Readiness uses definition validation, existing preflight findings and reported
+host capabilities. Errors and warnings are distinct, selectable, and associated
+with affected steps. Final pre-run checks remain authoritative. Suggestions
+remain proposals until **Apply**; review summaries include connection, member,
+step, tool-access and authority changes. Draft text, focus, zoom and canvas
+position persist through routine editing and opening panels.
+
+```sh
+node studio/scripts/check-plan-experience.mjs
+node studio/scripts/check-canvas.mjs
+node studio/scripts/check-studio-source.mjs
+```

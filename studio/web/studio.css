@@ -260,3 +260,124 @@
 /* One header bar: where you are, what it is called, and what you can do. */
 .application-header .crumb{display:block;font:11px var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}
 .application-header .header-actions{align-items:center;gap:10px}
+
+/* Run: one stable canvas, with secondary information opened on demand. */
+.canvas-first-run .application-header{padding-top:14px;padding-bottom:12px;min-height:0;align-items:center}
+.canvas-first-run .application-header h1{font-size:21px}
+.canvas-first-run .crumb,.canvas-first-run .save-state{display:none}
+.run-workspace{padding-top:0}
+.run-workspace .run-overview{display:flex;align-items:center;gap:16px;margin:0;padding:10px 0;font-size:13px;flex-wrap:wrap}
+.run-secondary-actions{display:flex;align-items:center;gap:12px;margin-left:auto}
+.run-workbench-layout{display:block;position:relative;min-width:0}
+.run-workbench{width:100%;min-width:0}
+.run-workbench .canvas-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 12px;font-size:12px}
+.run-workbench .canvas-viewport{width:100%;min-height:200px;border-radius:12px 12px 0 0;touch-action:pan-x pan-y}
+.run-workbench .plan-node.compact{min-height:0;height:var(--node-height);overflow:hidden}
+.run-workbench .step-summary{gap:12px}
+.run-node .step-summary strong{font-size:18px}
+.run-node .plan-node-head .kind-tag{display:none}
+.run-node-status i{font-style:normal;display:inline-flex;align-items:center;justify-content:center}
+.run-node[data-status="working"]{border-color:var(--mint);box-shadow:0 0 0 2px #365fc012}
+.run-node[data-status="complete"] .run-node-status{color:#28714d}
+.run-node[data-status="failed"] .run-node-status{color:var(--red)}
+.run-node[data-status="needs-input"] .run-node-status{color:var(--amber)}
+.run-inspector-drawer{position:absolute;right:12px;top:42px;bottom:60px;width:min(420px,90%);z-index:8;overflow:auto;overscroll-behavior:contain;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px #252a3420;padding:16px}
+.run-inspector-drawer .execution-inspector{width:auto;border:0;padding:8px;background:none;max-height:none;overflow:visible}
+.inspector-close{position:sticky;top:0;display:block;margin-left:auto;z-index:1;background:var(--panel)}
+.execution-inspector h4{margin:22px 0 8px}
+.step-live-activity,.step-discoveries{padding-left:18px;font-size:14px;line-height:1.6}
+.step-live-activity li{margin-bottom:10px}
+.run-inspector-drawer pre,.activity-panel pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.activity-dock{background:var(--panel);border:1px solid var(--line);border-radius:0 0 12px 12px;overflow:hidden}
+.activity-latest{min-height:48px;display:flex;align-items:center;gap:16px;padding:8px 16px;font-size:13px}
+.activity-latest>span{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.activity-latest>button{flex-shrink:0}
+.activity-panel{height:clamp(160px,32vh,340px);overflow:auto;overscroll-behavior:contain;padding:12px 20px;border-top:1px solid var(--line)}
+.activity-panel label{font-size:12px;display:flex;align-items:center;gap:12px}
+.activity-panel select{width:auto;max-width:70%}
+.activity-panel ol{list-style:none;padding:0;margin:12px 0}
+.activity-panel li{display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--line);font-size:13px}
+.activity-panel li>div{min-width:0;flex:1}
+.activity-panel time{color:var(--muted);font-size:12px}
+.activity-panel p{margin:4px 0;overflow-wrap:anywhere}
+.activity-panel details{margin-top:6px;color:var(--muted);font-size:12px}
+.activity-panel .text-button{text-align:left;white-space:normal}
+.activity-important{color:var(--red)}
+.activity-routine{color:var(--muted)}
+.run-information{margin:12px 0}
+.run-workspace .run-results,.run-workspace .human-checkpoint{scroll-margin-top:20px}
+.run-workspace button:focus-visible,.run-workspace summary:focus-visible,.run-workspace .canvas-viewport:focus-visible{outline:2px solid var(--mint);outline-offset:3px}
+@media(max-width:700px){
+  .canvas-first-run .application-header{gap:8px;padding:12px}
+  .canvas-first-run .application-header h1{font-size:17px}
+  .canvas-first-run .header-actions .actions{gap:6px;flex-wrap:wrap}
+  .canvas-first-run .header-actions .button{padding:7px 10px;font-size:12px}
+  .run-workspace .run-overview{gap:6px;font-size:12px}
+  .run-secondary-actions{width:100%;margin-left:0;justify-content:flex-end}
+  .run-inspector-drawer{position:fixed;top:auto;left:8px;right:8px;bottom:8px;width:auto;max-height:65dvh;z-index:20;border-radius:18px}
+  .activity-panel{height:30dvh;padding:12px}
+  .activity-latest{padding:8px 10px}
+  .run-workbench .canvas-heading{padding:6px;font-size:11px}
+}
+@media(prefers-reduced-motion:reduce){.run-workspace *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+.run-workbench .canvas-view{left:auto;right:16px;bottom:calc(var(--activity-height,48px) + 16px)}
+.run-workbench .run-subagent .text-button{font-size:13px;text-align:left}
+
+/* Build and observe the same graph; panels overlay rather than resize it. */
+.canvas-first-plan .application-header{padding-top:12px;padding-bottom:10px;align-items:center}
+.canvas-first-plan .crumb{display:none}
+.canvas-first-plan .application-header h1{font-size:21px}
+.application-goal{font-size:13px;color:var(--muted);margin:5px 0 0;max-width:70ch;line-height:1.4}
+.canvas-first-plan .plan-workspace{padding-top:0;padding-bottom:10px}
+.canvas-first-plan .plan-heading{position:absolute;right:28px;top:12px;z-index:6;margin:0}
+.canvas-first-plan .plan-workbench.calm-workbench{display:block;position:relative;height:auto;min-height:0}
+.canvas-first-plan .workbench-plan{width:100%;overflow:visible;border-radius:12px;background:var(--panel)}
+.canvas-first-plan .workbench-plan .canvas-heading{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;font-size:13px}
+.canvas-first-plan .workbench-plan .canvas-viewport{min-height:260px;border-radius:12px 12px 0 0}
+.canvas-first-plan .canvas-dock{left:0;right:0;bottom:-56px;transform:none;border:1px solid var(--line);border-radius:0 0 12px 12px;min-height:56px;justify-content:center;box-shadow:none;background:var(--panel)}
+.canvas-first-plan .canvas-dock button{white-space:nowrap}
+.canvas-first-plan .canvas-view{left:auto;right:16px;bottom:16px}
+.canvas-first-plan .workbench-resources,.canvas-first-plan .workbench-inspector,.plan-assistant-panel,.plan-readiness-panel{position:absolute;right:12px;top:48px;bottom:12px;width:min(420px,calc(100% - 24px));max-height:none;overflow:auto;overscroll-behavior:contain;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px #252a3420;z-index:8;padding:18px}
+.canvas-first-plan .workbench-resources{left:12px;right:auto}
+.canvas-first-plan .workbench-inspector[hidden],.canvas-first-plan .workbench-resources[hidden]{display:none}
+.plan-assistant-panel .plan-assistant{padding:0;border:0;margin:12px 0}
+.plan-assistant-panel>button,.plan-readiness-panel>button{display:block;margin-left:auto}
+.canvas-first-plan .plan-node .step-backend,.canvas-first-plan .plan-node .step-tool-chips{display:none}
+.canvas-first-plan .plan-node .step-summary strong{font-size:18px}
+.canvas-first-plan .plan-node .step-summary{gap:12px}
+.canvas-first-plan .plan-node .step-member{order:1}
+.canvas-first-plan .plan-node .step-output{order:2}
+.canvas-first-plan .plan-port{opacity:0;transition:opacity .15s}
+.canvas-first-plan .plan-node:hover .plan-port,.canvas-first-plan .plan-node.selected .plan-port,.canvas-first-plan .plan-node:focus-within .plan-port{opacity:1}
+.canvas-first-plan .plan-node:has(.node-validation){border-color:var(--amber)}
+.node-validation{margin-left:auto;color:var(--amber)}
+.readiness.blocked,.step-validation .error{color:var(--red)}
+.step-validation{font-size:13px;line-height:1.5;padding-left:18px;color:var(--amber)}
+.shared-member-note{line-height:1.5;font-size:13px;padding:10px;background:var(--panel2);border-radius:8px}
+.inspector-context-actions{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+.canvas-edge-insert{position:absolute;z-index:3;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text)}
+.plan-readiness-panel li{margin-bottom:16px;line-height:1.5}
+.plan-readiness-panel p{font-size:13px}
+.plan-assistant-panel pre,.plan-readiness-panel pre,.workbench-inspector pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.canvas-first-plan .plan-heading .advanced-file-actions{font-size:12px}
+.canvas-first-plan .plan-heading{position:relative;right:auto;top:auto;height:0;display:flex;justify-content:flex-end;transform:translateY(-2px)}
+.canvas-first-plan .plan-heading .advanced-file-actions{position:absolute;right:0;top:0;background:var(--panel);z-index:9}
+.canvas-first-plan .workbench-plan .canvas-heading{padding-right:120px}
+@media(max-width:700px){
+  .canvas-first-plan .application-header{padding:12px;gap:8px}
+  .canvas-first-plan .application-header h1{font-size:17px}
+  .application-goal{font-size:12px;max-height:34px;overflow:hidden}
+  .canvas-first-plan .header-actions .actions{gap:6px;flex-wrap:wrap}
+  .canvas-first-plan .header-actions .button{padding:7px 10px;font-size:12px}
+  .canvas-first-plan .workbench-resources,.canvas-first-plan .workbench-inspector,.plan-assistant-panel,.plan-readiness-panel{position:fixed;top:auto;left:8px;right:8px;bottom:8px;width:auto;max-height:65dvh;border-radius:18px;z-index:20}
+  .canvas-first-plan .canvas-dock{gap:2px;padding:4px}
+  .canvas-first-plan .canvas-dock button{font-size:12px;padding:8px}
+  .canvas-first-plan .workbench-plan .canvas-heading{font-size:11px;padding:8px 75px 8px 8px;gap:6px}
+  .canvas-first-plan .workbench-plan .canvas-heading .text-button{font-size:11px}
+}
+@media(hover:none){.canvas-first-plan .plan-port{opacity:1}}
+@media(prefers-reduced-motion:reduce){.canvas-first-plan *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+.node-proposed{color:var(--mint);margin-left:auto}
+.plan-node:has(.node-proposed){outline:2px dashed var(--mint);outline-offset:3px}
+.plan-workbench:fullscreen{height:100dvh;background:var(--bg);padding:12px}
+.plan-workbench:fullscreen .canvas-viewport{height:calc(100dvh - 120px)!important}

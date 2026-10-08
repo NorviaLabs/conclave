@@ -87,11 +87,11 @@ assert.match(source, /event\.target\.closest\('\[data-plan-node\]'\)\?\.dataset\
 // second press that did not move opens the step's settings. The press is
 // decided from the pointer events the canvas already handles, because opening
 // the settings re-renders the card the pointer is over.
-assert.match(source, /function editPlanStep\(id\)\{\s*showPlanInspector=true;selectedStepId=id;render\(\)/, 'opening a step has one implementation');
-assert.equal((source.match(/showPlanInspector=true;selectedStepId=/g) || []).length, 1, 'and every way in lands there');
+assert.match(source, /function editPlanStep\(id\)\{\s*showPlanInspector=true;[\s\S]{0,180}selectedStepId=id;render\(\)/, 'opening a step has one implementation');
+assert.equal((source.match(/showPlanInspector=true;[\s\S]{0,180}selectedStepId=id/g) || []).length, 1, 'and every way in lands there');
 assert.match(source, /button\.dataset\.planSelect\)\{editPlanStep\(button\.dataset\.planSelect\)/, 'the step button opens it, for a keyboard or a screen reader');
 assert.match(source, /second=commit&&!drag\.moved&&lastPlanPress\.id===drag\.id&&now-lastPlanPress\.time<500/, 'a double-click is a second press that did not move');
-assert.match(source, /if\(second\)editPlanStep\(drag\.id\)/, 'and that press opens the step for editing');
+assert.match(source, /if\(commit&&!drag\.moved\)editPlanStep\(drag\.id\)/, 'and that press opens the step for editing');
 // Where a step sits is stored with the definition, so the arrangement is written
 // on its own: a drag, an arrow key or Tidy layout must not need the Save button.
 assert.match(source, /updatePlan\(moveCanvasStep\(draft\(\),drag\.id[\s\S]{0,80}scheduleLayoutSave\(\)/, 'a dragged step saves its place without pressing Save');
@@ -104,15 +104,15 @@ assert.match(source, /function resetRuns\(\)\{layoutSaved=false;clearTimeout\(la
 
 // One way to do one thing: a control per action, a handler per action, and no
 // second name for something that already has one.
-const web = await Promise.all(['studio.js', 'live.js', 'workbench-ui.js', 'run-canvas.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js']
+const web = await Promise.all(['studio.js', 'live.js', 'workbench-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js']
   .map(name => readFile(new URL(`../web/${name}`, import.meta.url), 'utf8')));
 const all = web.join('\n');
 const controls = [...all.matchAll(/data-action="([^"]+)"/g)].map(match => match[1]);
 const handlers = new Set([...all.matchAll(/action==='([^']+)'/g)].map(match => match[1]));
 const counted = name => controls.filter(value => value === name).length;
 
-// Setup has a header Run; planning has the canvas dock (never shown together).
-assert.equal(counted('run'), 2, 'setup and planning each offer one Run control');
+// Both modes use the same application-header Run control.
+assert.equal(counted('run'), 1, 'one Run control in the application header');
 // One page for the plan and the run: Run is also Run again, and what a run needs
 // is configured in a modal rather than a second screen.
 assert.equal(counted('show-request-form'), 0, 'no second control opens the request form');

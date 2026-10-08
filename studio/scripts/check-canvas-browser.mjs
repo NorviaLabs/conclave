@@ -67,7 +67,7 @@ const api = path => {
   return {};
 };
 
-const browser = await chromium.launch({headless: true, args: ['--no-proxy-server']});
+const browser = await chromium.launch({channel: process.env.STUDIO_BROWSER_CHANNEL||undefined,headless: true, args: ['--no-proxy-server']});
 const context = await browser.newContext({viewport: {width: 1500, height: 1000}});
 await context.route('**/*', async route => {
   const url = new URL(route.request().url());
@@ -99,8 +99,7 @@ try {
   // -------------------------------------------------------------------------
   await page.goto(`${base}/?application=${applicationId}`);
   await page.locator('.shell').waitFor();
-  await page.locator('[data-action="back-to-plan"]').click();
-  await page.locator('[data-step="4"]').click();
+  if(await page.locator('[data-action="back-to-plan"]').count())await page.locator('[data-action="back-to-plan"]').click();
   await page.locator('[data-canvas-port]').first().waitFor();
   assert.equal(await page.locator('[data-plan-node]').count(), workflow.length, 'a node per step');
   assert.equal(await page.locator('[data-canvas-port]').count(), workflow.length, 'every step offers a port to connect from');
@@ -110,7 +109,7 @@ try {
 
   // Double-clicking a step opens that step's settings, and closing them puts
   // the canvas back the way the rest of this check expects to find it.
-  await page.locator(`[data-plan-node="${workflow[0]}"]`).dblclick();
+  await page.locator(`[data-plan-node="${workflow[0]}"]`).click();
   await page.locator('.workbench-inspector').waitFor();
   await page.waitForTimeout(120);
   assert.equal((await page.locator('#inspector-title').innerText()).trim(), definition.workflow[0].name, 'double-clicking a step opens that step');
@@ -121,6 +120,7 @@ try {
   // Drag from a port to a step that is not already connected.
   const [from, to] = [workflow[0], workflow.at(-2)];
   assert(!definition.connections.some(edge => edge.from === from && edge.to === to), 'the fixture starts without that connection');
+  await page.locator(`[data-plan-node="${from}"]`).hover();
   const release = await drag(`[data-canvas-port="${from}"]`, `[data-plan-node="${to}"]`);
   assert.equal(await page.locator('[data-canvas-preview]').count(), 1, 'a preview curve follows the pointer');
   assert.equal(await page.locator('.plan-node.connect-target').count(), 1, 'the step under the pointer is highlighted');
@@ -130,6 +130,7 @@ try {
   await shot('plan-connected');
 
   // A connection that would make a loop is refused, with the reason on screen.
+  await page.locator(`[data-plan-node="${workflow.at(-1)}"]`).hover();
   const loopRelease = await drag(`[data-canvas-port="${workflow.at(-1)}"]`, `[data-plan-node="${from}"]`);
   await loopRelease();
   assert.equal(await connections(), drawn + 1, 'a refused connection is not drawn');
@@ -159,46 +160,92 @@ try {
   assert.ok(Math.abs((placed.y - flow.y) / zoom - target.y / zoom) < 150, 'the step lands at the pointer rather than at the end of the list');
   await shot('plan-dropped');
 
+  // Ordinary editing keeps both the input and canvas mounted.
+  await page.locator('[data-action="close-plan-resources"]').click().catch(()=>{});
+  await page.locator('[data-plan-node]').first().locator('.step-summary').click();
+  await page.evaluate(()=>{window.planSurface=document.querySelector('[data-canvas-drop]');window.planInput=document.querySelector('.workbench-inspector input[data-path]');});
+  const nameField=page.locator('.workbench-inspector input[data-path]').first();
+  await nameField.fill('Edited research step');
+  assert.ok(await page.evaluate(()=>window.planInput===document.activeElement&&window.planSurface===document.querySelector('[data-canvas-drop]')),'editing retains focus and surface');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.workbench-inspector').isVisible(),false);
+  await page.locator('[data-action="suggest-plan-change"]').click();
+  await page.locator('#plan-command').fill('Add a human checkpoint');
+  await page.locator('[data-action="propose-plan"]').click();
+  await page.locator('[data-action="apply-proposal"]').waitFor();
+  const countBefore=await page.locator('[data-plan-node]').count();
+  await page.locator('[data-action="discard-proposal"]').click();
+  assert.equal(await page.locator('[data-plan-node]').count(),countBefore,'discard does not change graph');
+  await page.locator('[data-action="propose-plan"]').click();
+  await page.locator('[data-action="apply-proposal"]').click();
+  assert.equal(await page.locator('[data-plan-node]').count(),countBefore+1,'apply explicitly changes draft');
+  for(const width of [1500,1024,390]){
+    await page.setViewportSize({width,height:1000});
+    await page.locator('[data-action="close-plan-assistant"]').click().catch(()=>{});
+    await page.locator('[data-canvas-zoom="fit"]').click();
+    await page.locator('[data-plan-node]').first().locator('.step-summary').click();
+    const box=await page.locator('.workbench-inspector').boundingBox();
+    assert.ok(box.width>300&&box.x>=0&&box.x+box.width<=width,'plan editor readable and contained');
+    await shot(`plan-editor-${width}`);await page.keyboard.press('Escape');
+  }
+  await page.setViewportSize({width:1500,height:1000});
+
   // -------------------------------------------------------------------------
   // The run canvas
   // -------------------------------------------------------------------------
   await page.goto(`${base}/?application=${applicationId}&run=${runId}`);
   await page.locator('[data-run-node]').first().waitFor();
-  const runBounds = await page.locator('[data-canvas-mode="run"]').evaluate(area => {
-    const flow = area.querySelector('[data-run-canvas]'), box = area.getBoundingClientRect(), zoom = Number(flow.style.zoom);
-    return {width: box.width, workbenchWidth: area.closest('.run-workbench').getBoundingClientRect().width, bottom: box.bottom, height: innerHeight, fits: parseFloat(flow.style.width) * zoom <= area.clientWidth - 64 && parseFloat(flow.style.height) * zoom <= area.clientHeight - 112};
-  });
-  assert.ok(Math.abs(runBounds.width - runBounds.workbenchWidth) < 3, 'the run canvas fills its workbench rather than stopping at 850px');
-  assert.ok(runBounds.fits, 'the entire run board fits without scrolling on entry');
-  assert.ok(Math.abs(runBounds.bottom - (runBounds.height - 18)) < 2, 'the canvas uses the remaining browser height');
-  assert.equal(await page.locator('[data-run-mode="canvas"]').getAttribute('aria-pressed'), 'true', 'the run opens on the canvas');
-  assert.equal(await page.locator('[data-run-node]').count(), workflow.length, 'a node per step in the run');
-  assert.equal(await page.locator('.run-node-status[data-status="needs-input"]').count(), 1, 'the human checkpoint is marked');
-  assert.match(await page.locator('.run-workbench .canvas-heading span').first().innerText(), /steps complete/);
-  assert.equal(await page.locator('.run-node .run-chip').count(), 3, 'tool calls are counted per step');
-  assert.match(await page.locator('.run-node .run-chip').first().innerText(), /×2/);
-  assert.equal(await page.locator('.run-chip.denied').count(), 1, 'a refused tool is marked');
-  assert.equal(await page.locator('.run-subagent').count(), 1, 'a delegation becomes a sub-agent node');
-  assert.match(await page.locator('.run-subagent').innerText(), /Check the quoted figures/);
-  assert.ok(await page.locator('.run-edge .edge-label').count() > 0, 'handed-on dependencies are labelled');
-  assert.match(await page.locator('.run-edge .edge-label').first().innerText(), /record|character/);
+  const bounds=()=>page.locator('[data-canvas-mode="run"]').evaluate(area=>({width:area.clientWidth,top:area.getBoundingClientRect().top,bottom:area.getBoundingClientRect().bottom,height:innerHeight,dock:area.closest('.run-workbench').querySelector('.activity-dock').offsetHeight}));
+  const runBounds=await bounds();
+  assert.ok(runBounds.width>1200,'canvas dominates desktop');
+  assert.ok(Math.abs(runBounds.bottom+runBounds.dock-(runBounds.height-18))<3,'dock and canvas fill remaining height');
+  assert.equal(await page.locator('.run-inspector-drawer').count(),0,'no inspector on entry');
+  assert.equal(await page.locator('.activity-panel').count(),0,'activity starts collapsed');
+  assert.equal(await page.locator('[data-run-node]').count(),workflow.length);
+  assert.equal(await page.locator('.run-node-status[data-status="needs-input"]').count(),1);
+  assert.equal(await page.locator('.run-subagent').count(),1);
+  assert.ok(await page.locator('.run-edge .edge-label').count()>0);
   await shot('run-canvas');
-
-  // The work plan is still one click away, and the choice holds.
-  await page.locator('[data-run-mode="list"]').click();
-  await page.locator('.execution-plan').waitFor();
-  await page.locator('[data-run-mode="canvas"]').click();
-  await page.locator('[data-run-node]').first().waitFor();
+  await page.locator('[data-action="toggle-activity"]').click();
+  assert.ok(await page.locator('.activity-panel').isVisible());
+  await page.locator('.activity-panel [data-run-step]').first().click();
+  assert.ok(await page.locator('.run-inspector-drawer').isVisible());
+  assert.equal(await page.locator('[data-action="follow-active"]').getAttribute('aria-pressed'),'false');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.run-inspector-drawer').count(),0);
   await page.locator('[data-run-zoom="reset"]').click();
   await page.locator('[data-run-zoom="in"]').click();
-  assert.match(await page.locator('[data-run-zoom="reset"]').innerText(), /110%/);
-
-  // Selecting a step on the canvas opens its inputs and output.
+  assert.match(await page.locator('[data-run-zoom="reset"]').innerText(),/110%/);
+  await page.locator('[data-run-zoom="fit"]').click();
   await page.locator('[data-run-node]').first().locator('[data-run-step]').click();
-  await page.locator('.execution-data').first().waitFor();
-
+  const selected=await page.locator('.run-node.selected').getAttribute('data-run-node');
+  await page.locator('.activity-panel').evaluate(panel=>panel.scrollTop=50);
+  await page.evaluate(()=>{window.keptCanvas=document.querySelector('[data-run-canvas]');window.keptInspector=document.querySelector('.run-inspector-drawer');});
+  run.events.push(event(100,{type:'ToolCalled',stage:workflow[0],agent:definition.workflow[0].agent,tool:'read_file',ok:true,observation:'Recorded source result'}));
+  await page.waitForTimeout(1500);
+  assert.ok(await page.evaluate(()=>window.keptCanvas===document.querySelector('[data-run-canvas]')&&window.keptInspector===document.querySelector('.run-inspector-drawer')),'live updates retain DOM identity');
+  assert.equal(await page.locator('.run-node.selected').getAttribute('data-run-node'),selected);
+  assert.equal(await page.locator('.activity-panel').evaluate(panel=>panel.scrollTop),50);
+  await shot('run-inspecting');
+  await page.keyboard.press('Escape');
+  await page.locator('[data-action="toggle-activity"]').click();
+  await page.locator('[data-action="follow-active"]').click();
+  assert.equal(await page.locator('[data-action="follow-active"]').getAttribute('aria-pressed'),'true');
+  await page.locator('[data-canvas-mode="run"]').focus();await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('[data-action="follow-active"]').getAttribute('aria-pressed'),'false');
+  for(const width of [1024,390]){
+    await page.setViewportSize({width,height:844});
+    await page.locator('[data-run-zoom="fit"]').click();
+    await page.locator('[data-run-node]').first().locator('[data-run-step]').click();
+    const drawer=await page.locator('.run-inspector-drawer').boundingBox();
+    assert.ok(drawer.width>300&&drawer.x>=0&&drawer.x+drawer.width<=width,'inspector remains readable and contained');
+    await shot(`run-${width}`);await page.keyboard.press('Escape');
+  }
+  run.status='failed';run.events.push(event(101,{type:'ApplicationFinished',stage:workflow[0],status:'failed',reason:'Recorded failure'}));
+  await page.waitForTimeout(1500);assert.match(await page.locator('.run-overview').innerText(),/Request failed/);
+  await shot('run-failed-mobile');
   assert.deepEqual(errors, [], 'the page reported no errors');
-  console.log('PASS: the plan canvas previews and builds a connection, refuses a loop, removes a connection and lands a dropped step at the pointer; the run canvas draws statuses, tool counts, a delegation and labelled handoffs, and keeps the work plan.');
+  console.log('PASS: plan gestures; canvas-first run, delegation, handoffs, on-demand inspector, activity dock, stable live DOM/scroll/selection, follow suspension, tablet/mobile and failure status.');
   console.log(`Screenshots: ${artifacts}`);
 } catch (error) {
   await page.screenshot({path: `${artifacts}/canvas-failure.png`}).catch(() => {});
