@@ -1,9 +1,9 @@
 // Studio is an HTTP client. Conclave owns all persistence and execution.
 function json(value,status=200){return new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json;charset=utf-8','cache-control':'no-store'}})}
-async function boundedBody(request){
+async function boundedBody(request,limit){
  const reader=request.body?.getReader();if(!reader)return new Uint8Array();
  const chunks=[];let bytes=0;
- for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>200000){await reader.cancel();return null;}chunks.push(value);}
+ for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(limit!==null&&bytes>limit){await reader.cancel();return null;}chunks.push(value);}
  const body=new Uint8Array(bytes);let offset=0;for(const chunk of chunks){body.set(chunk,offset);offset+=chunk.length;}return body;
 }
 export default {async fetch(request,env){
@@ -14,7 +14,9 @@ export default {async fetch(request,env){
   if(request.method!=='GET'&&(request.headers.get('origin')!==url.origin||!request.headers.get('content-type')?.startsWith('application/json')))return json({error:'Use a same-origin JSON request.'},403);
   if(!env.CONCLAVE_URL)return json({error:'Configure the Conclave REST API address.'},503);
   try{
-   const body=request.method==='GET'?undefined:await boundedBody(request);if(body===null)return json({error:'Request too large.'},413);
+   const raw=env.CONCLAVE_MAX_REQUEST_BYTES??200000,limit=['none','unlimited'].includes(String(raw).toLowerCase())?null:Number(raw);
+   if(limit!==null&&(!Number.isSafeInteger(limit)||limit<1))return json({error:'Invalid CONCLAVE_MAX_REQUEST_BYTES host policy.'},503);
+   const body=request.method==='GET'?undefined:await boundedBody(request,limit);if(body===null)return json({error:`Request exceeds host limit of ${limit} bytes.`},413);
    const endpoint=new URL(aliases[path]||path,env.CONCLAVE_URL);endpoint.search=url.search;
    const headers={'accept':'application/json',...(request.method!=='GET'?{'content-type':'application/json'}:{}),...(env.CONCLAVE_API_TOKEN?{'authorization':'Bearer '+env.CONCLAVE_API_TOKEN}:{})};
    const response=await fetch(endpoint,{method:request.method,headers,...(request.method==='GET'?{}:{body}),signal:AbortSignal.timeout(path==='/api/proposals'?(env.CONCLAVE_PROPOSAL_TIMEOUT_MS||305000):(env.CONCLAVE_TIMEOUT_MS||15000))});

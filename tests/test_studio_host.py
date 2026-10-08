@@ -219,6 +219,18 @@ def test_host_planning_proposes_without_creating_or_running_application(tmp_path
     assert "available_tools" in json.dumps(provider.prompts)
 
 
+@pytest.mark.parametrize("limit", [5, 60000, None])
+def test_host_uses_pinned_run_tool_limit_without_mutating_host(tmp_path, limit):
+    tools = ToolRegistry(20000)
+    host = LocalRunHost(RunRepository(tmp_path / "runs.sqlite"), ScriptedProvider(), tools, reviewer="operator")
+    value = request()
+    value["definition"]["run_config"]["max_tool_output_chars"] = limit
+    bound = host.run_tools(value)
+    assert bound is not tools
+    assert bound.max_output_chars == limit
+    assert tools.max_output_chars == 20000
+
+
 @pytest.mark.parametrize("invalid", ["not json", {"definition": {}}, {"definition": {}, "summary": "Invalid"}])
 def test_invalid_planning_response_is_rejected(tmp_path, invalid):
     import json

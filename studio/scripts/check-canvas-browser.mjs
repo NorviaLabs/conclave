@@ -164,6 +164,13 @@ try {
   // -------------------------------------------------------------------------
   await page.goto(`${base}/?application=${applicationId}&run=${runId}`);
   await page.locator('[data-run-node]').first().waitFor();
+  const runBounds = await page.locator('[data-canvas-mode="run"]').evaluate(area => {
+    const flow = area.querySelector('[data-run-canvas]'), box = area.getBoundingClientRect(), zoom = Number(flow.style.zoom);
+    return {width: box.width, workbenchWidth: area.closest('.run-workbench').getBoundingClientRect().width, bottom: box.bottom, height: innerHeight, fits: parseFloat(flow.style.width) * zoom <= area.clientWidth - 64 && parseFloat(flow.style.height) * zoom <= area.clientHeight - 112};
+  });
+  assert.ok(Math.abs(runBounds.width - runBounds.workbenchWidth) < 3, 'the run canvas fills its workbench rather than stopping at 850px');
+  assert.ok(runBounds.fits, 'the entire run board fits without scrolling on entry');
+  assert.ok(Math.abs(runBounds.bottom - (runBounds.height - 18)) < 2, 'the canvas uses the remaining browser height');
   assert.equal(await page.locator('[data-run-mode="canvas"]').getAttribute('aria-pressed'), 'true', 'the run opens on the canvas');
   assert.equal(await page.locator('[data-run-node]').count(), workflow.length, 'a node per step in the run');
   assert.equal(await page.locator('.run-node-status[data-status="needs-input"]').count(), 1, 'the human checkpoint is marked');
@@ -182,6 +189,7 @@ try {
   await page.locator('.execution-plan').waitFor();
   await page.locator('[data-run-mode="canvas"]').click();
   await page.locator('[data-run-node]').first().waitFor();
+  await page.locator('[data-run-zoom="reset"]').click();
   await page.locator('[data-run-zoom="in"]').click();
   assert.match(await page.locator('[data-run-zoom="reset"]').innerText(), /110%/);
 

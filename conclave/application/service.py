@@ -87,10 +87,11 @@ class LocalRunHost:
         """
 
         tools = bind_resources(self.tools, self.resources, request, self.source_extensions) if self.resources is not None else self.tools
+        tools = tools.copy()
+        tools.max_output_chars = request['definition']['run_config']['max_tool_output_chars']
 
         if self.sandbox is not None:
             # The host's registry is shared between runs; a run's grant is not.
-            tools = tools.copy()
             tools.executor = self.sandbox(tools, request)
 
         return tools
@@ -394,3 +395,14 @@ def configured_host(*, workspace=None, source_dir=None, principal=None):
                         reviewer=principal.name, provider_name=name, unavailable=reason, adapters=adapters,
                         resources=resources, source_extensions=source_extensions, provider_source=source,
                         profile=profile, principal=principal, paths=paths, backends=backends)
+
+
+def request_body_limit():
+    """Host transport policy, separate from application work/output limits."""
+    value = setting("MAX_REQUEST_BYTES", "200000")
+    if str(value).lower() in {"none", "unlimited"}:
+        return None
+    limit = int(value)
+    if limit < 1:
+        raise ValueError("CONCLAVE_MAX_REQUEST_BYTES must be positive or unlimited")
+    return limit

@@ -14,6 +14,9 @@ try{
  assert.equal(new TextDecoder().decode(forwarded.options.body),'{}');
  assert.equal((await worker.fetch(request('/api/applications','POST','{}',{origin:'https://untrusted.example'}),env)).status,403);
  assert.equal((await worker.fetch(request('/api/applications','POST','x'.repeat(200001)),env)).status,413);
+ assert.equal((await worker.fetch(request('/api/applications','POST','x'.repeat(200001)),{...env,CONCLAVE_MAX_REQUEST_BYTES:300000})).status,201);
+ assert.equal((await worker.fetch(request('/api/applications','POST','x'.repeat(200001)),{...env,CONCLAVE_MAX_REQUEST_BYTES:'unlimited'})).status,201);
+ assert.equal((await worker.fetch(request('/api/applications','POST','{}'),{...env,CONCLAVE_MAX_REQUEST_BYTES:0})).status,503);
  assert.equal((await worker.fetch(request('/api/runtime'),{})).status,503);
  assert.equal((await worker.fetch(request('/api/runtime','PATCH','{}'),env)).status,405);
  globalThis.fetch=async()=>new Response(JSON.stringify({filename:'conclave_application.py',source:'from conclave.application import run_application\n'}));

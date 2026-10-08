@@ -162,6 +162,49 @@ replaces it.
 
 ## Application workflows
 
+**Settings → Limits and approvals** exposes workload limits as well as spending
+limits. Blank means unlimited for action steps, notes, tool/report text,
+concurrency, delegations and budgets. Finite runtime configuration limits must
+be positive integers. Concurrency changes scheduling, not total planned work.
+Tool output uses the saved run's limit, not the host default; accumulated shared
+state is neither capped by that setting nor silently truncated. The backend's
+actual context limits still apply. Saved applications and starter defaults keep
+their existing values until explicitly edited and saved.
+
+HTTP request size is host policy: `CONCLAVE_MAX_REQUEST_BYTES` defaults to
+200,000 and accepts a positive integer or `unlimited`/`none`. Set it on both
+Studio's proxy and the backend. Keep a finite cap on publicly exposed services
+unless another trusted layer enforces resource protection. Other schema bounds
+(record counts, field sizes, application sizes) and provider/tool timeouts remain
+unchanged; unlimited workload budgets do not disable these boundaries.
+
+Opening Run configuration runs offline **Validate application / Pre-run checks**
+against the saved application:
+
+- Required fields missing from instructions, or explicitly allowed to be empty.
+- Explicit array/string/type conflicts and disallowed requested status values.
+- Tasks requesting test/command execution or file modification without a known
+  matching declared tool (tool IDs and host descriptions inform this heuristic).
+- Explicit references to other outputs with no producing ancestor.
+- Acceptance criteria without an explicitly named verification step downstream.
+- Insufficient total/per-agent delegation budgets, depth below one, and zero
+  token or execution-time budgets. Unlimited budgets remain supported.
+
+Errors block Run. Heuristic warnings require acknowledgement for the saved
+version and are checked again on submit; reopening Run resets acknowledgement.
+Findings show evidence and proposed changes. **Make optional and save** or
+**Adjust budget and save** previews the exact change and requires confirmation,
+then validates and saves a new content version. **Edit step instructions** and
+**Open schema, tools and limits** open the existing editors; save edits before
+reopening Run. No tool or permission is automatically added. Existing runs are
+unchanged; unsaved edits must be resolved before applying a fix.
+
+These are targeted English-prose heuristics, not exhaustive semantic validation,
+full acceptance-criterion mapping, or a guarantee of valid model output. Normal
+runtime schema validation and approval gates remain active. Source authorization
+and tool availability remain checked in Run configuration; source-path/document
+existence is validated by the host during execution. No AI review is performed.
+
 Plan and run use one shared canvas renderer and card frame with mode-specific
 content and actions. Run mode is read-only; planning owns layout editing and
 connection controls. Rendering still rebuilds the DOM rather than retaining a
@@ -171,6 +214,19 @@ Both modes hide native canvas scrollbars without clipping navigation. Drag the
 background, use a trackpad, or focus the canvas and use arrow keys to pan. Fit
 shows the entire graph, including layouts larger than the manual zoom range;
 the percentage button restores 100%.
+
+Run mode fits the entire graph automatically on entry and browser resize,
+using the full available page width and remaining browser height. Manual zoom
+is preserved while run updates arrive; Fit restores automatic fitting.
+
+To debug a failed run, click the failed step (it is selected automatically when
+the failure arrives). Its inspector shows the recorded failure or stop reason
+and an expanded **Step activity** timeline with event sequence numbers, tool
+outcomes and denials, delegation reasons, and budget warnings or limits. The
+inspector also shows the recorded backend and any saved inputs/results. Failures
+without step attribution are explicitly labelled as run-level failures, not
+blamed on a guessed step. Private logs, raw replies and tool arguments remain
+excluded; a generic host error may require the operator to inspect host logs.
 
 Canvas view controls and step inspector utilities use icons with hover titles
 and accessible labels. Run, Add a step, and Tidy layout retain text beside their

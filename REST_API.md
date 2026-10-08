@@ -50,7 +50,23 @@ and the dev server above remains the way to reach the UI.
 All payloads and responses are JSON. The API contract version is 1. Every run
 pins an immutable application definition and saved revision. Application IDs are
 opaque strings; run IDs come from the service. Request bodies are limited to
-200 KB. Responses expose actual events/results, without private checkpoints.
+200,000 bytes by default. Set the host's `CONCLAVE_MAX_REQUEST_BYTES` to a
+positive integer, or `unlimited`/`none` to disable that transport cap. Configure
+the Studio proxy and backend consistently; upstream servers may impose their
+own caps. Responses expose actual events/results, without private checkpoints.
+
+All `run_config` and `run_budget` limits accept JSON `null` for unlimited.
+`max_tool_output_chars` caps individual tool responses and delegated reports,
+not accumulated shared state. Each run uses the pinned application's output
+limit on an isolated registry, including sandbox execution. Concurrency remains
+controlled by `fan_out_limit`; no shared state is silently truncated. Model
+backend context limits still apply. Existing saved defaults are unchanged.
+
+Step-specific failure and stop events (`ApplicationFinished`) include `stage`
+and a public `reason`, including output validation failures and host execution
+errors. Run-level failures may omit `stage`; clients must not assume the last
+started step caused them, since independent steps can run concurrently. Private
+provider logs, raw model replies and tool arguments are not exposed in run events.
 
 | Method | Path | Purpose / request |
 | --- | --- | --- |

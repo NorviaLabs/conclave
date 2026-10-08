@@ -23,7 +23,8 @@ export function runStepStatus(d,run,index){
   if(!step)return 'Waiting';
   if(run.activeStep===index)return run.mode==='waiting_human'?'Needs input':'Working';
   if(run.completedSteps?run.completedSteps.includes(step.id):index<=run.step)return 'Complete';
-  if(run.mode==='failed'&&run.events?.findLast(event=>event.type==='StageStarted')?.stage===step.id)return 'Failed';
+  const finished=run.events?.findLast(event=>event.type==='ApplicationFinished');
+  if(run.mode==='failed'&&(finished?.stage||(!finished?run.events?.findLast(event=>event.type==='StageStarted')?.stage:null))===step.id)return 'Failed';
   if(STOPPED.includes(run.mode))return 'Incomplete';
   return planConnections(d).filter(edge=>edge.to===step.id).every(edge=>run.completedSteps?.includes(edge.from))?'Ready':'Waiting';
 }

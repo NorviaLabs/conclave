@@ -54,6 +54,13 @@ def test_backend_accepts_valid_canvas_connectors_and_finite_warnings():
     validate_definition(definition)
 
 
+@pytest.mark.parametrize("key", ["max_tool_steps", "max_notes", "max_note_chars", "max_tool_output_chars", "fan_out_limit"])
+def test_application_accepts_unlimited_runtime_configuration(key):
+    definition = request()["definition"]
+    definition["run_config"][key] = None
+    validate_definition(definition)
+
+
 @pytest.mark.parametrize("fields", [None, [None], [{"key": "id", "label": "ID", "type": "string", "required": True}],
     [{"key": "x", "label": "", "type": "number", "required": True}],
     [{"key": "x", "label": "X", "type": "enum", "required": True, "options": []}],

@@ -4,6 +4,9 @@ import {applicationTypes,rolePresets,toolDescriptors,outputTypes,outputPresets,c
 import {planConnections,canvasPositions,planShape,setCanvasMetrics,canvasEdgeCurve,canvasNodeWidth,canvasNodeHeight,validateRequestInputs,backendOptions,backendModels,backendIssue,backendLabel,defaultBackend} from '/definition.js';
 import {catalogueMarkup} from '/catalogue-ui.js';
 import {canvasFitZoom,uiIcon} from '/canvas-ui.js';
+import {preflightIssues,resolvePreflightIssue} from '/definition.js';
+let preflightReviewed=null;
+const preflightVersion=()=>JSON.stringify([currentId,current().revision,current().definition,preflightIssues(current().definition)]);
 import {reorderPlan,duplicatePlanStep,removePlanStep,insertPlanStep,insertMemberStep,attachPlanTool,connectPlanSteps,disconnectPlanSteps,moveCanvasStep,tidyCanvas,layoutSaveDefinition} from '/plan.js';
 import {workbenchMarkup,executionPlanMarkup,executionDetailMarkup,canvasEdgePaths} from '/workbench-ui.js';
 import {runProgressMarkup} from '/run-canvas.js';
@@ -70,7 +73,7 @@ async function load(){
 }
 function field(label,path,value,kind='input',options=[]){
   const id=`field-${path.replaceAll('.','-')}`,attrs=`id="${escape(id)}" data-path="${escape(path)}" ${saving?'disabled':''}`;
-  const control=kind==='textarea'?`<textarea ${attrs} rows="3">${escape(value)}</textarea>`:kind==='select'?`<select ${attrs}>${options.map(option=>{const[val,text,disabled]=Array.isArray(option)?option:[option,option];return `<option ${disabled?'disabled':''} value="${escape(val)}" ${val===value?'selected':''}>${escape(text)}</option>`;}).join('')}</select>`:`<input ${attrs} ${kind==='number'?'type="number" step="any" min="0" max="1000000"':`type="text" maxlength="${path==='description'?2000:100}"`} value="${escape(value)}">`;
+  const control=kind==='textarea'?`<textarea ${attrs} rows="3">${escape(value)}</textarea>`:kind==='select'?`<select ${attrs}>${options.map(option=>{const[val,text,disabled]=Array.isArray(option)?option:[option,option];return `<option ${disabled?'disabled':''} value="${escape(val)}" ${val===value?'selected':''}>${escape(text)}</option>`;}).join('')}</select>`:`<input ${attrs} ${kind==='number'?'type="number" step="any" min="0" max="1000000"':`type="text" maxlength="${path==='description'?2000:100}"`} value="${escape(value??'')}">`;
   return `<div class="field"><label for="${escape(id)}">${escape(label)}</label>${control}</div>`;
 }
 // What runs one member or step. The catalogue is the host's answer about this
@@ -103,6 +106,8 @@ function render(){
         :`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>${preview?.live?'Run again':'Run'}</button>`}${view==='plan'&&preview?.live&&!running?'<button class="button" data-action="edit-plan">Edit plan</button>':''}${view==='setup'?'<button class="button" data-action="back-to-plan">Back to canvas</button>':''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':layoutSaved?'Layout saved':`Saved · version ${current().revision}`}</span></div></header>
     <div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():preview?.live?runMarkup():planMarkup(draft())}</div></main></div>`;
   for(const disclosure of disclosures){const element=$('app').querySelector(`[data-disclosure="${CSS.escape(disclosure.key)}"]`);if(element)element.open=disclosure.open;}
+  $('main-panel').classList.toggle('run-workspace',!!preview?.live&&view!=='setup');
+  sizeRunCanvas();
   for(const scroll of scrolls){const element=$('app').querySelector(scroll.selector);if(element){element.scrollTop=scroll.top;element.scrollLeft=scroll.left;}}
   if(key){const attribute=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase()),next=$('app').querySelector(`[data-${attribute}="${CSS.escape(val)}"]${index!==undefined?`[data-index="${CSS.escape(index)}"]`:''}`);next?.focus({preventScroll:true});if(next&&typeof start==='number'&&['INPUT','TEXTAREA'].includes(next.tagName)&&next.type!=='number')try{next.setSelectionRange(start,end);}catch{}}
 }
@@ -130,10 +135,18 @@ function applyCanvasZoom(){
 }
 function applyRunZoom(){
   const flow=$('app').querySelector('.canvas-flow[data-run-canvas]');if(!flow)return;
-  flow.style.zoom=runCanvasZoom??1;
+  const area=flow.closest('.canvas-viewport');
+  const zoom=runCanvasZoom??canvasFitZoom(area.clientWidth,area.clientHeight,parseFloat(flow.style.width),parseFloat(flow.style.height));
+  flow.style.zoom=zoom;
   const level=$('app').querySelector('.run-workbench .canvas-view-level');
-  if(level)level.textContent=`${Math.round((runCanvasZoom??1)*100)}%`;
+  if(level)level.textContent=`${Math.round(zoom*100)}%`;
 }
+function sizeRunCanvas(){
+  const area=$('app').querySelector('[data-canvas-mode="run"]');if(!area)return;
+  area.style.height=`${Math.max(200,window.innerHeight-area.getBoundingClientRect().top-window.scrollY-18)}px`;
+  applyRunZoom();
+}
+window.addEventListener('resize',sizeRunCanvas);
 function canvasFullscreen(){
   const plan=$('app').querySelector('.workbench-plan');if(!plan)return;
   if(document.fullscreenElement)document.exitFullscreen?.();else plan.requestFullscreen?.();
@@ -206,6 +219,10 @@ function selectLiveRecord(record){
   if(currentId!==record.request.application_id||view!=='plan')return;
   if(old?.runId!==run.runId){requests.live=run.task;requestInputs.live[currentId]=structuredClone(run.inputs);requestResources[currentId]=record.request.resources?.source||'';}
   if(old?.review?.id!==run.review?.id)humanDraft={decision:'',body:''};
+  if(old?.runId!==run.runId||old?.mode!==run.mode){
+    const finished=run.events.findLast(event=>event.type==='ApplicationFinished'&&['failed','stopped'].includes(event.status));
+    selectedRunStepId=finished?.stage||null;
+  }
   preview=run;liveError='';
   const url=new URL(location.href);url.searchParams.set('application',currentId);url.searchParams.set('run',run.runId);history.replaceState(null,'',url);
   render();followLiveRun();
@@ -236,6 +253,9 @@ async function liveAction(action){
     let record;
     if(action==='start-live'){
       const task=requests.live.trim(),d=current().definition;
+      validateDefinition(d);
+      const issues=preflightIssues(d);
+      if(issues.some(issue=>issue.severity==='error')||issues.length&&preflightReviewed!==preflightVersion())throw new Error('Resolve errors and review the pre-run warnings before running.');
       if(!task||task.length>20000)throw new Error('Describe what you need the team to do.');
       const inputs=validateRequestInputs(d,requestInputs.live[currentId]||{});
       const source=requestResources[currentId]||'';
@@ -264,7 +284,7 @@ function studioLiveMarkup(requestOnly=false){
   const visible=d.views.filter(view=>Array.isArray(state[view.collection])?state[view.collection].length:!!state[view.collection]);
   const outputs=visible.length?`<details class="run-results" data-disclosure="live-results"><summary>Results · ${visible.length}</summary>${visible.map(view=>`<details class="quiet-details" data-disclosure="live-output-${escape(view.id)}"><summary>${escape(view.title)}</summary>${viewMarkup(view,state,d)}</details>`).join('')}</details>`:'<div class="empty">Results will appear as the team completes its work.</div>';
   const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,detail:executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}),escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
-  return `${dirty()?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${liveRunMarkup(saved,preview?.live?preview:null,{escape,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime,busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly})}`;
+  return `${dirty()?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${liveRunMarkup(saved,preview?.live?preview:null,{escape,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime,busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion()})}`;
 }
 function recordFieldForm(collection){return (collection.fields||[]).map(f=>{const value=humanDraft.fields?.[f.key]??'',attrs=`id="human-field-${escape(f.key)}" data-human-field="${escape(f.key)}"`;return `<div class="field"><label for="human-field-${escape(f.key)}">${escape(f.label)}${f.required?' · required':''}</label>${['enum','boolean'].includes(f.type)?`<select ${attrs}><option value="">Choose…</option>${(f.type==='boolean'?['true','false']:f.options).map(option=>`<option value="${escape(option)}" ${String(value)===option?'selected':''}>${escape(option)}</option>`).join('')}</select>`:`<input ${attrs} type="${f.type==='number'?'number':f.type==='date'?'date':'text'}" ${f.type==='number'?'step="any"':''} value="${escape(value)}">`}</div>`;}).join('');}
 function humanRecordValues(collection){const values={};for(const f of collection.fields||[]){const value=humanDraft.fields?.[f.key];if(value===undefined||value==='')continue;values[f.key]=f.type==='number'?Number(value):f.type==='boolean'?value==='true':value;}return validateRecordValues(values,collection.fields||[]);}
@@ -294,7 +314,7 @@ function viewMarkup(view,state,d){
 function markDirty(){const span=$('save-state');if(span){span.textContent='Unsaved changes';span.classList.add('dirty');}const name=$('application-name');if(name&&!preview?.live)name.textContent=draft().name;}
 function updateField(path,value){
   const d=draft(),parts=path.split('.');if(parts[0]==='budget_warnings')d.budget_warnings??={};let object=d;for(const part of parts.slice(0,-1))object=object[part];const key=parts.at(-1),before=object[key];
-  if(path.endsWith('.statuses'))value=value.split(',').map(x=>x.trim()).filter(Boolean);if(path.endsWith('.required'))value=value==='true';if(path.startsWith('run_budget.')||path.startsWith('budget_warnings.'))value=value===''?null:Number(value);object[key]=value;
+  if(path.endsWith('.statuses'))value=value.split(',').map(x=>x.trim()).filter(Boolean);if(path.endsWith('.required'))value=value==='true';if(path.startsWith('run_config.')||path.startsWith('run_budget.')||path.startsWith('budget_warnings.'))value=value===''?null:Number(value);object[key]=value;
   if(parts[0]==='workflow'&&key==='id'){for(const edge of d.connections||[]){if(edge.from===before)edge.from=value;if(edge.to===before)edge.to=value;}if(d.canvas?.positions?.[before]){d.canvas.positions[value]=d.canvas.positions[before];delete d.canvas.positions[before];}}
   if(parts[0]==='integrations'&&key==='connector'){const connector=connectorDescriptors.find(c=>c.id===value);object.mode=connector.default_mode;object.scope='';render();}
   if(parts[0]==='agents'&&key==='kind'&&value==='human')object.tools=[];
@@ -360,6 +380,7 @@ function showView(next){if(!['plan','setup'].includes(next)||saving||liveBusy)re
 function openRunConfiguration(){
   if(saving||liveBusy)return;
   if(!current().revision){notify('Save this application before running it.');return;}
+  preflightReviewed=null;
   view='plan';liveError='';render();
   $('run-configuration').innerHTML=studioLiveMarkup(true);
   $('run-dialog-title').textContent=preview?.live?'Run again':'Run configuration';
@@ -515,7 +536,21 @@ $('run-form').addEventListener('input',event=>{
   if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;
   if(event.target.dataset.requestField){requestInputs.live[currentId]??={};requestInputs.live[currentId][event.target.dataset.requestField]=event.target.value;}
 });
+$('run-form').addEventListener('click',async event=>{
+  const button=event.target.closest('button');if(!button||saving||liveBusy)return;
+  if(button.hasAttribute('data-preflight-settings')){$('run-dialog').close();view='setup';buildStep=5;advanced=true;render();return;}
+  if(button.dataset.preflightEdit){$('run-dialog').close();preview=null;editPlanStep(button.dataset.preflightEdit);return;}
+  if(button.dataset.preflightFix===undefined)return;
+  const issue=preflightIssues(current().definition)[Number(button.dataset.preflightFix)];if(!issue)return;
+  if(dirty()){notify('Save or resolve your unsaved edits before applying this fix.');return;}
+  if(!issue.fix)return;
+  if(!confirm(`Save this change as a new application version?\n\n${issue.fix.preview}\n\n${issue.fix.kind==='optional'?'Required non-empty values will no longer be enforced for this field.':'This increases the allowed work budget; it does not approve any tools.'}`))return;
+  try{drafts.set(currentId,resolvePreflightIssue(current().definition,issue));await saveApplication();}
+  catch(error){notify(error.message);}
+  $('run-configuration').innerHTML=studioLiveMarkup(true);
+});
 $('run-form').addEventListener('change',event=>{
+  if(event.target.hasAttribute('data-preflight-review')){preflightReviewed=event.target.checked?preflightVersion():null;$('run-configuration').innerHTML=studioLiveMarkup(true);}
   if(event.target.hasAttribute('data-source-resource')){requestResources[currentId]=event.target.value;$('run-configuration').innerHTML=studioLiveMarkup(true);}
 });
 $('run-form').addEventListener('submit',async event=>{
@@ -535,7 +570,7 @@ $('app').addEventListener('click',async event=>{
     if(button.dataset.canvasPort){connectSource=button.dataset.canvasPort;selectedEdge=null;render();return;}
     if(button.dataset.canvasDisconnect){const from=button.dataset.canvasDisconnect,to=button.dataset.canvasDisconnectTo;selectedEdge=null;updatePlan(disconnectPlanSteps(draft(),from,to));notify('Connection removed.');return;}
     if(button.dataset.canvasZoom){const mode=button.dataset.canvasZoom;if(mode==='fit'){fitCanvas('plan');return;}canvasZoom=mode==='reset'?null:Math.max(.4,Math.min(1.6,(canvasZoom??1)+(mode==='in'?.1:-.1)));applyCanvasZoom();return;}
-    if(button.dataset.runZoom){const mode=button.dataset.runZoom;if(mode==='fit'){fitCanvas('run');return;}runCanvasZoom=mode==='reset'?null:Math.max(.4,Math.min(1.6,(runCanvasZoom??1)+(mode==='in'?.1:-.1)));applyRunZoom();return;}
+    if(button.dataset.runZoom){const mode=button.dataset.runZoom;if(mode==='fit'){runCanvasZoom=null;applyRunZoom();const area=$('app').querySelector('[data-canvas-mode="run"]');area.scrollLeft=0;area.scrollTop=0;return;}const flow=$('app').querySelector('[data-run-canvas]');runCanvasZoom=mode==='reset'?1:Math.max(.4,Math.min(1.6,Number(flow?.style.zoom||1)+(mode==='in'?.1:-.1)));applyRunZoom();return;}
     if(button.dataset.planSelect){editPlanStep(button.dataset.planSelect);return;}
     if(button.dataset.runStep){selectedRunStepId=button.dataset.runStep;render();return;}
     if(button.dataset.assistantExample){proposeCommand(button.dataset.assistantExample);return;}
@@ -614,10 +649,10 @@ function generatedRequestMarkup(d,mode){return `<div class="generated-inputs">${
 // The limits a run will stop at, said once, so the form can stay closed.
 function limitsStated(d){
   const set=[['tool_calls','Tool uses'],['wall_clock_seconds','Seconds'],['tokens','AI usage'],['cost_usd','Cost']];
-  const stated=set.filter(([key])=>d.run_budget?.[key]!==undefined&&d.run_budget[key]!=='').map(([key,label])=>`${label.toLowerCase()} ${d.run_budget[key]}`);
+  const stated=set.filter(([key])=>d.run_budget?.[key]!==undefined&&d.run_budget[key]!==null&&d.run_budget[key]!=='').map(([key,label])=>`${label.toLowerCase()} ${d.run_budget[key]}`);
   return stated.length?stated.join(' · '):'no limit';
 }
-function controlsMarkup(d){const warnings=d.budget_warnings||{};return `<div class="step-heading"><div><span class="eyebrow">06 · CONTROLS</span><h2>Limits and approvals</h2></div></div><section class="panel"><details class="quiet-details" data-disclosure="budget-limits"><summary>Spending and time limits · ${limitsStated(d)}</summary><p class="field-help">Blank means no limit. Limits apply to local AI runs; warnings use recorded usage.</p><div class="budget-grid"><strong>Resource</strong><strong>Warn me</strong><strong>Stop</strong>${[['tool_calls','Tool uses'],['wall_clock_seconds','Seconds'],['tokens','AI usage (text units)'],['cost_usd','Cost · USD']].map(([key,label])=>`<span>${label}</span>${runtime.features?.budget_warnings?field('Warning',`budget_warnings.${key}`,warnings[key]??'','number'):'<span>Unavailable on this host</span>'}${field('Stop work',`run_budget.${key}`,d.run_budget[key]??'','number')}`).join('')}</div></details></section><section class="panel"><h3>Approvals</h3><p>Changes to files and outgoing messages need approval when tools are connected.</p></section><section class="panel"><h3>Check the results</h3><p>Run the saved application to inspect actual results and their sources.</p></section>`;}
+function controlsMarkup(d){const warnings=d.budget_warnings||{};return `<div class="step-heading"><div><span class="eyebrow">06 · CONTROLS</span><h2>Limits and approvals</h2></div></div><section class="panel"><details class="quiet-details" data-disclosure="budget-limits"><summary>Spending and time limits · ${limitsStated(d)}</summary><p class="field-help">Blank means no limit. Limits apply to local AI runs; warnings use recorded usage.</p><div class="budget-grid"><strong>Resource</strong><strong>Warn me</strong><strong>Stop</strong>${[['tool_calls','Tool uses'],['wall_clock_seconds','Seconds'],['tokens','AI usage (text units)'],['cost_usd','Cost · USD']].map(([key,label])=>`<span>${label}</span>${runtime.features?.budget_warnings?field('Warning',`budget_warnings.${key}`,warnings[key]??'','number'):'<span>Unavailable on this host</span>'}${field('Stop work',`run_budget.${key}`,d.run_budget[key]??'','number')}`).join('')}</div></details></section><section class="panel"><h3>Workload limits</h3><p class="field-help">Blank means unlimited. Parallel steps control concurrency only. Tool/report characters do not limit accumulated shared state. Existing saved limits remain in effect until you change and save them.</p><div class="input-grid">${[['max_tool_steps','Agent action steps'],['max_notes','Retained private notes'],['max_note_chars','Characters per note'],['max_tool_output_chars','Characters per tool response / delegated report'],['fan_out_limit','Parallel steps']].map(([key,label])=>field(label,`run_config.${key}`,d.run_config[key]??'','number')).join('')}${[['max_delegations','Total AI step starts and delegations'],['max_per_agent','Starts per AI member'],['max_depth','Agent nesting depth']].map(([key,label])=>field(label,`run_budget.${key}`,d.run_budget[key]??'','number')).join('')}</div></section><section class="panel"><h3>Approvals</h3><p>Changes to files and outgoing messages need approval when tools are connected.</p></section><section class="panel"><h3>Check the results</h3><p>Run the saved application to inspect actual results and their sources.</p></section>`;}
 
 function composeCatalogApplication(templateId,roles=[],tools={}){
   const template=templates.find(t=>t.id===templateId),d=template?structuredClone(template.definition):emptyDefinition();

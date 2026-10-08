@@ -26,10 +26,8 @@ from urllib.parse import (
 
 from .api import TenantAPIs, reject_nonfinite
 from .application.principal import Principal, resolve_principal
-from .application.service import setting
+from .application.service import setting, request_body_limit
 
-
-MAX_BODY = 200_000
 
 JSON_TYPE = "application/json"
 
@@ -81,14 +79,15 @@ def principal_from(scope, headers, *, principal_for=None, fallback=None) -> Prin
 
 async def read_body(receive) -> bytes:
     chunks, total = [], 0
+    limit = request_body_limit()
 
     while True:
         message = await receive()
         chunk = message.get("body", b"")
         total += len(chunk)
 
-        if total > MAX_BODY:
-            raise TooLarge("Request too large")
+        if limit is not None and total > limit:
+            raise TooLarge(f"Request exceeds host limit of {limit} bytes")
 
         chunks.append(chunk)
 

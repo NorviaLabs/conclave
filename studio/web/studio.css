@@ -125,7 +125,7 @@
 .run-workbench{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;background:var(--rail);overflow:hidden;margin-top:12px}
 .run-workbench .canvas-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--dim)}
 .run-request-line{margin:12px 0;color:var(--muted)}
-.run-workbench .plan-canvas{height:var(--plan-height);padding:32px}
+.run-workbench .plan-canvas{max-width:none;height:var(--plan-height);padding:32px}
 .run-workbench-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,320px);gap:16px;align-items:start}
 .run-workbench-layout .run-workbench{margin-top:0}
 @media(max-width:1200px){.run-workbench-layout{grid-template-columns:minmax(0,1fr)}}
@@ -247,6 +247,7 @@
 .plan-workspace,.main{padding:12px 18px 18px}
 /* The canvas is the view: everything else is one line or one click away. */
 .run-workbench-layout{grid-template-columns:minmax(0,1fr)}
+.main.run-workspace{max-width:none}
 /* Secondary panels float over the canvas instead of taking its width. */
 .calm-workbench{position:relative}
 .calm-workbench .workbench-resources{position:absolute;left:0;top:0;bottom:0;width:min(260px,24vw);z-index:5;border-radius:6px;box-shadow:10px 0 30px #0008;background:var(--panel)}

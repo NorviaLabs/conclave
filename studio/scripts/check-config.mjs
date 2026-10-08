@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {runInNewContext} from 'node:vm';
 import {hostConfig} from './config.mjs';
 import {emptyDefinition,validateDefinition} from '../shared/definition.js';
 import {applicationTypes,toolDescriptors,registerHostTools} from '../shared/catalogue.js';
 const defaults=hostConfig({});assert.equal(defaults.port,8787);assert.equal(defaults.bridgeTimeout,15000);
+assert.equal(defaults.maxRequestBytes,200000);
+assert.equal(hostConfig({CONCLAVE_MAX_REQUEST_BYTES:'unlimited'}).maxRequestBytes,null);
+assert.equal(hostConfig({CONCLAVE_MAX_REQUEST_BYTES:'500000'}).maxRequestBytes,500000);
+assert.throws(()=>hostConfig({CONCLAVE_MAX_REQUEST_BYTES:'0'}));
 const custom=hostConfig({STUDIO_PORT:'8788',CONCLAVE_API_TIMEOUT_MS:'25000',CONCLAVE_API_URL:'http://127.0.0.1:9090',CONCLAVE_API_TOKEN:'test-token'});
 assert.equal(custom.port,8788);assert.equal(custom.bridgeTimeout,25000);assert.equal(custom.apiUrl,'http://127.0.0.1:9090');assert.equal(custom.apiToken,'test-token');
 for(const value of ['0','-1','NaN','1.5'])assert.throws(()=>hostConfig({CONCLAVE_API_TIMEOUT_MS:value}));
@@ -12,6 +17,18 @@ assert.equal(applicationTypes.length,18);
 registerHostTools([{id:'custom_lookup',name:'Custom lookup',description:'Host registered',permission:'read',category:'Host tools'}]);
 assert.ok(toolDescriptors.some(tool=>tool.id==='custom_lookup'));
 const d=emptyDefinition();d.agents[0].tools=['custom_lookup'];validateDefinition(d);
+for(const key of Object.keys(d.run_config)){const unlimited=emptyDefinition();unlimited.run_config[key]=null;validateDefinition(unlimited);unlimited.run_config[key]=0;assert.throws(()=>validateDefinition(unlimited));}
+const studioSource=await readFile(new URL('../web/studio.js',import.meta.url),'utf8');
+const fieldCode=studioSource.slice(studioSource.indexOf('function field('),studioSource.indexOf('// What runs one member or step.'));
+const form={escape:value=>String(value),saving:false};
+runInNewContext(fieldCode,form);
+assert.match(form.field('Limit','run_config.max_tool_output_chars',null,'number'),/value=""/,'unlimited values render blank');
+const conversion=studioSource.slice(studioSource.indexOf("  if(path.endsWith('.statuses'))"),studioSource.indexOf("  if(parts[0]==='workflow'"));
+for(const input of ['', '50000']){
+ const context={path:'run_config.max_tool_output_chars',value:input,object:{},key:'max_tool_output_chars'};
+ runInNewContext(conversion,context);
+ assert.equal(context.object.max_tool_output_chars,input===''?null:50000,'runtime limit editing stores numbers or null');
+}
 d.agents[0].tools=['<script>'];assert.throws(()=>validateDefinition(d));d.agents[0].tools=[];
 const source=(await readFile(new URL('../web/advanced.js',import.meta.url),'utf8')).replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href));
 const {contractMarkup}=await import('data:text/javascript,'+encodeURIComponent(source));

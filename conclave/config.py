@@ -18,8 +18,9 @@ class RunConfig:
 
     `max_tool_steps` bounds the loop: an agent that has not finished by
     then is told it ran out of steps and hands back what it has.
-    `max_tool_output_chars` bounds any text that goes into a prompt, from
-    a tool or from a delegated agent's report.
+    `max_tool_output_chars` bounds individual tool responses and delegated
+    agent reports, not accumulated shared state or the complete prompt.
+    None means unlimited for each field, including fan-out concurrency.
     """
 
     max_tool_steps: int | None

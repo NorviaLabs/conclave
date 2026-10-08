@@ -4,6 +4,8 @@
 // No browser and no provider calls.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {runInNewContext} from 'node:vm';
+import {canvasFitZoom} from '../web/canvas-ui.js';
 // A web module loads in node once its absolute browser specifiers point at the
 // file they are served from. Modules that import each other become data: URLs,
 // so each one carries its own rewritten specifiers.
@@ -26,6 +28,27 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({'
 const agentName = (d, id) => d.agents.find(agent => agent.id === id)?.name || id;
 const outputName = (d, key) => d.state.find(item => item.key === key)?.label || key;
 const capabilityName = id => id.replaceAll('_', ' ');
+
+// Exercise the browser sizing functions without requiring a browser or API.
+const studioSource = await readFile(new URL('../web/studio.js', import.meta.url), 'utf8');
+const runSizing = studioSource.slice(studioSource.indexOf('function applyRunZoom(){'), studioSource.indexOf("window.addEventListener('resize',sizeRunCanvas);"));
+const area = {clientWidth: 1800, clientHeight: 0, style: {}, getBoundingClientRect: () => ({top: 240})};
+Object.defineProperty(area.style, 'height', {set(value){area.clientHeight = parseFloat(value);}});
+const flow = {style: {width: '2800px', height: '1200px'}, closest: () => area};
+const level = {};
+const app = {querySelector: selector => selector.includes('canvas-flow') ? flow : selector.includes('canvas-view-level') ? level : area};
+const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0}, canvasFitZoom, runCanvasZoom: null};
+runInNewContext(`${runSizing}\nsizeRunCanvas();`, sizing);
+assert.equal(area.clientHeight, 742, 'the run canvas fills the remaining browser height');
+assert.equal(flow.style.zoom, canvasFitZoom(1800, 742, 2800, 1200), 'the whole run board fits on first render');
+assert.equal(level.textContent, `${Math.round(flow.style.zoom * 100)}%`, 'the level reports the fitted scale');
+sizing.window.innerHeight = 800;
+runInNewContext('sizeRunCanvas();', sizing);
+assert.equal(area.clientHeight, 542, 'resize uses the new available height');
+assert.equal(flow.style.zoom, canvasFitZoom(1800, 542, 2800, 1200), 'automatic fit follows resize');
+sizing.runCanvasZoom = 1.2;
+runInNewContext('sizeRunCanvas();', sizing);
+assert.equal(flow.style.zoom, 1.2, 'manual zoom survives sizing and rerenders');
 
 // =========================================================================
 // The plan canvas
@@ -256,6 +279,42 @@ assert.equal(runStepStatus(plan, failedRun, 0), 'Failed', 'the unfinished step t
 assert.equal(runStepStatus(plan, failedRun, 1), 'Incomplete', 'downstream steps are not falsely marked failed');
 assert.match(runCanvasMarkup(plan, failedRun, 'step_1', runContext), /data-run-node="step_1" data-status="failed"/, 'failed styling is attached to the card');
 assert.equal(runStepStatus(plan, projectLiveRun({...run, status: 'failed'}), 0), 'Complete', 'failure does not change completed steps');
+const diagnosticRun={...failedRun,events:[
+  {type:'StageStarted',stage:'step_1',sequence:1},
+  {type:'StageStarted',stage:'step_2',sequence:2},
+  {type:'ToolDenied',stage:'step_1',tool:'write_file',reason:'Approval <refused>',sequence:3,arguments:{secret:'hidden'}},
+  {type:'ToolCalled',stage:'step_1',tool:'read_file',ok:false,output_chars:42,truncated:true,sequence:4,observation:'private output'},
+  {type:'BudgetExceeded',stage:'step_1',dimension:'tokens',used:101,limit:100,sequence:5},
+  {type:'ApplicationFinished',stage:'step_1',status:'failed',reason:'Invalid <output>',sequence:6}
+]};
+assert.equal(runStepStatus(plan,diagnosticRun,0),'Failed','terminal stage attribution wins over the last parallel start');
+assert.equal(runStepStatus(plan,diagnosticRun,1),'Incomplete','a parallel sibling is not blamed');
+const diagnostics=executionDetailMarkup(plan,diagnosticRun,null,{escape,agentName,outputName,capabilityName});
+assert.match(diagnostics,/<h3>Read the sources<\/h3>/,'the failed step is the default selection');
+assert.match(diagnostics,/Step failed/);
+assert.match(diagnostics,/Invalid &lt;output&gt;/);
+assert.match(diagnostics,/activity" open/,'diagnostics expand on failure');
+assert.match(diagnostics,/#3 · ToolDenied/);
+assert.match(diagnostics,/Approval &lt;refused&gt;/);
+assert.match(diagnostics,/Tool: read file/);
+assert.match(diagnostics,/Output: 42 characters \(truncated\)/);
+assert.match(diagnostics,/Budget: tokens/);
+assert.match(diagnostics,/Used: 101/);
+assert.match(diagnostics,/Limit: 100/);
+assert.match(diagnostics,/Inputs available when this step started/,'failed steps retain their dependency inputs');
+assert.doesNotMatch(diagnostics,/private output|hidden/,'raw observations and tool arguments are not displayed');
+assert.doesNotMatch(executionDetailMarkup(plan,diagnosticRun,'step_2',{escape,agentName,outputName,capabilityName}),/Invalid &lt;output&gt;/,'step failures stay scoped');
+const unattributed={...diagnosticRun,events:diagnosticRun.events.map(event=>event.type==='ApplicationFinished'?{...event,stage:undefined}:event)};
+assert.equal(runStepStatus(plan,unattributed,1),'Incomplete','run-level failures do not guess which parallel step failed');
+assert.match(executionDetailMarkup(plan,unattributed,'step_2',{escape,agentName,outputName,capabilityName}),/did not identify a responsible step/);
+assert.match(executionDetailMarkup(plan,{...diagnosticRun,mode:'stopped',events:diagnosticRun.events.map(event=>event.type==='ApplicationFinished'?{...event,status:'stopped'}:event)},null,{escape,agentName,outputName,capabilityName}),/Step stopped/);
+const selectionCode=studioSource.slice(studioSource.indexOf("  if(old?.runId!==run.runId||old?.mode!==run.mode){"),studioSource.indexOf("  preview=run;liveError='';"));
+const selection={old:{runId:'same',mode:'running'},run:{runId:'same',mode:'failed',events:diagnosticRun.events},selectedRunStepId:'step_2'};
+runInNewContext(selectionCode,selection);
+assert.equal(selection.selectedRunStepId,'step_1','a new failure selects the responsible step');
+selection.old.mode='failed';selection.selectedRunStepId='step_2';
+runInNewContext(selectionCode,selection);
+assert.equal(selection.selectedRunStepId,'step_2','subsequent refreshes preserve a user-selected sibling');
 // The run canvas carries the same view controls, inside itself.
 assert.match(canvas, /class="canvas-view"/);
 assert.match(canvas, /data-run-zoom="out"/);
@@ -452,7 +511,6 @@ for(const mode of ['plan','run']){
   if(mode==='run')assert.doesNotMatch(card,/data-plan-node|data-plan-tool-target|data-canvas-port/);
 }
 assert.match(canvas,/data-canvas-mode="run"/);
-const {canvasFitZoom}=await import(url('../web/canvas-ui.js'));
 assert.equal(canvasFitZoom(1000,700,400,220),1);
 assert.equal(canvasFitZoom(1000,700,12000,600),936/12000,'wide saved layouts fit below the manual zoom minimum');
 assert.equal(canvasFitZoom(1000,700,600,10000),588/10000,'tall layouts and delegations fit');
@@ -462,6 +520,7 @@ for(const mode of ['plan','run']){
   assert.match(frame,/="fit" aria-label="Fit entire graph"/);
 }
 const canvasStyles=await readFile(new URL('../web/studio.css',import.meta.url),'utf8');
+assert.match(canvasStyles,/\.run-workbench \.plan-canvas\{[^}]*max-width:none/,'the run canvas overrides the legacy 850px canvas width cap');
 assert.match(canvasStyles,/\.canvas-viewport\{scrollbar-width:none;overflow:auto;/,'scrollbars are hidden without disabling navigation');
 assert.match(canvasStyles,/\.canvas-viewport::-webkit-scrollbar\{display:none\}/);
 for(const mode of ['plan','run']){

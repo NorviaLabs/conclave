@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .application.catalogue import configured_data, starter_definitions
 from .application.definition import validate_definition
-from .application.service import configured_host, setting
+from .application.service import configured_host, setting, request_body_limit
 from .application.workspace import Workspace, Conflict
 from .application.resources import load_resources
 
@@ -346,8 +346,9 @@ async def start_server(api, port=8080, *, token=None, assets=None):
                 length = int(headers.get("content-length", "0"))
                 if length < 0 or "transfer-encoding" in headers:
                     raise ValueError()
-                if length > 200000:
-                    status, result = 413, {"error": "Request too large"}
+                limit = request_body_limit()
+                if limit is not None and length > limit:
+                    status, result = 413, {"error": f"Request exceeds host limit of {limit} bytes"}
                 elif headers.get("host") not in valid_hosts or headers.get("origin") and headers["origin"] not in {"http://" + host for host in valid_hosts}:
                     status, result = 403, {"error": "Use the local Conclave address"}
                 elif token and not hmac.compare_digest(headers.get("authorization", ""), "Bearer " + token):

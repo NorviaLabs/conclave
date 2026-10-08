@@ -145,6 +145,134 @@ def collect(stream):
     return asyncio.run(consume())
 
 
+@pytest.mark.parametrize("limit", [20, None])
+def test_shared_state_is_not_bounded_by_tool_output_limit(limit):
+    original = request()
+    definition = original["definition"]
+    definition["workflow"] = [definition["workflow"][0], {"id": "finish", "agent": "writer", "task": "Finish", "output": "brief"}]
+    definition["run_config"]["max_tool_output_chars"] = limit
+    provider = ScriptedProvider(scripts={"writer": [
+        {"type": "final", "content": "Done", "text": "evidence " * 10000},
+        {"type": "final", "content": "Done", "text": "Finished"},
+    ]})
+    tools = ToolRegistry(3)
+    events = collect(run_application(definition, provider, tools, original["task"], inputs=original["inputs"]))
+    assert events[-1]["status"] == "completed"
+    assert "evidence " * 10000 in provider.prompts[1][1]
+    assert tools.max_output_chars == 3
+
+
+@pytest.mark.parametrize("repair", ["valid", "invalid", "tool"])
+def test_output_repair_is_bounded_and_never_replays_tools(repair):
+    original = request()
+    definition = original["definition"]
+    definition["workflow"] = [definition["workflow"][0]]
+    definition["agents"][0]["tools"] = ["read_file"]
+    definition["state"][0].update(type="records", merge="upsert", fields=[{"key": "acceptance_ids", "label": "Acceptance IDs", "type": "string", "required": True}])
+    definition["views"][0]["layout"] = "cards"
+    record = {"id": "check", "title": "Check", "body": "Supported", "status": "recorded", "source_refs": []}
+    invalid = {"type": "final", "content": "Done", "records": [record]}
+    corrected = {"type": "final", "content": "Done", "records": [{**record, "acceptance_ids": "AC-1"}]}
+    calls = []
+
+    async def read_file(**kwargs):
+        calls.append("read")
+        return "AC-1 is the supplied criterion"
+
+    tools = ToolRegistry(20000)
+    tools.register(Tool("read_file", "Read", {}, read_file, frozenset({Capability.READ})))
+    response = corrected if repair == "valid" else invalid if repair == "invalid" else {"type": "tool", "name": "read_file", "arguments": {}}
+    provider = ScriptedProvider(scripts={"writer": [{"type": "tool", "name": "read_file", "arguments": {}}, invalid, response, response]}, usage=Usage(input_tokens=2, output_tokens=1))
+    events = collect(run_application(definition, provider, tools, original["task"], inputs=original["inputs"]))
+    assert calls == ["read"]
+    repairs = [event for event in events if event["type"] == "OutputRepairStarted"]
+    assert len(repairs) == (1 if repair == "valid" else 2)
+    assert "records[0]" in repairs[0]["reason"] and "acceptance_ids expects string" in repairs[0]["reason"]
+    assert events[-1]["status"] == ("completed" if repair == "valid" else "failed")
+    assert len(provider.prompts) == (3 if repair == "valid" else 4)
+    assert '"acceptance_ids"' in provider.prompts[-1][1]
+    assert not any("AC-1 is the supplied criterion" in json.dumps(event) for event in repairs)
+    if repair == "valid":
+        assert any(event["type"] == "OutputRepairCompleted" for event in events)
+        assert events[-1]["state"]["brief"][0]["acceptance_ids"] == "AC-1"
+
+
+@pytest.mark.parametrize("limit", [5, 40, None])
+def test_application_tool_output_limit_is_run_scoped(limit):
+    original = request()
+    definition = original["definition"]
+    definition["workflow"] = [definition["workflow"][0]]
+    definition["agents"][0]["tools"] = ["read_file"]
+    definition["run_config"]["max_tool_output_chars"] = limit
+
+    async def read_file(**kwargs):
+        return "x" * 30
+
+    tools = ToolRegistry(3)
+    tools.register(Tool("read_file", "Read", {}, read_file, frozenset({Capability.READ})))
+    provider = ScriptedProvider(scripts={"writer": [
+        {"type": "tool", "name": "read_file", "arguments": {}},
+        {"type": "final", "content": "Done", "text": "Finished"},
+    ]})
+    events = collect(run_application(definition, provider, tools, original["task"], inputs=original["inputs"]))
+    assert events[-1]["status"] == "completed"
+    called = next(event for event in events if event["type"] == "ToolCalled")
+    assert called["truncated"] == (limit == 5)
+    assert tools.max_output_chars == 3
+
+
+@pytest.mark.parametrize("failure", ["exception", "invalid_output", "stopped"])
+def test_parallel_failure_identifies_responsible_stage(failure):
+    from conclave.events import RunFinished
+    from conclave.protocol import AgentResult, PrivateState
+
+    original = request()
+    definition = original["definition"]
+    definition["workflow"] = [
+        {"id": "draft", "agent": "writer", "task": "Draft", "output": "brief"},
+        {"id": "sibling", "agent": "writer", "task": "Wait", "output": "brief"},
+    ]
+    definition["connections"] = []
+    both_started = asyncio.Event()
+
+    class ParallelLoop:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def stream(self, spec, prompt):
+            if "STAGE TASK:\nWait" in prompt:
+                both_started.set()
+                await asyncio.Event().wait()
+            await both_started.wait()
+            if failure == "exception":
+                raise RuntimeError("private credential must not leak")
+            yield RunFinished(run_id="test", agent="writer", status="stopped" if failure == "stopped" else "completed",
+                              result=AgentResult(content="Done", private=PrivateState(CONFIG), data={}))
+
+    events = collect(run_application(definition, None, ToolRegistry(20000), original["task"], inputs=original["inputs"], loop=ParallelLoop))
+    assert [event["stage"] for event in events if event["type"] == "StageStarted"] == ["draft", "sibling"]
+    assert events[-1]["stage"] == "draft"
+    assert events[-1]["status"] == ("stopped" if failure == "stopped" else "failed")
+    assert "private credential" not in json.dumps(events)
+
+
+@pytest.mark.parametrize("failure", ["exception", "invalid_output"])
+def test_human_failure_identifies_responsible_stage(failure):
+    original = request()
+    definition = original["definition"]
+    definition["workflow"] = [definition["workflow"][1]]
+
+    def handler(review):
+        if failure == "exception":
+            raise RuntimeError("private host details")
+        return {"records": []}
+
+    events = collect(run_application(definition, None, ToolRegistry(20000), original["task"], inputs=original["inputs"], human_handler=handler))
+    assert events[-1]["stage"] == "review"
+    assert events[-1]["status"] == "failed"
+    assert "private host details" not in json.dumps(events)
+
+
 def with_final_stage():
     original = request()
     original["definition"]["workflow"].append({"id": "final", "agent": "writer", "task": "Finalize the reviewed brief", "output": "brief"})

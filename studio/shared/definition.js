@@ -21,7 +21,7 @@ export function validateDefinition(d){
  for(const w of d.workflow){identifier(w.id,'Stage identifier');str(w.name,'Stage name',100);str(w.task,'Stage task',4000);if(!d.agents.some(a=>a.id===w.agent))fail(`Stage “${w.name}” needs an existing agent.`);if(!d.state.some(s=>s.key===w.output))fail(`Stage “${w.name}” needs an existing output collection.`);if(d.agents.some(a=>a.id===w.agent&&a.kind==='human')&&(w.provider||w.model))fail('Human steps do not run on a model backend.');backend(w,`Step “${w.name}”`);}
  for(const v of d.views){identifier(v.id,'View identifier');str(v.title,'View title',100);const s=d.state.find(s=>s.key===v.collection);if(!s)fail(`View “${v.title}” needs an existing state collection.`);if(!['cards','table','board','prose'].includes(v.layout)||(s.type==='text')!==(v.layout==='prose'))fail(`View “${v.title}” must use prose for text, or cards/table/board for records.`);}
  const rc=d.run_config,rb=d.run_budget;if(!rc||!rb)fail('Explicit runtime limits are required.');if(Object.keys(rc).sort().join(',')!==Object.keys(runtimeConfig).sort().join(',')||Object.keys(rb).sort().join(',')!==Object.keys(runBudget).sort().join(','))fail('Use the supported runtime configuration and budget fields.');
- for(const key of Object.keys(runtimeConfig)){const value=rc[key];if(!Number.isInteger(value)||value<1||value>1000000)fail(`Runtime limit ${key} must be a positive integer.`);}
+ for(const key of Object.keys(runtimeConfig)){const value=rc[key];if(value!==null&&(!Number.isInteger(value)||value<1))fail(`Runtime limit ${key} must be a positive integer or null (unlimited).`);}
  for(const key of ['max_delegations','max_per_agent','max_depth','tool_calls']){if(rb[key]!==null&&(!Number.isInteger(rb[key])||rb[key]<0||rb[key]>1000000))fail(`Budget ${key} must be nonnegative or null.`);}
  for(const key of ['wall_clock_seconds','tokens','cost_usd'])if(rb[key]!==null&&(!Number.isFinite(rb[key])||rb[key]<0))fail(`Budget ${key} must be nonnegative or null.`);
  if(d.inputs!==undefined){if(!Array.isArray(d.inputs)||d.inputs.length>12)fail('Use at most 12 request fields.');unique(d.inputs,'id','Request field identifiers');for(const f of d.inputs){identifier(f.id,'Request field identifier');str(f.label,'Request field label',100);if(!['text','textarea','number','date'].includes(f.type)||typeof f.required!=='boolean')fail('Choose a supported request field type and required setting.');}}
@@ -174,4 +174,69 @@ export function validateRecordValues(record,fields){
  validateRecordFields(fields);const values={};
  for(const f of fields){const value=record[f.key];if(value===undefined||value===null||value===''){if(f.required)fail('Provide record field: '+f.label);continue;}if(f.type==='number'?(typeof value!=='number'||!Number.isFinite(value)):f.type==='boolean'?typeof value!=='boolean':typeof value!=='string'||value.length>20000)fail('Invalid record field: '+f.label);if(f.type==='enum'&&!f.options.includes(value))fail('Invalid choice: '+f.label);if(f.type==='date'&&(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(Date.parse(value))||new Date(value).toISOString().slice(0,10)!==value))fail('Invalid date: '+f.label);values[f.key]=value;}
  return values;
+}
+
+// Conservative advisory checks: prose is not a schema, so fixes need consent.
+export function preflightIssues(d){
+ const issues=[];
+ const mention=(text,name)=>new RegExp(`(?<![a-z0-9_])${name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}(?![a-z0-9_])`).test(text.toLowerCase());
+ const warning=(step,code,label,message,evidence)=>issues.push({stage:step.id,code,severity:'warning',label,message,evidence});
+ for(const step of d.workflow){
+  const collection=d.state.find(item=>item.key===step.output),member=d.agents.find(item=>item.id===step.agent);
+  const sentences=`${step.task}\n${member?.instructions||''}`.split(/[.!?\n]/);
+  for(const field of collection?.fields||[]){
+   const evidence=sentences.find(sentence=>{
+    const text=sentence.toLowerCase();
+    const mentioned=[field.key,field.label].some(name=>mention(text,name));
+    return mentioned&&!/\b(?:do not|don't|never|must not|cannot)\b/.test(text)&&/empty string|leave\b.{0,40}\bempty|omit\b|optional\b|blank\b/.test(text);
+   });
+   if(field.required&&evidence)issues.push({stage:step.id,code:'empty-required',severity:'warning',collection:collection.key,field:field.key,label:field.label,evidence:evidence.trim(),fix:{kind:'optional',label:'Make optional and save',preview:`${collection.key}.${field.key}: required true → false`},message:`${field.label} is required, but the instructions allow an empty or omitted value. Required fields reject missing, null and empty-string values.`});
+   else if(field.required&&!sentences.some(sentence=>mention(sentence,field.key)||mention(sentence,field.label)))warning(step,'field-coverage',field.label,'Required field is not explained in the step or member instructions. The runtime supplies its type, but not its intended meaning.',`${collection.key}.${field.key}: ${field.type}, required`);
+   const arraySentence=sentences.find(sentence=>mention(sentence,field.key)&&/\b(?:array|list)\b/i.test(sentence)&&! /comma[- ]separated/i.test(sentence));
+   if(arraySentence&&field.type!=='string')warning(step,'field-type',field.label,`Instructions mention a list/array, but this field expects ${field.type}. Review the representation.`,arraySentence.trim());
+   if(arraySentence&&field.type==='string'&&/\b(?:json array|array of|as an? (?:array|list))\b/i.test(arraySentence))warning(step,'field-type',field.label,'Instructions request an array, but the schema expects a string.',arraySentence.trim());
+   const typed=sentences.find(sentence=>mention(sentence,field.key)&&/\bas (?:a |an )?(?:string|number|boolean)\b/i.test(sentence));
+   const requestedType=typed?.match(/\bas (?:a |an )?(string|number|boolean)\b/i)?.[1].toLowerCase();
+   if(requestedType&&requestedType!==field.type&&!(['enum','date'].includes(field.type)&&requestedType==='string'))warning(step,'field-type',field.label,`Instructions request ${requestedType}, but the schema expects ${field.type}.`,typed.trim());
+  }
+  for(const sentence of sentences){
+   const status=sentence.match(/\b(?:set|mark|use)\s+(?:the\s+)?status\s+(?:to|as)\s+["'`]?([a-z][a-z0-9_-]*)/i)?.[1];
+   if(status&&!/\b(?:do not|don't|never|must not)\b/i.test(sentence)&&collection?.statuses?.length&&!collection.statuses.includes(status))warning(step,'status-contract','Output status',`The requested status “${status}” is not allowed: ${collection.statuses.join(', ')}.`,sentence.trim());
+  }
+  if(member?.kind!=='human'){
+   const tools=member?.tools||[];
+   const executable=tools.some(id=>['run_tests','run_code','execute_command','shell','bash'].includes(id)||/\b(?:execute commands|execute code|run tests)\b/i.test(toolDescriptors.find(tool=>tool.id===id)?.description||''));
+   const writable=tools.some(id=>['write_file','apply_patch'].includes(id)||/\b(?:create or edit files|apply patches)\b/i.test(toolDescriptors.find(tool=>tool.id===id)?.description||''));
+   const positive=sentences.filter(sentence=>! /\b(?:do not|don't|never|cannot|can't|proposed|propose|unverified|without executing)\b/i.test(sentence));
+   const execute=positive.find(sentence=>/\b(?:run|execute)\s+(?:the\s+)?(?:tests|test suite|commands|test command)\b/i.test(sentence));
+   const write=positive.find(sentence=>/\b(?:apply|write|modify|edit)\s+(?:the\s+)?(?:patch|code|files|source files)\b/i.test(sentence));
+   if(execute&&!executable)warning(step,'execution-tool','Execution capability','The task requests execution, but no declared tool is known to execute commands/tests. Add a host-approved tool or change the task to propose commands.',execute.trim());
+   if(write&&!writable)warning(step,'write-tool','File modification capability','The task requests file changes, but no declared tool is known to apply them. Add a host-approved tool or request a draft patch.',write.trim());
+  }
+  const ancestors=ancestorSteps(d,step.id);
+  for(const input of d.state){
+   if(input.key===step.output)continue;
+   const evidence=sentences.find(sentence=>! /\b(?:do not|don't|never|must not|cannot)\b/i.test(sentence)&&/\b(?:read|use|consume|inspect|requires?)\b/i.test(sentence)&&(mention(sentence,input.key)||input.label&&mention(sentence,input.label)));
+   const producers=d.workflow.filter(other=>other.output===input.key&&other.id!==step.id);
+   if(evidence&&producers.length&&!producers.some(other=>ancestors.has(other.id)))warning(step,'input-dependency',input.label||input.key,'Instructions reference an output with no producing ancestor. Add a dependency if this step needs that output; external context may make this warning irrelevant.',evidence.trim());
+  }
+  if(/acceptance criter/i.test(`${step.task} ${collection?.label||''}`)&&! /\b(?:verify|verification|tests?|checks?|validate)\b/i.test(`${step.name||''} ${step.task}`)&&!d.workflow.some(other=>ancestorSteps(d,other.id).has(step.id)&&/\b(?:verify|verification|tests?|checks?|validate)\b/i.test(`${other.name||''} ${other.task}`)))warning(step,'verification-coverage','Acceptance verification','No downstream step explicitly mentions verification, tests, checks or validation. Review acceptance-criteria coverage.',step.task);
+ }
+ const ai=d.workflow.filter(step=>d.agents.find(member=>member.id===step.agent)?.kind!=='human');
+ const budget=d.run_budget;
+ const budgetIssue=(key,value,stage,label)=>issues.push({stage,code:`budget-${key}-${stage}`,severity:'error',label,message:`${key} is ${budget[key]}, but the planned AI steps require at least ${value}.`,evidence:`Planned minimum: ${value}; configured: ${budget[key]}`,fix:{kind:'budget',key,value,label:'Adjust budget and save',preview:`run_budget.${key}: ${budget[key]} → ${value}`}});
+ if(budget.max_delegations!==null&&budget.max_delegations<ai.length)budgetIssue('max_delegations',ai.length,ai[0]?.id,'Delegation budget');
+ if(ai.length&&budget.max_depth!==null&&budget.max_depth<1)budgetIssue('max_depth',1,ai[0].id,'Agent depth budget');
+ for(const member of d.agents){const steps=ai.filter(step=>step.agent===member.id);if(steps.length&&budget.max_per_agent!==null&&budget.max_per_agent<steps.length)budgetIssue('max_per_agent',steps.length,steps[0].id,'Per-agent budget');}
+ for(const key of ['tokens','wall_clock_seconds'])if(ai.length&&budget[key]===0)issues.push({stage:ai[0].id,code:`zero-${key}`,severity:'error',label:'Execution budget',message:`The ${key} budget is zero; model execution cannot proceed. Set a positive limit or unlimited.`,evidence:`run_budget.${key}: 0`});
+ return issues;
+}
+
+export function resolvePreflightIssue(d,issue){
+ if(!issue.fix||!preflightIssues(d).some(item=>JSON.stringify(item)===JSON.stringify(issue)))throw new Error('This issue changed. Check the application again.');
+ const updated=structuredClone(d);
+ if(issue.fix.kind==='budget')updated.run_budget[issue.fix.key]=issue.fix.value;
+ else updated.state.find(item=>item.key===issue.collection).fields.find(item=>item.key===issue.field).required=false;
+ validateDefinition(updated);
+ return updated;
 }

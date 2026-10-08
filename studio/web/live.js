@@ -1,4 +1,4 @@
-import {initialState,executionOrder,planConnections,mergeRecords} from '/definition.js';
+import {initialState,executionOrder,planConnections,mergeRecords,preflightIssues} from '/definition.js';
 
 function inputState(definition,stageId,patches){
   const ancestors=new Set(),links=planConnections(definition);
@@ -25,7 +25,10 @@ export function projectLiveRun(record){
   for(const event of events){
     const index=d.workflow.findIndex(step=>step.id===event.stage),step=d.workflow[index];
     if(event.state)state=event.state;
-    if(event.type==='StageStarted')activeStep=index;
+    if(event.type==='StageStarted'){
+      activeStep=index;
+      if(step)trace[index]={input:inputState(d,step.id,patches),output:null};
+    }
     if(event.type==='ApplicationStateChanged'&&step){
       trace[index]={input:inputState(d,step.id,patches),patch:event.patch,output:event.state[step.output]};
       patches.set(step.id,event.patch);completedSteps.push(step.id);version=event.version;activeStep=null;
@@ -40,7 +43,7 @@ export function projectLiveRun(record){
     completedSteps,executionOrder:executionOrder(d),trace,textOrigins,events,review,metrics:record.metrics||{}};
 }
 
-export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress,runtime,busy,error,source='',applicationId='',requestOnly=false}){
+export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress,runtime,busy,error,source='',applicationId='',requestOnly=false,warningsReviewed=false}){
   // A host that reports no profile is local, which is the server's default.
   const local=runtime.profile?runtime.profile==='local':true;
   const hostedPill=`HOSTED RUN${runtime.tenant&&runtime.tenant!=='local'?` · ${e(runtime.tenant)}`:''}`;
@@ -50,12 +53,17 @@ export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress
   const needsSource=d.agents.some(member=>member.tools.some(name=>runtime.resource_tools?.includes(name)));
   const resources=(runtime.resources||[]).filter(item=>!item.applications||item.applications.includes(applicationId));
   const bound=resources.some(item=>item.id===source||!source&&item.id===(d.resources?.source||'default'));
+  const issues=requestOnly?preflightIssues(d):[];
+  const blocked=issues.some(issue=>issue.severity==='error')||issues.length&&!warningsReviewed;
   const resourceForm=needsSource?`<div class="field"><label for="live-source">Source documents</label><select id="live-source" data-source-resource><option value="">${d.resources?.source?'Use configured source':resources.some(item=>item.id==='default')?'Use default source':'Choose a source resource'}</option>${resources.map(item=>`<option value="${e(item.id)}" ${item.id===source?'selected':''}>${e(item.name)}</option>`).join('')}</select>${!resources.length?`<p class="validation">No source resource is authorized for this application.${local?' Add one to the shared host resource catalogue.':' Ask the deployment to authorize a source for this application.'}</p>`:''}</div>`:'';
   const configuration=`${!runtime.available?`<p class="validation" role="status">${!local?'No AI provider is configured for this workspace.':'No AI provider was found on this computer.'}</p><details class="quiet-details"><summary>Connection details</summary><p>${e(runtime.reason||'Configure the local AI host to start a request.')}</p></details>`:''}
     ${missing.length?`<details class="quiet-details"><summary>Some requested tools are unavailable</summary><p>${missing.map(e).join(', ')}</p></details>`:''}
     ${error?`<p class="validation" role="alert">${e(error)}</p>`:''}
-    <section class="request-panel">${requestForm}${resourceForm}<div class="request-actions"><button type="submit" class="button primary" data-action="start-live" ${busy||active||!runtime.available||missing.length||needsSource&&!bound?'disabled':''}>${busy?'Working…':'Run'}</button></div></section>`;
-  if(requestOnly)return configuration;
+    <section class="request-panel">${requestForm}${resourceForm}<div class="request-actions"><button type="submit" class="button primary" data-action="start-live" ${busy||active||blocked||!runtime.available||missing.length||needsSource&&!bound?'disabled':''}>${busy?'Working…':'Run'}</button></div></section>`;
+  if(requestOnly){
+    const checks=`<section class="panel" aria-label="Pre-run checks"><h3>Validate application</h3><h4>Pre-run checks</h4>${issues.length?`<p>Review ${issues.length} finding${issues.length===1?'':'s'} before running. Errors block Run; warnings require review.</p>${issues.map((issue,index)=>`<div class="validation"><strong>${e(issue.severity.toUpperCase())} · ${e(d.workflow.find(step=>step.id===issue.stage)?.name||issue.stage)} · ${e(issue.label)}</strong><p>${e(issue.message)}</p><blockquote>${e(issue.evidence)}</blockquote>${issue.fix?`<pre class="code">${e(issue.fix.preview)}</pre><button type="button" class="button" data-preflight-fix="${index}">${e(issue.fix.label)}</button> `:''}<button type="button" class="button" data-preflight-edit="${e(issue.stage)}">Edit step instructions</button> <button type="button" class="button" data-preflight-settings>Open schema, tools and limits</button></div>`).join('')}<label><input type="checkbox" data-preflight-review ${warningsReviewed?'checked':''}> I reviewed the warnings and accept their risks for this saved version.</label>`:'<p>No known output-contract conflicts found.</p>'}<p class="field-help">Static checks cover explicit contract conflicts, tool/task compatibility, output dependencies, verification coverage and minimum budgets. Heuristics may miss issues or flag valid external inputs; they cannot guarantee valid model output. Source authorization and tool availability are checked below; document existence is checked by the host during execution.</p></section>`;
+    return checks+configuration;
+  }
   return `<div class="runtime-banner"><span class="runtime-pill">${local?'LOCAL RUN':hostedPill}</span>${!run?`<p>${runtime.available?(local?'Uses the AI provider configured on this computer.':'Uses the AI provider configured for this workspace.'):'Live runs are unavailable on this host.'}</p>${configuration}`:''}</div>
   ${error?`<p class="validation" role="alert">${e(error)}</p>`:''}
   ${run?`<p class="run-request-line">${e(run.task.slice(0,160))}${run.task.length>160?'…':''}</p><details class="quiet-details" data-disclosure="live-request-details"><summary>Full request and context</summary><p>${e(run.task)}</p>${run.resources?.source?`<p><strong>Source resource</strong><br>${e(run.resources.source)}</p>`:''}${Object.entries(run.inputs).map(([key,value])=>`<p><strong>${e(run.definition.inputs?.find(field=>field.id===key)?.label||key)}</strong><br>${e(value)}</p>`).join('')}</details>`:''}

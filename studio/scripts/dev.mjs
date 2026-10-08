@@ -49,9 +49,9 @@ const server = createServer(async (incoming, outgoing) => {
     let bytes = 0;
     for await (const chunk of incoming) {
       bytes += chunk.length;
-      if (bytes > 200000) {
+      if (config.maxRequestBytes!==null && bytes > config.maxRequestBytes) {
         outgoing.writeHead(413);
-        outgoing.end('Request too large.');
+        outgoing.end(`Request exceeds host limit of ${config.maxRequestBytes} bytes.`);
         return;
       }
       chunks.push(chunk);
@@ -62,7 +62,7 @@ const server = createServer(async (incoming, outgoing) => {
       headers:incoming.headers,
       ...(method === 'GET' || method === 'HEAD' ? {} : {body:Buffer.concat(chunks)})
     });
-    const response = await worker.fetch(request, {CONCLAVE_URL:config.apiUrl,CONCLAVE_API_TOKEN:config.apiToken,CONCLAVE_TIMEOUT_MS:config.bridgeTimeout,CONCLAVE_PROPOSAL_TIMEOUT_MS:config.proposalTimeout});
+    const response = await worker.fetch(request, {CONCLAVE_URL:config.apiUrl,CONCLAVE_API_TOKEN:config.apiToken,CONCLAVE_TIMEOUT_MS:config.bridgeTimeout,CONCLAVE_PROPOSAL_TIMEOUT_MS:config.proposalTimeout,CONCLAVE_MAX_REQUEST_BYTES:config.maxRequestBytes===null?'unlimited':config.maxRequestBytes});
     outgoing.writeHead(response.status, Object.fromEntries(response.headers));
     const body=await response.arrayBuffer();
     outgoing.end(response.headers.get('content-type')?.startsWith('text/html')?injectReload(Buffer.from(body).toString()):Buffer.from(body));
