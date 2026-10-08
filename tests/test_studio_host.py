@@ -48,6 +48,37 @@ def test_local_host_start_review_restart_resume_and_public_status(tmp_path):
     asyncio.run(exercise())
 
 
+def test_resume_before_finished_task_cleanup_keeps_the_new_task(tmp_path):
+    finished = asyncio.Event()
+
+    class FinishingHost(LocalRunHost):
+        async def _consume(self, stream):
+            await super()._consume(stream)
+            finished.set()
+
+    async def exercise():
+        provider = ScriptedProvider(default={"type": "final", "content": "Done", "text": "Brief"})
+        host = FinishingHost(RunRepository(tmp_path / "runs.sqlite"), provider, ToolRegistry(20000), reviewer="operator")
+        try:
+            _, run = await host.handle("start", with_final_stage())
+            async with asyncio.timeout(3):
+                await finished.wait()
+            previous = host.tasks[run["id"]]
+            assert previous[0].done()
+            record = host.repository.get(run["id"])
+            await host.handle("review", {"run_id": run["id"], "review_id": record["reviews"][0]["id"], "output": {"text": "Approved"}})
+            await host.handle("resume", {"run_id": run["id"]})
+            resumed = host.tasks[run["id"]]
+            assert resumed[0] is not previous[0]
+            await asyncio.sleep(0)
+            assert host.tasks.get(run["id"]) == resumed
+            await wait_for_status(host, run["id"], "completed")
+        finally:
+            await host.close()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("immediate", [False, True])
 def test_local_host_cancel_closes_active_iterator(tmp_path, immediate):
     started = asyncio.Event()
@@ -72,9 +103,18 @@ def test_local_host_cancel_closes_active_iterator(tmp_path, immediate):
     asyncio.run(exercise())
 
 
-def test_cancel_waiting_review_and_missing_provider(tmp_path):
+@pytest.mark.parametrize("defer_task_cleanup", [False, True])
+def test_cancel_waiting_review_and_missing_provider(tmp_path, defer_task_cleanup):
     async def exercise():
         host = LocalRunHost(RunRepository(tmp_path / "runs.sqlite"), ScriptedProvider(default={"type": "final", "content": "Done", "text": "Brief"}), ToolRegistry(20000), reviewer="operator")
+        if defer_task_cleanup:
+            consume = host._consume
+
+            async def finish_later(stream):
+                await consume(stream)
+                await asyncio.Event().wait()
+
+            host._consume = finish_later
         _, run = await host.handle("start", request())
         await wait_for_status(host, run["id"], "waiting_for_human")
         _, record = await host.handle("cancel", {"run_id": run["id"]})

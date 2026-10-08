@@ -107,8 +107,11 @@ class LocalRunHost:
             pass
 
     async def _schedule(self, run_id, *, resume=False):
-        if run_id in self.tasks:
-            raise ValueError("This request is already running")
+        active = self.tasks.get(run_id)
+        if active is not None:
+            if not active[0].done():
+                raise ValueError("This request is already running")
+            self.tasks.pop(run_id)
         tools = self.run_tools(self.repository.get(run_id)["request"])
         # A run may mix backends, so it is handed the router when there is one.
         provider = self.backends or self.provider
@@ -122,7 +125,12 @@ class LocalRunHost:
             raise
         task = asyncio.create_task(self._consume(stream))
         self.tasks[run_id] = (task, stream)
-        task.add_done_callback(lambda done: self.tasks.pop(run_id, None))
+
+        def forget_task(done):
+            if self.tasks.get(run_id) == (done, stream):
+                self.tasks.pop(run_id)
+
+        task.add_done_callback(forget_task)
 
     def _require_provider(self):
         if self.provider is None:
@@ -267,7 +275,7 @@ class LocalRunHost:
                     except asyncio.CancelledError:
                         pass
                     await stream.aclose()
-                else:
+                if active is None or self.repository.get(run_id)["status"] == "waiting_for_human":
                     self.repository.cancel_waiting(run_id)
             return 200, public_record(self.repository.get(run_id))
         if command == "review":

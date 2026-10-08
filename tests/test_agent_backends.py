@@ -123,7 +123,7 @@ class RecordingProvider(ModelProvider):
 
     async def complete(self, messages):
         self.calls += 1
-        return Completion(text=json.dumps({"type": "final", "content": f"served by {self.name}"}), usage=Usage(1, 1))
+        return Completion(text=json.dumps({"type": "final", "content": f"served by {self.name}", "text": f"served by {self.name}"}), usage=Usage(1, 1))
 
 
 class Router(ModelProvider):

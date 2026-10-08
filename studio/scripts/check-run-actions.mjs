@@ -17,6 +17,7 @@ const context=vm.createContext({
   render(){},stopFollowingLiveRun(){},pollLiveRun(){},notify(){},
   studioLiveMarkup:()=>'<textarea>request</textarea>',
   current:()=>({revision:4,definition:{inputs:[]}}),
+  validateDefinition(){},preflightIssues:()=>[],
   validateRequestInputs:(_d,inputs)=>inputs,
   request:async(path,options)=>{if(fail)throw new Error('Backend unavailable');posts.push({path,body:JSON.parse(options.body)});return {id:`run_${posts.length}`};},
   selectLiveRecord:record=>{selected=record;},refreshLiveHistory:async()=>{}
