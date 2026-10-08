@@ -81,6 +81,7 @@ from .providers import (
     ModelProvider,
     OllamaProvider,
     OpenCodeProvider,
+    ProviderError,
     Usage,
     resolve_provider,
 )
@@ -132,6 +133,7 @@ __all__ = [
     "MergeResult",
     "ModelCall",
     "ModelOutputError",
+    "ProviderError",
     "ModelProvider",
     "NoteRecorded",
     "OllamaProvider",

@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import tempfile
+import urllib.error
 import urllib.request
 
 from abc import ABC, abstractmethod
@@ -21,6 +22,23 @@ from typing import Protocol
 # =============================================================================
 # Model providers
 # =============================================================================
+
+
+class ProviderError(RuntimeError):
+    """A model backend call failed, with a category callers may record.
+
+    The message keeps the backend's own text, which is useful to whoever runs
+    this machine and can read its logs. It can also carry account, path and
+    request data, so a caller persists `kind` and never the message.
+    """
+
+    KINDS = ("timeout", "unreachable", "command_failed", "backend_error", "unreadable")
+
+    def __init__(self, kind: str, detail: str):
+        if kind not in self.KINDS:
+            raise ValueError("Unsupported provider failure kind")
+        super().__init__(detail)
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -168,15 +186,10 @@ class OpenCodeProvider(ModelProvider):
             await process.communicate()
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            raise RuntimeError(
-                "OpenCode model call timed out"
-            ) from exc
+            raise ProviderError("timeout", "OpenCode model call timed out") from exc
 
         if process.returncode != 0:
-            raise RuntimeError(
-                stderr.decode().strip()
-                or "OpenCode failed"
-            )
+            raise ProviderError("command_failed", stderr.decode().strip() or "OpenCode failed")
 
         return Completion(
             text=stdout.decode().strip()
@@ -238,31 +251,34 @@ class CodexProvider(ModelProvider):
                 await process.communicate()
                 if isinstance(exc, asyncio.CancelledError):
                     raise
-                raise RuntimeError("Codex model call timed out") from exc
+                raise ProviderError("timeout", "Codex model call timed out") from exc
 
         if process.returncode != 0:
-            raise RuntimeError(stderr.decode().strip() or "Codex failed")
+            raise ProviderError("command_failed", stderr.decode().strip() or "Codex failed")
 
         text = None
         usage = None
-        for line in stdout.decode().splitlines():
-            event = json.loads(line)
-            if event["type"] == "item.completed":
-                item = event["item"]
-                if item["type"] == "agent_message":
-                    text = item["text"]
-            elif event["type"] == "turn.completed":
-                counts = event.get("usage")
-                if counts is not None:
-                    usage = Usage(
-                        input_tokens=counts.get("input_tokens"),
-                        output_tokens=counts.get("output_tokens"),
-                    )
-            elif event["type"] in {"error", "turn.failed"}:
-                raise RuntimeError(f"Codex failed: {event}")
+        try:
+            for line in stdout.decode().splitlines():
+                event = json.loads(line)
+                if event["type"] == "item.completed":
+                    item = event["item"]
+                    if item["type"] == "agent_message":
+                        text = item["text"]
+                elif event["type"] == "turn.completed":
+                    counts = event.get("usage")
+                    if counts is not None:
+                        usage = Usage(
+                            input_tokens=counts.get("input_tokens"),
+                            output_tokens=counts.get("output_tokens"),
+                        )
+                elif event["type"] in {"error", "turn.failed"}:
+                    raise ProviderError("backend_error", f"Codex failed: {event}")
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise ProviderError("unreadable", f"Codex output could not be read: {error!r}") from error
 
         if text is None:
-            raise RuntimeError("Codex returned no assistant message")
+            raise ProviderError("unreadable", "Codex returned no assistant message")
         return Completion(text=text, usage=usage)
 
 
@@ -306,20 +322,27 @@ class OllamaProvider(ModelProvider):
                 method="POST",
             )
 
-            with urllib.request.urlopen(
-                req,
-                timeout=self.timeout,
-            ) as response:
-                data = json.loads(
-                    response.read().decode()
-                )
+            try:
+                with urllib.request.urlopen(
+                    req,
+                    timeout=self.timeout,
+                ) as response:
+                    data = json.loads(
+                        response.read().decode()
+                    )
 
-                return Completion(
-                    text=data["message"][
-                        "content"
-                    ],
-                    usage=read_usage(data),
-                )
+                    return Completion(
+                        text=data["message"][
+                            "content"
+                        ],
+                        usage=read_usage(data),
+                    )
+            except urllib.error.HTTPError as error:
+                raise ProviderError("backend_error", f"Ollama returned HTTP {error.code}") from error
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                raise ProviderError("unreachable", f"Ollama could not be reached: {error}") from error
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise ProviderError("unreadable", f"Ollama reply could not be read: {error!r}") from error
 
         return await asyncio.to_thread(
             request

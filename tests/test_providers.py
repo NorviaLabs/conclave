@@ -15,6 +15,7 @@ from conclave.providers import (
     ModelProvider,
     OllamaProvider,
     OpenCodeProvider,
+    ProviderError,
 )
 
 
@@ -121,17 +122,18 @@ def test_codex_command_and_completion(monkeypatch, model):
     assert not Path(captured["cwd"]).exists()
 
 
-@pytest.mark.parametrize("events,message", [
-    ([], "no assistant message"),
-    ([{"type": "error", "message": "login required"}], "login required"),
-    ([{"type": "turn.failed", "error": {"message": "quota"}}], "quota"),
+@pytest.mark.parametrize("events,kind,message", [
+    ([], "unreadable", "no assistant message"),
+    ([{"type": "error", "message": "login required"}], "backend_error", "login required"),
+    ([{"type": "turn.failed", "error": {"message": "quota"}}], "backend_error", "quota"),
 ])
-def test_codex_event_failures(monkeypatch, events, message):
+def test_codex_event_failures(monkeypatch, events, kind, message):
     async def fake_exec(*command, **kwargs):
         return FakeProcess(stdout=codex_events(*events))
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(ProviderError, match=message) as failure:
         asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
+    assert failure.value.kind == kind
 
 
 @pytest.mark.parametrize("stderr,message", [(b"login required", "login required"), (b"", "Codex failed")])
@@ -139,8 +141,9 @@ def test_codex_process_failure(monkeypatch, stderr, message):
     async def fake_exec(*command, **kwargs):
         return FakeProcess(stderr=stderr, returncode=1)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(ProviderError, match=message) as failure:
         asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
+    assert failure.value.kind == "command_failed"
 
 
 @pytest.mark.parametrize("event", [
@@ -163,8 +166,9 @@ def test_codex_timeout_reaps_process(monkeypatch):
     async def fake_exec(*command, **kwargs):
         return process
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    with pytest.raises(RuntimeError, match="timed out"):
+    with pytest.raises(ProviderError, match="timed out") as failure:
         asyncio.run(CodexProvider(None, 0.001).complete([]))
+    assert failure.value.kind == "timeout"
     assert process.killed
     assert process.calls == 2
 

@@ -260,8 +260,8 @@ class RunRepository:
                 self._append(run_id, event)
                 finished = event["type"] == "ApplicationFinished"
                 yield event
-        except Exception:
-            event = {"type": "ApplicationFinished", "status": "failed", "reason": "Run could not execute on the runtime host"}
+        except Exception as error:
+            event = {"type": "ApplicationFinished", "status": "failed", "reason": f"Run could not execute on the runtime host ({type(error).__name__})"}
             self._append(run_id, event)
             finished = True
             yield event

@@ -7,6 +7,7 @@ from contextlib import closing
 import pytest
 
 from conclave import Capability, Tool, ToolRegistry, Usage
+from conclave import ProviderError
 from conftest import CONFIG, ScriptedProvider
 from conclave.application.definition import run_application, validate_request_inputs
 from conclave.application.runs import RunRepository, validate_run_request
@@ -537,3 +538,44 @@ def test_invalid_custom_record_values(field, value):
     from conclave.application.definition import record_fields
     with pytest.raises(ValueError):
         record_fields({field["key"]: value}, [field])
+
+
+class FailingProvider:
+    """A backend that fails the way a CLI backend does, with no process involved."""
+
+    def __init__(self, error):
+        self.error = error
+
+    async def complete(self, messages):
+        raise self.error
+
+
+def wrapped(error):
+    try:
+        raise RuntimeError("outer failure") from error
+    except RuntimeError as outer:
+        return outer
+
+
+@pytest.mark.parametrize("error,reason", [
+    (ProviderError("timeout", "stderr: account 12345 is rate limited"),
+     "The model backend did not respond in time"),
+    (ProviderError("backend_error", "quota exceeded for account 12345"),
+     "The model backend reported an error"),
+    (wrapped(ProviderError("unreachable", "dial tcp 127.0.0.1:11434")),
+     "The model backend could not be reached"),
+    (RuntimeError("unexpected boom"),
+     "Agent execution failed on the runtime host (RuntimeError)"),
+])
+def test_a_failed_stage_records_why_without_recording_provider_output(tmp_path, error, reason):
+    """A failure is diagnosable from the record, and the backend's own text is not kept."""
+
+    tools = ToolRegistry(20000)
+    repository = RunRepository(tmp_path / "runs.sqlite")
+    run_id = repository.create(request())
+    events = collect(repository.execute(run_id, FailingProvider(error), tools))
+    assert events[-1]["status"] == "failed"
+    assert events[-1]["reason"] == reason
+    recorded = json.dumps(events)
+    assert "12345" not in recorded
+    assert "unexpected boom" not in recorded

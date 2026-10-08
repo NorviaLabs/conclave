@@ -20,6 +20,7 @@ from datetime import date
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 from conclave.authority import InProcessAuthority, ModelCall
+from conclave.providers import ProviderError
 from conclave.protocol import extract_json, ModelOutputError
 
 from conclave import (
@@ -28,6 +29,35 @@ from conclave import (
 )
 
 CONFIG_KEYS = {"max_tool_steps", "max_notes", "max_note_chars", "max_tool_output_chars", "fan_out_limit"}
+
+# What a person can act on when a stage fails. The backend's own output stays
+# out of the record: it can carry account, path and request data.
+PROVIDER_FAILURES = {
+    "timeout": "The model backend did not respond in time",
+    "unreachable": "The model backend could not be reached",
+    "command_failed": "The model backend command failed",
+    "backend_error": "The model backend reported an error",
+    "unreadable": "The model backend returned a reply that could not be read",
+}
+
+
+def _failure_reason(error: BaseException) -> str:
+    """Why a stage failed, in words the recorded activity can justify.
+
+    A backend failure keeps only its category. Anything else reports its
+    exception class, which carries no request or reply content, so a failure
+    is diagnosable without recording what the model was sent or returned.
+    """
+    seen = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, ProviderError):
+            return PROVIDER_FAILURES[cause.kind]
+        cause = cause.__cause__ or cause.__context__
+    return f"Agent execution failed on the runtime host ({type(error).__name__})"
+
+
 BUDGET_KEYS = {"max_delegations", "max_per_agent", "max_depth", "tool_calls", "wall_clock_seconds", "tokens", "cost_usd"}
 RECORD_RESERVED = {"id", "title", "body", "status", "source_refs", "contributions", "constructor", "prototype", "__proto__"}
 TYPES = {"string", "number", "boolean", "date", "enum"}
@@ -558,8 +588,8 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
                 answer = human_inputs[stage["id"]] if stage["id"] in human_inputs else human_handler(copy.deepcopy(review_request))
                 if inspect.isawaitable(answer):
                     answer = await answer
-            except Exception:
-                yield {"type": "ApplicationFinished", "status": "failed", "stage": stage["id"], "reason": "Human input collection failed on the runtime host", "state": store.snapshot()}
+            except Exception as error:
+                yield {"type": "ApplicationFinished", "status": "failed", "stage": stage["id"], "reason": f"Human input collection failed on the runtime host ({type(error).__name__})", "state": store.snapshot()}
                 return
             try:
                 payload = validate_human_output(answer, collection, {"agent": stage["agent"], "stage": stage["id"], "run_id": "human-" + uuid.uuid4().hex})
@@ -657,8 +687,8 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
                         # Never dispatch a tool/action returned during an output-only repair.
                         pass
                 await queue.put(None)
-            except Exception:
-                await queue.put({"type": "ApplicationFinished", "status": "failed", "stage": candidate["id"], "reason": "Agent execution failed on the runtime host", "state": store.snapshot()})
+            except Exception as error:
+                await queue.put({"type": "ApplicationFinished", "status": "failed", "stage": candidate["id"], "reason": _failure_reason(error), "state": store.snapshot()})
             finally:
                 await stream.aclose()
 
