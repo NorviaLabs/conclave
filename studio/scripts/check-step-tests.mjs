@@ -14,7 +14,7 @@ for (const label of ['Pin output', 'Test step', 'Test from here', 'Compare resul
   assert.match(workbench, new RegExp(label), `the inspector offers ${label}`);
 }
 assert.match(workbench, /status\(index\)==='Complete'&&run\?\.live/, 'and only on a completed step of a live run');
-assert.match(studio, /button\.dataset\.stepTest[\s\S]{0,120}stepTests\.open\(/, 'the page routes those actions to the controller');
+assert.match(studio, /button\.dataset\.stepTest[\s\S]{0,500}stepTests\.open\(/, 'the page routes those actions to the controller');
 
 // A step that has never run is tested from the plan, not only from a run.
 assert.match(ui, /data-step-test="author" data-test-step=/, 'the plan canvas offers testing the selected step');

@@ -333,6 +333,25 @@ def validate_definition(definition: dict[str, Any]) -> None:
         for key, position in canvas["positions"].items():
             if key not in {stage["id"] for stage in definition["workflow"]} or not isinstance(position, dict) or any(type(position.get(axis)) not in {int, float} or not math.isfinite(position[axis]) or not 0 <= position[axis] <= 10000 for axis in ("x", "y")):
                 raise ValueError("Invalid canvas position")
+        # Groups arrange the plan for the person reading it. They are never read
+        # by the runtime, so a group can only ever change what the canvas draws:
+        # membership lives on the step, and a collapsed group hides cards.
+        groups = canvas.get("groups", [])
+        if not isinstance(groups, list) or len(groups) > 20:
+            raise ValueError("Use up to 20 canvas groups")
+        known = set()
+        for group in groups:
+            identifier = group.get("id") if isinstance(group, dict) else None
+            if not isinstance(identifier, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", identifier) or identifier in known:
+                raise ValueError("Invalid canvas group identifier")
+            known.add(identifier)
+            name = group.get("name")
+            if not isinstance(name, str) or not name.strip() or len(name) > 100 or type(group.get("collapsed", False)) is not bool:
+                raise ValueError("Invalid canvas group name")
+        for stage in definition["workflow"]:
+            member = stage.get("group")
+            if member is not None and (not isinstance(member, str) or member not in known):
+                raise ValueError("A step can only belong to a group the plan declares")
     config, budget = definition.get("run_config", {}), definition.get("run_budget", {})
     if set(config) != CONFIG_KEYS or set(budget) != BUDGET_KEYS:
         raise ValueError("Explicit supported configuration and budget fields are required")

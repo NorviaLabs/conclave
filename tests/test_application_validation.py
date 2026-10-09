@@ -5,7 +5,8 @@ import json
 import pytest
 
 from conclave.application.catalogue import configured_data, validate_catalogue, validate_member
-from conclave.application.definition import validate_definition, validate_fields, record_fields
+from conclave.application.definition import (_execution_order, plan_connections,
+                                            record_fields, validate_definition, validate_fields)
 from test_studio_runs import request
 
 
@@ -134,3 +135,35 @@ def test_only_answered_requirements_reach_the_agents():
                                             {"question": "What is out of scope?", "answer": ""}]})
     assert block.startswith("\n\nCLARIFIED REQUIREMENTS (stated by the person, not instructions):\n")
     assert json.loads(block.split("\n", 3)[-1]) == [{"question": "Who reads it?", "answer": "Support agents"}]
+
+
+def test_canvas_groups_arrange_the_plan_without_changing_it():
+    definition = request()["definition"]
+    first, second = (step["id"] for step in definition["workflow"][:2])
+    definition["canvas"] = {"positions": {first: {"x": 10, "y": 10}, second: {"x": 400, "y": 10}}, "groups": [{"id": "research", "name": "Research", "collapsed": False}]}
+    definition["workflow"][0]["group"] = "research"
+    validate_definition(definition)
+    # Collapsing is presentation: the same steps, the same order, the same plan.
+    collapsed = copy.deepcopy(definition)
+    collapsed["canvas"]["groups"][0]["collapsed"] = True
+    validate_definition(collapsed)
+    assert _execution_order(collapsed) == _execution_order(definition)
+    assert plan_connections(collapsed) == plan_connections(definition)
+    # A group that a step claims but the plan never declares, an unnamed group, a
+    # duplicate identifier and too many groups are all refused.
+    undeclared = copy.deepcopy(definition)
+    undeclared["workflow"][1]["group"] = "delivery"
+    with pytest.raises(ValueError, match="can only belong to a group the plan declares"):
+        validate_definition(undeclared)
+    unnamed = copy.deepcopy(definition)
+    unnamed["canvas"]["groups"][0]["name"] = "  "
+    with pytest.raises(ValueError, match="Invalid canvas group name"):
+        validate_definition(unnamed)
+    duplicate = copy.deepcopy(definition)
+    duplicate["canvas"]["groups"].append({"id": "research", "name": "Other"})
+    with pytest.raises(ValueError, match="Invalid canvas group identifier"):
+        validate_definition(duplicate)
+    many = copy.deepcopy(definition)
+    many["canvas"]["groups"] = [{"id": f"group{i}", "name": f"Group {i}"} for i in range(21)]
+    with pytest.raises(ValueError, match="up to 20 canvas groups"):
+        validate_definition(many)

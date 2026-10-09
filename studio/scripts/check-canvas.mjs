@@ -42,66 +42,8 @@ const area = {closest:()=>({querySelector:()=>null,style:{setProperty(){}}}),cli
   getBoundingClientRect: () => ({top: 240, left: 0})};
 Object.defineProperty(area.style, 'height', {set(value){area.clientHeight = parseFloat(value);}});
 const flow = {style: {width: '2800px', height: '1200px'}, closest: () => area};
-// The floating action bar is dragged with the pointer, and its position has to
-// survive the re-render that every run update triggers. Executed here against a
-// stand-in canvas, because none of it is reachable without a DOM.
-const dockCode = studioSource.slice(studioSource.indexOf('// The canvas action bar floats over the graph'), studioSource.indexOf('// The canvas context menu'));
-const dockListeners = {};
-const makeDock = () => ({
-  style: {}, offsetWidth: 320, offsetHeight: 44,
-  offsetParent: {getBoundingClientRect: () => ({left: 0, top: 0, width: 1200, height: 700})},
-  classList: {added: [], add(name) { this.added.push(name); }, remove(name) { this.added = this.added.filter(item => item !== name); }},
-  getBoundingClientRect: () => ({left: 440, top: 640}),
-  setPointerCapture() {}, releasePointerCapture() {}
-});
-const dock = makeDock();
-const dockContext = {
-  Map, Math, console, window: {innerWidth: 1200, innerHeight: 800}, currentId: 'app-a', dock,
-  $: () => ({querySelector: selector => selector === '[data-canvas-dock]' ? dockContext.dock : null, addEventListener(type, handler) { dockListeners[type] = handler; }}),
-  render() { dockContext.rendered = (dockContext.rendered || 0) + 1; }
-};
-// A top-level `const` stays in its own script scope, so the state under test is
-// published to the context on purpose.
-runInNewContext(`${dockCode}\nglobalThis.dockOffsets = dockOffsets;`, dockContext);
-const pointer = (type, x, y, onButton = false) => dockListeners[type]({pointerId: 7, button: 0, clientX: x, clientY: y,
-  target: {closest: selector => selector === '[data-canvas-dock]' ? dockContext.dock : onButton ? {button: true} : null}, preventDefault() {}});
-// A press on a button is a button press, not a drag.
-pointer('pointerdown', 500, 650, true);
-assert.deepEqual(dock.style, {}, 'pressing a button in the bar does not move it');
-pointer('pointerdown', 500, 650);
-pointer('pointermove', 560, 610);
-assert.equal(dock.style.left, '500px', 'the bar follows the pointer');
-assert.equal(dock.style.top, '600px');
-assert.equal(dock.style.transform, 'none', 'and stops being centred by the stylesheet');
-assert.equal(dock.style.bottom, 'auto');
-assert.ok(dock.classList.added.includes('dragging'), 'the press reads as a drag');
-pointer('pointerup', 560, 610);
-const kept = dockContext.dockOffsets.get('app-a');
-assert.deepEqual([kept.left, kept.top], [500, 600], 'the position is kept per application');
-// The bar is rebuilt with the canvas, so the position is re-applied after render.
-dock.style = {};
-runInNewContext('applyDockOffset()', dockContext);
-assert.equal(dock.style.left, '500px', 'a re-render puts the bar back where it was left');
-assert.equal(dock.style.top, '600px');
-// Clamped to the canvas it floats over, whatever the pointer does.
-pointer('pointerdown', 500, 600);
-pointer('pointermove', 5000, 5000);
-pointer('pointerup', 5000, 5000);
-const clamped = dockContext.dockOffsets.get('app-a');
-assert.deepEqual([clamped.left, clamped.top], [872, 648], 'the bar cannot be dragged off the canvas');
-// Another application has its own position.
-dockContext.currentId = 'app-b';
-dock.style = {};
-runInNewContext('applyDockOffset()', dockContext);
-assert.deepEqual(dock.style, {}, 'a fresh application starts with the bar where the stylesheet puts it');
-// A double-click on the bar takes it back to where it started.
-const doubleClick = () => dockListeners['dblclick']({target: {closest: selector => selector === '[data-canvas-dock]' ? dockContext.dock : null}});
-doubleClick();
-assert.equal(dockContext.rendered, undefined, 'a double-click on an unmoved bar changes nothing');
-dockContext.currentId = 'app-a';
-doubleClick();
-assert.equal(dockContext.dockOffsets.has('app-a'), false, 'double-clicking puts the bar back');
-assert.equal(dockContext.rendered, 1, 'a moved bar is redrawn in its default place');
+// The dock has a fixed CSS anchor; there is no pointer-driven position state.
+assert.doesNotMatch(studioSource, /dockOffsets|dockDrag|applyDockOffset/);
 const level = {};
 const app = {querySelector: selector => selector.includes('canvas-flow') ? flow : selector.includes('canvas-view-level') ? level : area};
 const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0,addEventListener(){}}, canvasFitZoom, runCanvasZoom: null};
@@ -141,7 +83,8 @@ assert.equal((planMarkup.match(/data-plan-move="/g) || []).length, 2, 'reorderin
 assert.match(planMarkup, /<div class="inspector-move"><button class="text-button" data-plan-move="step_2" data-direction="earlier"/);
 const nodeBlocks = planMarkup.split('<section class="plan-node').slice(1).map(block => block.slice(0, block.indexOf('</section>')));
 assert.ok(nodeBlocks.length === 3 && nodeBlocks.every(block => !block.includes('data-plan-move')), 'a node carries no reordering controls');
-assert.equal((planMarkup.match(/data-connect-target="/g) || []).length, 2, 'while connecting, the other steps offer Connect here');
+assert.equal((planMarkup.match(/data-connect-target="/g) || []).length, 2, 'while connecting, the other steps are the target');
+assert.ok(!/Connect here/.test(planMarkup), 'the card carries no Connect here button');
 const quiet = workbenchMarkup(plan, {...context, connectSource: null, selectedEdge: null});
 assert.equal((quiet.match(/data-connect-target="/g) || []).length, 0);
 // A step is moved and connected on the canvas itself, so it offers neither a
@@ -166,7 +109,7 @@ assert.ok(!/Choose “Connect here”/.test(planMarkup), 'the prompt says what i
 // that opens the connection's actions.
 assert.equal((planMarkup.match(/data-canvas-edge="/g) || []).length, 2, 'every connection is drawn as a selectable edge');
 assert.equal((planMarkup.match(/class="edge-hit"/g) || []).length, 2, 'each edge has a wide hit area');
-assert.equal((planMarkup.match(/class="canvas-edge selected"/g) || []).length, 1, 'the selected edge is marked');
+assert.equal((planMarkup.match(/class="canvas-edge[^"]*\bselected\b[^"]*"/g) || []).length, 1, 'the selected edge is marked');
 // A connection takes focus, so its actions are reachable without a mouse.
 assert.equal((planMarkup.match(/<g class="canvas-edge[^"]*" data-canvas-edge="[^"]+" tabindex="0" role="button" aria-pressed="(true|false)" aria-label="Connection from /g) || []).length, 2, 'each connection is a focusable, named button');
 assert.equal((planMarkup.match(/data-canvas-edge-menu="/g) || []).length, 1, 'the selected edge offers one handle');
@@ -429,7 +372,7 @@ assert.equal(runStepStatus(plan,unattributed,1),'Incomplete','run-level failures
 assert.match(executionDetailMarkup(plan,unattributed,'step_2',{escape,agentName,outputName,capabilityName}),/did not identify a responsible step/);
 assert.match(executionDetailMarkup(plan,{...diagnosticRun,mode:'stopped',events:diagnosticRun.events.map(event=>event.type==='ApplicationFinished'?{...event,status:'stopped'}:event)},null,{escape,agentName,outputName,capabilityName}),/Step stopped/);
 const selectionCode=studioSource.slice(studioSource.indexOf("  if(old?.runId!==run.runId){"),studioSource.indexOf("  preview=run;liveError='';"));
-const selection={old:{runId:'same',mode:'running'},run:{runId:'same',mode:'failed',events:diagnosticRun.events},selectedRunStepId:'step_2'};
+const selection={preview:{runId:'same'},workspaceMode:'run',old:{runId:'same',mode:'running'},run:{runId:'same',mode:'failed',events:diagnosticRun.events},selectedRunStepId:'step_2'};
 runInNewContext(selectionCode,selection);
 assert.equal(selection.selectedRunStepId,'step_2','failure does not interrupt manual inspection');
 selection.old.mode='failed';selection.selectedRunStepId='step_2';
@@ -547,8 +490,8 @@ validateDefinition(owning);
 const fields = (label, path, value, kind = 'input', options = []) => `${label}|${path}|${value}|${kind}|${options.map(option => option[0]).join(',')}`;
 const owningCanvas = workbenchMarkup(owning, {...context, backends, field: fields});
 // The card says what runs the step, and the settings still offer both halves.
-assert.match(owningCanvas, /class="step-backend" title="Runs on">Codex · gpt-5<\/span>/, 'the step card names the backend its member runs on');
-assert.match(owningCanvas, /class="step-backend" title="Runs on">Ollama · local-a:8b<\/span>/, 'including a member on another backend');
+assert.match(owningCanvas, /<dt>Runs on<\/dt><dd class="step-backend" title="Codex · gpt-5">Codex · gpt-5<\/dd>/, 'the step card names the backend its member runs on');
+assert.match(owningCanvas, /<dt>Runs on<\/dt><dd class="step-backend" title="Ollama · local-a:8b">Ollama · local-a:8b<\/dd>/, 'including a member on another backend');
 assert.match(owningCanvas,/Ollama · local-a:8b/, 'and the settings still name it where it is chosen');
 // The settings panel is showing step_2, whose member runs on Ollama.
 assert.match(owningCanvas, /This step runs on\|workflow\.1\.provider\|\|select\|,codex,ollama,opencode/, 'the step settings offer this host’s backends, with inheriting first');
@@ -558,7 +501,7 @@ const overridden = structuredClone(owning);
 overridden.workflow[1].provider = 'codex';
 validateDefinition(overridden);
 const overriddenCanvas = workbenchMarkup(overridden, {...context, backends, field: fields});
-assert.match(overriddenCanvas, /class="step-backend" title="Runs on">Codex<\/span>/, 'a step that names its own backend says so on the card');
+assert.match(overriddenCanvas, /<dt>Runs on<\/dt><dd class="step-backend" title="Codex">Codex<\/dd>/, 'a step that names its own backend says so on the card');
 assert.match(overriddenCanvas, /This step’s model\|workflow\.1\.model\|\|input\|/, 'a backend that reports no models takes a name instead of a list');
 const unofferable = structuredClone(plan);
 unofferable.agents[0].provider = 'gemini';
@@ -617,8 +560,8 @@ assert.match(css, /\.canvas-first-plan \.canvas-dock\{bottom:16px/, 'the plan ac
 // Panning the canvas must not start from a press on the bar, and the bar says it
 // can be moved by the pointer.
 assert.match(studioSource, /closest\('button,input,textarea,select,\[data-plan-node\],\[data-canvas-dock\]'\)/, 'the bar is not treated as the canvas background');
-assert.match(css, /\.canvas-dock\{cursor:grab;touch-action:none\}/, 'the bar says it can be dragged');
-assert.match(css, /\.canvas-dock\.dragging\{cursor:grabbing/, 'and says so while it moves');
+assert.match(css, /\.canvas-dock\{cursor:default;touch-action:auto;/, 'the dock stays anchored and supports native touch scrolling');
+assert.doesNotMatch(css, /\.canvas-dock\.dragging/, 'there is no draggable dock state');
 assert.match(css, /--plan-height:clamp\(520px,calc\(100vh - 132px\),1400px\)/, 'the run canvas keeps the height it was given');
 assert.match(css, /\.plan-canvas\{[^}]*overflow:auto/, 'and scrolls once the plan outgrows it');
 assert.match(css, /\.shell\.rail-open\{grid-template-columns:232px minmax\(0,1fr\)\}/, 'the sidebar opens when you ask it to');
@@ -706,7 +649,7 @@ assert.match(canvasStyles,/\.canvas-viewport::-webkit-scrollbar\{display:none\}/
   assert.match(studio, /flow\.style\.transform=`translate/, 'only the board is transformed');
   const canvasMoves = studio.slice(studio.indexOf('function applyCanvasOffset('), studio.indexOf('function canvasDropPoint('));
   assert.ok(canvasMoves.length > 500 && !/dock/.test(canvasMoves), 'and nothing that moves the canvas touches the dock');
-  assert.match(studio, /const box=dock\.offsetParent\?\.getBoundingClientRect\(\);/, 'and it is placed against the view it sits in');
+  assert.match(css, /\.canvas-dock\{position:absolute;bottom:16px;left:50%/, 'the dock is anchored to the viewport, not draggable');
 
   // The maths, exercised rather than described: the board moves in its own
   // coordinates, and the point under the pointer stays under it while zooming.

@@ -97,7 +97,7 @@ assert.match(source, /event\.target\.closest\('\[data-plan-node\]'\)\?\.dataset\
 // second press that did not move opens the step's settings. The press is
 // decided from the pointer events the canvas already handles, because opening
 // the settings re-renders the card the pointer is over.
-assert.match(source, /function editPlanStep\(id\)\{\s*showPlanInspector=true;[\s\S]{0,180}selectedStepId=id;render\(\)/, 'opening a step has one implementation');
+assert.match(source, /function editPlanStep\(id\)\{[\s\S]{0,110}showPlanInspector=true;[\s\S]{0,180}selectedStepId=id;render\(\)/, 'opening a step has one implementation');
 assert.equal((source.match(/showPlanInspector=true;[\s\S]{0,180}selectedStepId=id/g) || []).length, 1, 'and every way in lands there');
 assert.match(source, /button\.dataset\.planSelect\)\{editPlanStep\(button\.dataset\.planSelect\)/, 'the step button opens it, for a keyboard or a screen reader');
 assert.match(source, /second=commit&&!drag\.moved&&lastPlanPress\.id===drag\.id&&now-lastPlanPress\.time<500/, 'a double-click is a second press that did not move');
@@ -107,7 +107,8 @@ assert.match(source, /if\(commit&&!drag\.moved\)editPlanStep\(drag\.id\)/, 'and 
 assert.match(source, /updatePlan\(moveCanvasStep\(draft\(\),drag\.id[\s\S]{0,80}scheduleLayoutSave\(\)/, 'a dragged step saves its place without pressing Save');
 assert.match(source, /action==='tidy-canvas'\)\{updatePlan\(tidyCanvas\(draft\(\)\)\);scheduleLayoutSave\(\)/, 'so does Tidy layout');
 assert.match(source, /layoutSaveDefinition\(application\.definition,draft\(\)\)/, 'only the arrangement travels, so an unfinished edit is not saved behind the person');
-assert.match(source, /dirty\(\)\?'Unsaved changes':layoutSaved\?'Layout saved'/, 'unsaved content takes precedence over layout success');
+assert.match(source, /dirty\(\)\?'Unsaved changes':`Saved/, 'unsaved content takes precedence over saved version');
+assert.doesNotMatch(source, /'Layout saved'/, 'layout autosave adds no success notice');
 // Autosaving the layout announces nothing: the canvas shows the arrangement, and
 // the status says it is saved. A save that fails is still reported.
 {
@@ -118,7 +119,7 @@ assert.match(source, /dirty\(\)\?'Unsaved changes':layoutSaved\?'Layout saved'/,
 }
 assert.match(source, /layoutSaved=!!revision&&result\.revision===revision/, 'a save without a content-version advance reports layout success');
 assert.match(source, /if\(currentId===target\)layoutSaved=result\.revision===application\.revision/, 'layout success belongs to the application that was saved');
-assert.match(source, /function resetRuns\(\)\{layoutSaved=false;clearTimeout\(layoutSaveTimer\)/, 'switching applications clears layout success and pending debounce');
+assert.match(source, /function resetRuns\(\)\{workspaceMode='build';stepExamples=null;stepExamplesApp=null;layoutSaved=false;clearTimeout\(layoutSaveTimer\)/, 'switching applications clears layout success and pending debounce');
 
 // One way to do one thing: a control per action, a handler per action, and no
 // second name for something that already has one.
@@ -147,7 +148,7 @@ const counted = name => controls.filter(value => value === name).length;
 
 // Run lives in the canvas's floating action bar. The setup screen has no canvas,
 // so its header carries the one Run button instead: never two on one screen.
-assert.equal(counted('run'), 2, 'the canvas controller and the setup screen each offer Run once');
+assert.equal(counted('run'), 3, 'canvas, setup and empty Run mode each offer a run entry point, never on the same screen');
 assert.match(source, /\$\{view==='setup'\?`<button class="button primary" data-action="run"/, 'the header Run belongs to the setup screen only');
 // One page for the plan and the run: Run is also Run again, and what a run needs
 // is configured in a modal rather than a second screen.

@@ -30,7 +30,9 @@ const liveRuns=new Map(),liveHistory=new Map();
 const steps = ['Purpose','Team','Access','Outputs','Plan','Controls'];
 const accessCatalog=toolDescriptors;
 let canvasZoom=null,runCanvasZoom=null,railOpen=false,showAllApplications=false,canvasPan=null,canvasNodeDrag=null,lastPlanPress={id:null,time:0},connectSource=null,selectedEdge=null,canvasConnect=null;
+let workspaceMode='build';
 let showPlanResources=false,showPlanInspector=false,showPlanAssistant=false,showPlanReadiness=false,planInsertion=null,renderedPlanId=null;
+let planSearch='',planSearchAt=0;
 let selectedStepId=null,resourcePane='steps',memberLibrary=[],libraryError='',memberSaving=false,selectedRunStepId=null;
 let activityExpanded=false,activityFilter='',followActive=true,lastFollowedStep=null,renderedRunId=null;
 const planCommands=new Map();
@@ -48,6 +50,49 @@ const capabilityName=id=>accessCatalog.find(t=>t.id===id)?.name||id;
 
 async function loadIntegrationConnections(){
   try{const result=await request('/api/integrations');integrationCatalogue=result.integrations;integrationEnabled=result.connections_enabled;oauthProviders=result.oauth_providers||[];integrationConnections=integrationEnabled?(await request('/api/connections')).connections:[];}catch{integrationCatalogue=[];integrationConnections=[];integrationEnabled=false;}
+}
+// Saved test examples for the open application, fetched once when a step's
+// settings are first opened, the way the connection catalogue is. A test is
+// projected exactly like a run, so a step's recorded inputs and output read the
+// same whether they came from a test or from a run.
+let stepExamples=null,stepExamplesApp=null,stepExamplesBusy=false;
+async function loadStepTests(){
+  const application=currentId;
+  if(stepExamplesBusy||stepExamplesApp===application)return;
+  stepExamplesBusy=true;
+  try{
+    const [tests,fixtures]=await Promise.all([request(`/api/applications/${encodeURIComponent(application)}/tests`),request(`/api/applications/${encodeURIComponent(application)}/fixtures`)]);
+    if(currentId===application){stepExamples={tests:tests.tests||[],fixtures:fixtures.fixtures||[]};stepExamplesApp=application;}
+  }catch{stepExamples={tests:[],fixtures:[]};stepExamplesApp=application;}
+  finally{stepExamplesBusy=false;}
+}
+// Read the saved examples once per application, so a card can say one exists
+// before anyone opens the step. The guard is what stops this from looping.
+function ensureStepExamples(){
+  if(stepExamplesApp===currentId)return;
+  loadStepTests().then(()=>{if(view==='plan')render();});
+}
+// The latest test of one step, or nothing. Tests come back newest first.
+function stepExample(stepId){
+  if(stepExamplesApp!==currentId||!stepExamples)return null;
+  const found=stepExamples.tests.find(item=>(item.tested_steps||[]).includes(stepId));
+  if(!found)return null;
+  const events=(found.events||[]).map(row=>({sequence:row.sequence,event:{...row.event,type:row.event.type==='TestStarted'?'ApplicationStarted':row.event.type==='TestFinished'?'ApplicationFinished':row.event.type}}));
+  let received=null;
+  try{
+    const run=projectLiveRun({...found,events,reviews:found.reviews||[]});
+    const index=run.definition.workflow.findIndex(step=>step.id===stepId);
+    received=index>=0?run.trace?.[index]?.input??null:null;
+  }catch{received=null;}
+  const fixture=stepExamples.fixtures.find(item=>item.id===found.fixture_id);
+  // A test is refused, not guessed, once the plan's outputs or connections move:
+  // the card says so instead of letting someone discover it on the next test.
+  let outdated=false;
+  if(fixture?.definition){
+    try{outdated=JSON.stringify(fixture.definition.state)!==JSON.stringify(draft().state)||JSON.stringify(planConnections(fixture.definition))!==JSON.stringify(planConnections(draft()));}catch{outdated=true;}
+  }
+  return {name:fixture?.name||'Saved example',authored:!!fixture?.authored,status:found.status,inputs:found.request?.inputs||{},received,
+          output:found.output??null,reference_recorded:!!found.reference_recorded,compared:!!found.comparison,at:found.created_at||'',outdated};
 }
 async function manageIntegrations(error='',focus=''){
   await loadIntegrationConnections();$('record-detail').innerHTML=integrationManagerMarkup(integrationCatalogue,integrationConnections,currentId,escape,integrationEnabled,error,oauthProviders);if(!$('record-dialog').open)$('record-dialog').showModal();
@@ -70,7 +115,7 @@ async function request(path,options={}){
     throw error;
   }return result;
 }
-const stepTests=createStepTestsController({request,getContext:()=>({applicationId:currentId,runId:preview?.runId,stepId:selectedRunStepId,draft:draft(),backends:runtime.backends||[]}),escape,agentName,outputName,capabilityName});
+const stepTests=createStepTestsController({request,getContext:()=>({applicationId:currentId,runId:preview?.runId,stepId:selectedRunStepId,draft:draft(),backends:runtime.backends||[]}),escape,agentName,outputName,capabilityName,onTestsChanged:()=>{stepExamplesApp=null;ensureStepExamples();}});
 function fitCanvas(mode){
   const area=$('app').querySelector(`[data-canvas-mode="${mode}"]`),flow=area?.querySelector('.canvas-flow');if(!flow)return;
   const width=parseFloat(flow.style.width),height=parseFloat(flow.style.height);
@@ -150,33 +195,38 @@ function backendMarkup({path,provider,model,human,inherit='This host’s default
   return `${field(label,`${path}.provider`,provider||'','select',backendOptions(backends,provider,{inherit}))}${modelField}${backendIssue(backends,provider)?`<p class="validation" role="status">${escape(backendIssue(backends,provider))}</p>`:''}`;
 }
 function validation(d=draft()){try{validateDefinition(d);return '';}catch(error){return `<div class="validation" role="alert">${escape(error.message)}</div>`;}}
+function workspaceModesMarkup(){
+  return `<nav class="workspace-modes" aria-label="Workflow workspace">${[['build','Build'],['test','Test'],['run','Run'],['results','Results']].map(([mode,label])=>`<button data-workspace-mode="${mode}" aria-pressed="${workspaceMode===mode}" ${mode==='results'&&!preview?.live?'disabled title="Run the workflow to see results"':''}>${label}</button>`).join('')}<span class="version-note">${workspaceMode==='run'||workspaceMode==='results'?`Run · saved version ${escape(preview?.revision??current().revision??'not saved')}`:'Editing current draft · tests never send or publish'}</span></nav>`;
+}
 function render(){
   if(!currentId)return;
   // The header's play/stop slot follows the run that is actually going.
+  const viewingRun=!!preview?.live&&['run','results'].includes(workspaceMode);
   const running=!!preview?.live&&['pending','running','waiting_human'].includes(preview.mode);
   const disclosures=[...$('app').querySelectorAll('details[data-disclosure]')].map(element=>({key:element.dataset.disclosure,open:element.open}));
   const scrolls=['.plan-canvas','.workbench-resources','.workbench-inspector'].map(selector=>({selector,top:$('app').querySelector(selector)?.scrollTop||0,left:$('app').querySelector(selector)?.scrollLeft||0}));
-  const active=document.activeElement,key=$('app').contains(active)?['path','action','select','tab','record','request','step','filter','format','tool','outputKind','planDrag','assistantInput','requestField','humanInput','humanField','liveHistory'].find(k=>active.dataset?.[k]):null,val=key?active.dataset[key]:null,start=active?.selectionStart,end=active?.selectionEnd,index=active?.dataset?.index;
-  const d=preview?.live?preview.definition:draft();
+  const active=document.activeElement,key=$('app').contains(active)?['path','action','select','tab','record','request','step','filter','format','tool','outputKind','planDrag','assistantInput','requestField','humanInput','humanField','liveHistory','planSearch'].find(k=>active.dataset?.[k]):null,val=key?active.dataset[key]:null,start=active?.selectionStart,end=active?.selectionEnd,index=active?.dataset?.index;
+  const d=viewingRun?preview.definition:draft();
   // The plan is laid out for the canvas it is drawn in: measured from the canvas
   // on screen, and from the window on the very first render.
   const existing=$('app').querySelector('.plan-canvas');
   const size=existing?{width:Math.max(480,existing.clientWidth-40),height:Math.max(420,existing.clientHeight-40)}
     :{width:Math.max(760,Math.round(window.innerWidth*0.9)),height:Math.max(520,Math.round(window.innerHeight*0.8))};
-  if(!(view==='plan'&&(preview?.live?renderedRunId===preview.runId:renderedPlanId===currentId))){let shape;try{shape=planShape(d);}catch{shape={levels:1,columns:d.workflow.length};}setCanvasMetrics({...size,...shape});}
-  const markup=`<div class="shell ${view==='plan'?(preview?.live?'canvas-first-run':'canvas-first-plan'):''} ${railOpen?'rail-open':''}"><aside class="rail ${railOpen?'open':''}" aria-label="Your applications"><button class="rail-toggle" data-action="toggle-rail" aria-expanded="${railOpen}" aria-label="${railOpen?'Collapse the sidebar':'Expand the sidebar'}" title="${railOpen?'Collapse the sidebar':'Expand the sidebar'}"><span aria-hidden="true">${railOpen?'«':'»'}</span></button><div class="brand"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m23 8-7-4-9 5v14l9 5 7-4M7 9l9 6 7-4M16 15v13"/></svg><span class="rail-label">Conclave<small>STUDIO</small></span></div><button class="button rail-action" data-action="new" ${saving?'disabled':''} aria-label="New application" title="New application"><span class="rail-icon" aria-hidden="true">＋</span><span class="rail-label">New application</span></button><button class="button catalogue-open rail-action" data-action="open-catalogue" aria-label="Templates" title="Templates"><span class="rail-icon" aria-hidden="true">▤</span><span class="rail-label">Templates</span></button><div class="rail-apps"><span class="eyebrow rail-label">YOUR APPLICATIONS</span><nav class="nav">${sidebarApplications().map(a=>`<button data-select="${escape(a.id)}" class="${a.id===currentId?'active':''}" ${a.id===currentId?'aria-current="true"':''} ${saving?'disabled':''} title="${escape(drafts.get(a.id).name)}"><span class="app-mark" aria-hidden="true">${escape(drafts.get(a.id).name.slice(0,1).toUpperCase())}</span><span class="rail-label">${escape(drafts.get(a.id).name)}<span class="nav-meta">${drafts.get(a.id).agents.length} roles${!a.revision?' · draft':''}</span></span></button>`).join('')}</nav>${userApplications().length>3?`<button class="text-button rail-label" data-action="toggle-applications">${showAllApplications?'Show fewer':'Show all '+userApplications().length}</button>`:''}</div><div class="rail-foot">${accountMarkup()}<p class="runtime-label rail-label">${runtime.local?'On this computer':'Hosted'+(runtime.tenant&&runtime.tenant!=='local'?' · '+escape(runtime.tenant):'')}</p><details><summary><span class="rail-icon" aria-hidden="true">⚙</span><span class="rail-label">Workspace settings</span></summary>${runtime.local?'<button class="text-button" data-action="source-settings">Source settings</button>':''}<button class="text-button" data-action="edit-catalogue">Custom catalog</button></details></div></aside>
-    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}</h1>${view==='plan'&&!preview?.live?`<p class="application-goal">${escape(d.description)}</p>`:''}</div><div class="header-actions"><div class="actions">${dirty()?`<button class="button" data-action="save" ${saving?'disabled':''}>${saving?'Saving…':'Save'}</button>`:''}${liveHistory.get(currentId)?.length?`<button class="button icon-only" data-action="show-history" title="Run history" aria-label="Run history">${uiIcon('clock')}</button>`:''}${view==='setup'?`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>Run</button>`:''}${view==='setup'?`<button class="button icon-only" data-action="back-to-plan" title="Back to the canvas" aria-label="Back to the canvas">${uiIcon('fit')}</button>`:''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':layoutSaved?'Layout saved':`Saved · version ${current().revision}`}</span></div></header>
-    <div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():preview?.live?runMarkup():planMarkup(draft())}</div></main></div><div id="app-menu" class="canvas-menu-host" hidden></div>`;
-  const stableRun=view==='plan'&&(preview?.live?renderedRunId===preview.runId&&$('app').querySelector('[data-run-canvas]'):renderedPlanId===currentId&&$('app').querySelector('[data-canvas-drop]'));
+  if(!(view==='plan'&&(viewingRun?renderedRunId===preview.runId:renderedPlanId===currentId))){let shape;try{shape=planShape(d);}catch{shape={levels:1,columns:d.workflow.length};}setCanvasMetrics({...size,...shape});}
+  const markup=`<div class="shell ${view==='plan'?(viewingRun?'canvas-first-run':'canvas-first-plan'):''} ${railOpen?'rail-open':''}"><aside class="rail ${railOpen?'open':''}" aria-label="Your applications"><button class="rail-toggle" data-action="toggle-rail" aria-expanded="${railOpen}" aria-label="${railOpen?'Collapse the sidebar':'Expand the sidebar'}" title="${railOpen?'Collapse the sidebar':'Expand the sidebar'}"><span aria-hidden="true">${railOpen?'«':'»'}</span></button><div class="brand"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m23 8-7-4-9 5v14l9 5 7-4M7 9l9 6 7-4M16 15v13"/></svg><span class="rail-label">Conclave<small>STUDIO</small></span></div><button class="button rail-action" data-action="new" ${saving?'disabled':''} aria-label="New application" title="New application"><span class="rail-icon" aria-hidden="true">＋</span><span class="rail-label">New application</span></button><button class="button catalogue-open rail-action" data-action="open-catalogue" aria-label="Templates" title="Templates"><span class="rail-icon" aria-hidden="true">▤</span><span class="rail-label">Templates</span></button><div class="rail-apps"><span class="eyebrow rail-label">YOUR APPLICATIONS</span><nav class="nav">${sidebarApplications().map(a=>`<button data-select="${escape(a.id)}" class="${a.id===currentId?'active':''}" ${a.id===currentId?'aria-current="true"':''} ${saving?'disabled':''} title="${escape(drafts.get(a.id).name)}"><span class="app-mark" aria-hidden="true">${escape(drafts.get(a.id).name.slice(0,1).toUpperCase())}</span><span class="rail-label">${escape(drafts.get(a.id).name)}<span class="nav-meta">${drafts.get(a.id).agents.length} roles${!a.revision?' · draft':''}</span></span></button>`).join('')}</nav>${userApplications().length>3?`<button class="text-button rail-label" data-action="toggle-applications">${showAllApplications?'Show fewer':'Show all '+userApplications().length}</button>`:''}</div><div class="rail-foot">${accountMarkup()}<p class="runtime-label rail-label">${runtime.local?'On this computer':'Hosted'+(runtime.tenant&&runtime.tenant!=='local'?' · '+escape(runtime.tenant):'')}</p><details><summary><span class="rail-icon" aria-hidden="true">⚙</span><span class="rail-label">Workspace settings</span></summary>${runtime.local?'<button class="text-button" data-action="source-settings">Source settings</button>':''}<button class="text-button" data-action="edit-catalogue">Custom catalog</button></details></div></aside>
+    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}</h1>${view==='plan'&&!viewingRun?`<p class="application-goal">${escape(d.description)}</p>${!current().revision?'<p class="field-help">Review the workflow and save it. Then select a step to test with sample inputs; connect accounts only when needed.</p>':''}`:''}</div><div class="header-actions"><div class="actions">${dirty()?`<button class="button" data-action="save" ${saving?'disabled':''}>${saving?'Saving…':'Save'}</button>`:''}${liveHistory.get(currentId)?.length?`<button class="button" data-action="show-history" title="Run history" aria-label="Run history">${uiIcon('clock')}<span>History</span></button>`:''}${view==='setup'?`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>Run</button>`:''}${view==='setup'?`<button class="button icon-only" data-action="back-to-plan" title="Back to the canvas" aria-label="Back to the canvas">${uiIcon('fit')}</button>`:''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':`Saved · version ${current().revision}`}</span></div></header>
+    ${view==='plan'?workspaceModesMarkup():''}<div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():workspaceMode==='results'?resultsWorkspaceMarkup():viewingRun?runMarkup():workspaceMode==='run'?'<section class="panel"><h2>Run the saved workflow</h2><p>Save your draft before running. Tests use sample inputs; workflow runs use real inputs and permissions.</p><button class="button primary" data-action="run">Configure run</button></section>':planMarkup(draft())}</div></main></div><div id="app-menu" class="canvas-menu-host" hidden></div>`;
+  const stableRun=view==='plan'&&workspaceMode!=='results'&&(viewingRun?renderedRunId===preview.runId&&$('app').querySelector('[data-run-canvas]'):renderedPlanId===currentId&&$('app').querySelector('[data-canvas-drop]'));
   if(stableRun)updateRunDOM($('app'),markup);else $('app').innerHTML=markup;
-  renderedPlanId=!preview?.live&&view==='plan'?currentId:null;
-  renderedRunId=preview?.live&&view==='plan'?preview.runId:null;
+  renderedPlanId=!viewingRun&&view==='plan'?currentId:null;
+  renderedRunId=viewingRun&&view==='plan'?preview.runId:null;
   for(const disclosure of disclosures){const element=$('app').querySelector(`[data-disclosure="${CSS.escape(disclosure.key)}"]`);if(element)element.open=disclosure.open;}
-  $('main-panel').classList.toggle('run-workspace',!!preview?.live&&view!=='setup');
+  $('main-panel').classList.toggle('run-workspace',viewingRun&&view!=='setup');
   sizeRunCanvas();sizePlanCanvas();
   if(!stableRun)for(const scroll of scrolls){const element=$('app').querySelector(scroll.selector);if(element){element.scrollTop=scroll.top;element.scrollLeft=scroll.left;}}
-  applyDockOffset();
   syncMenu();
+  if(view==='plan'&&!viewingRun)applyPlanSearch();
+  ensureStepExamples();
   followActiveNode();
   if(!stableRun&&key){const attribute=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase()),next=$('app').querySelector(`[data-${attribute}="${CSS.escape(val)}"]${index!==undefined?`[data-index="${CSS.escape(index)}"]`:''}`);next?.focus({preventScroll:true});if(next&&typeof start==='number'&&['INPUT','TEXTAREA'].includes(next.tagName)&&next.type!=='number')try{next.setSelectionRange(start,end);}catch{}}
 }
@@ -268,56 +318,6 @@ function sizePlanCanvas(){
 }
 window.addEventListener('resize',sizePlanCanvas);
 window.addEventListener('resize',sizeRunCanvas);
-
-// The canvas action bar floats over the graph, so it can be moved out of the way
-// of whatever is underneath it. The position is kept per application for this
-// session, clamped to the canvas, and re-applied after every render because the
-// bar is rebuilt with the canvas.
-const dockOffsets=new Map();
-let dockDrag=null;
-function placeDock(dock,offset){
-  dock.style.left=`${offset.left}px`;dock.style.top=`${offset.top}px`;
-  dock.style.right='auto';dock.style.bottom='auto';dock.style.transform='none';
-}
-function clampDock(dock,left,top){
-  const box=dock.offsetParent?.getBoundingClientRect();
-  const width=dock.offsetWidth,height=dock.offsetHeight;
-  const limitX=(box?box.width:window.innerWidth)-width-8,limitY=(box?box.height:window.innerHeight)-height-8;
-  return {left:Math.round(Math.max(8,Math.min(limitX,left))),top:Math.round(Math.max(8,Math.min(limitY,top)))};
-}
-function applyDockOffset(){
-  const dock=$('app').querySelector('[data-canvas-dock]'),offset=dock&&dockOffsets.get(currentId);
-  if(!dock)return;
-  if(offset)placeDock(dock,clampDock(dock,offset.left,offset.top));
-}
-// Pressing the bar's own surface drags it; its buttons keep their meaning.
-$('app').addEventListener('pointerdown',event=>{
-  const dock=event.target.closest?.('[data-canvas-dock]');
-  if(!dock||event.button!==0||event.target.closest('button,input,select,textarea,a'))return;
-  const box=dock.getBoundingClientRect(),panel=dock.offsetParent?.getBoundingClientRect();
-  if(!panel)return;
-  dockDrag={pointer:event.pointerId,dock,x:event.clientX,y:event.clientY,left:box.left-panel.left,top:box.top-panel.top,moved:false};
-  dock.setPointerCapture?.(event.pointerId);event.preventDefault?.();
-});
-$('app').addEventListener('pointermove',event=>{
-  const drag=dockDrag;if(!drag||drag.pointer!==event.pointerId)return;
-  const next=clampDock(drag.dock,drag.left+(event.clientX-drag.x),drag.top+(event.clientY-drag.y));
-  if(!drag.moved&&next.left===drag.left&&next.top===drag.top)return;
-  drag.moved=true;drag.next=next;drag.dock.classList.add('dragging');placeDock(drag.dock,next);event.preventDefault?.();
-});
-function finishDockDrag(commit){
-  const drag=dockDrag;if(!drag)return;dockDrag=null;
-  drag.dock.releasePointerCapture?.(drag.pointer);drag.dock.classList.remove('dragging');
-  if(commit&&drag.moved)dockOffsets.set(currentId,drag.next);
-}
-$('app').addEventListener('pointerup',event=>{if(dockDrag?.pointer===event.pointerId)finishDockDrag(true);});
-$('app').addEventListener('pointercancel',event=>{if(dockDrag?.pointer===event.pointerId)finishDockDrag(false);});
-// Double-clicking the bar puts it back where it started.
-$('app').addEventListener('dblclick',event=>{
-  const dock=event.target.closest?.('[data-canvas-dock]');
-  if(!dock||event.target.closest('button,input,select,textarea,a')||!dockOffsets.has(currentId))return;
-  dockOffsets.delete(currentId);render();
-});
 
 // The canvas context menu: the actions that belong to the step, connection or
 // background that was pressed. It is a shortcut, never the only route — every
@@ -509,11 +509,75 @@ function canvasFullscreen(){
   if(document.fullscreenElement)document.exitFullscreen?.();else plan.requestFullscreen?.();
 }
 document.addEventListener('fullscreenchange',()=>{sizePlanCanvas();const button=$('app').querySelector('[data-action="canvas-fullscreen"]');if(button){const expanded=!!document.fullscreenElement,label=expanded?'Exit full screen':'Full screen';button.setAttribute('aria-pressed',String(expanded));button.setAttribute('aria-label',label);button.title=label;button.innerHTML=uiIcon(expanded?'collapse':'expand');}});
-function planMarkup(d){
-  if(!d.workflow.some(step=>step.id===selectedStepId))selectedStepId=d.workflow[0].id;
-  const command=commandState();return workbenchMarkup(d,{escape,field,agentName,outputName,capabilityName,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,provider:runtime.provider||'',issues:planReadiness(d,readinessRuntime()),runtime:readinessRuntime(),connectionSettings:memberIndex=>connectionAssignmentMarkup(d.agents[memberIndex],memberIndex,integrationCatalogue,integrationConnections,currentId,escape),selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,controls:runControllerMarkup(),toolsDisabled:runInFlight(),backends:runtime.backends||[]});
+
+// Finding a step in a large workflow. A step answers to its name, the member who
+// does it, and what it produces, because those are the three things a person
+// remembers about it.
+function planSearchMatches(d=draft()){
+  const query=planSearch.trim().toLowerCase();
+  if(!query)return [];
+  return d.workflow.filter(step=>[step.name,agentName(d,step.agent),outputName(d,step.output)].some(text=>String(text||'').toLowerCase().includes(query))).map(step=>step.id);
+}
+// Marking is done on the drawn canvas rather than by redrawing it, so typing
+// never takes the caret out of the field or the canvas out from under a pan.
+function applyPlanSearch(){
+  const area=$('app').querySelector('[data-canvas-mode="plan"]');if(!area)return;
+  const matches=planSearchMatches(),query=!!planSearch.trim();
+  for(const node of area.querySelectorAll('[data-plan-node]')){
+    const hit=matches.includes(node.dataset.planNode);
+    node.classList.toggle('match',query&&hit);
+    node.classList.toggle('muted',query&&!hit);
+  }
+  const count=$('app').querySelector('[data-plan-search-count]');
+  if(count)count.textContent=!query?'':matches.length?(planSearchAt%matches.length)+1+' of '+matches.length+' match':(draft().workflow.length?'No step matches':'');
+  const next=$('app').querySelector('[data-plan-search-next]');
+  if(next)next.hidden=!query||!matches.length;
+}
+// Enter steps through the matches and opens the step, so finding one and reading
+// it are the same gesture.
+function stepThroughSearch(direction=1){
+  const matches=planSearchMatches();
+  if(!matches.length){notify('No step matches “'+planSearch.trim()+'”.');return;}
+  planSearchAt=(planSearchAt+direction+matches.length*2)%matches.length;
+  applyPlanSearch();
+  editPlanStep(matches[planSearchAt]);
 }
 
+// Groups are canvas arrangement: creating one, folding one and moving a step
+// between them only ever changes what the plan draws.
+function togglePlanGroup(id){
+  const d=structuredClone(draft()),group=(d.canvas?.groups||[]).find(item=>item.id===id);
+  if(!group)return;
+  group.collapsed=!group.collapsed;drafts.set(currentId,d);markDirty();render();
+}
+function addPlanGroup(stepId,name){
+  const label=String(name||'').trim();
+  if(!label)throw new Error('Name the group before creating it.');
+  const d=structuredClone(draft());d.canvas??={positions:{}};d.canvas.groups??=[];
+  if(d.canvas.groups.length>=20)throw new Error('Use up to 20 canvas groups.');
+  let id='group_'+(d.canvas.groups.length+1);
+  while(d.canvas.groups.some(group=>group.id===id))id='group_'+(Number(id.split('_')[1])+1);
+  d.canvas.groups.push({id,name:label,collapsed:false});
+  const step=d.workflow.find(item=>item.id===stepId);if(step)step.group=id;
+  validateDefinition(d);drafts.set(currentId,d);markDirty();render();notify('Group “'+label+'” created.');
+}
+function setStepGroup(stepId,id){
+  const d=structuredClone(draft()),step=d.workflow.find(item=>item.id===stepId);
+  if(!step)return;
+  if(id)step.group=id;else delete step.group;
+  validateDefinition(d);drafts.set(currentId,d);markDirty();render();
+}
+function planMarkup(d){
+  if(!d.workflow.some(step=>step.id===selectedStepId))selectedStepId=d.workflow[0].id;
+  const command=commandState();return workbenchMarkup(d,{escape,field,agentName,outputName,capabilityName,search:planSearch,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,provider:runtime.provider||'',issues:planReadiness(d,readinessRuntime()),runtime:readinessRuntime(),connectionSettings:memberIndex=>connectionAssignmentMarkup(d.agents[memberIndex],memberIndex,integrationCatalogue,integrationConnections,currentId,escape),selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,controls:runControllerMarkup(),toolsDisabled:runInFlight(),backends:runtime.backends||[],run:preview?.live?preview:null,exampleFor:stepExample,exampleBadge:stepExample});
+}
+
+function resultsWorkspaceMarkup(){
+  if(!preview?.live)return '<section class="panel"><h2>No results yet</h2><p>Run the saved workflow to produce results.</p></section>';
+  const run=preview,d=run.definition;
+  const visible=d.views.filter(item=>Array.isArray(run.state[item.collection])?run.state[item.collection].length:!!run.state[item.collection]);
+  return `<section class="results-workspace"><header><h2>${run.mode==='completed'?'Workflow results':'Work saved so far'}</h2><p>Saved version ${escape(run.revision)} · ${escape(run.mode)} · ${run.completedSteps.length} steps complete. These are run outputs, not test outputs.</p><button class="button" data-action="show-history">Previous runs</button><button class="button" data-workspace-mode="run">Return to execution</button></header>${visible.map(item=>`<article class="panel"><h3>${escape(item.title||item.id)}</h3>${viewMarkup(item,run.state,d)}</article>`).join('')||'<p>No step has produced output yet.</p>'}<details><summary>Request and technical activity</summary><p>${escape(run.task)}</p><pre class="code">${escape(JSON.stringify(run.events,null,2))}</pre></details></section>`;
+}
 function runMarkup(){
   if(!current().revision)return `<section class="panel"><h2>Save this application first</h2><p>Requests run the saved application through Conclave.</p></section>`;
   return studioLiveMarkup();
@@ -589,6 +653,7 @@ function selectLiveRecord(record){
   if(old?.runId!==run.runId){requests.live=run.task;requestInputs.live[currentId]=structuredClone(run.inputs);requestResources[currentId]=record.request.resources?.source||'';}
   if(old?.review?.id!==run.review?.id)humanDraft={decision:'',body:''};
   if(old?.runId!==run.runId){selectedRunStepId=null;activityExpanded=false;activityFilter='';followActive=true;lastFollowedStep=null;runCanvasZoom=renderedPlanId===currentId?canvasZoom:null;}
+  if(preview?.runId!==run.runId)workspaceMode='run';
   preview=run;liveError='';
   if(run.mode==='running'){request(`/api/runs/${run.runId}/tool-approvals`).then(result=>{if(preview?.runId!==run.runId)return;const changed=JSON.stringify(pendingToolApprovals)!==JSON.stringify(result.approvals);pendingToolApprovals=result.approvals;if(changed)render();}).catch(()=>{});}else pendingToolApprovals=[];
   const url=new URL(location.href);url.searchParams.set('application',currentId);url.searchParams.set('run',run.runId);history.replaceState(null,'',url);
@@ -656,10 +721,10 @@ function runControllerMarkup(){
   // Icons only, one per thing a person can do to the run. What the run is waiting
   // for (Review input, View results) stays in words in the status line above the
   // canvas, so no action is offered twice and none is wordless-only.
-  const busy=liveBusy?'disabled':'',run=()=>`<button type="button" class="canvas-action primary" data-action="run" ${busy} title="${preview?.live?'Run again':'Run this application'}" aria-label="${preview?.live?'Run again':'Run this application'}">${uiIcon('play')}</button>`;
+  const busy=liveBusy?'disabled':'',run=()=>`<button type="button" class="canvas-action primary" data-action="run" ${busy} title="${preview?.live?'Run again':'Run this application'}" aria-label="${preview?.live?'Run again':'Run this application'}">${uiIcon('play')}<span>Run workflow</span></button>`;
   const stop=()=>`<button type="button" class="canvas-action stop" data-action="cancel-live" ${busy} title="Stop this run" aria-label="Stop this run">${uiIcon('stop')}</button>`;
-  if(!preview?.live||['completed','stopped','failed','cancelled','interrupted'].includes(preview.mode))return run();
-  if(preview.mode==='paused'||(preview.mode==='stopped'&&preview.resumable))return `<button type="button" class="canvas-action primary" data-action="resume-live" ${busy||!runtime.available?'disabled':''} title="Continue from the next step" aria-label="Continue from the next step">${uiIcon('play')}</button>${stop()}`;
+  if(!preview?.live||['completed','stopped','failed','cancelled','interrupted'].includes(preview.mode)&&!preview.resumable)return run();
+  if(preview.mode==='paused'||(['stopped','failed','interrupted'].includes(preview.mode)&&preview.resumable))return `<button type="button" class="canvas-action primary" data-action="resume-live" ${busy||!runtime.available?'disabled':''} title="Continue from the next step" aria-label="Continue from the next step">${uiIcon('play')}</button>${stop()}`;
   // Waiting for a person is not running: there is nothing to pause, and Run
   // comes back once the review is submitted.
   if(preview.mode==='waiting_human')return stop();
@@ -700,7 +765,7 @@ function viewMarkup(view,state,d){
   return `<section class="section output-section"><div class="view-header"><h2>${escape(view.title)}</h2>${Array.isArray(value)?`<span class="output-count">${value.length}</span>`:''}</div>${markup}</section>`;
 }
 
-function markDirty(){const span=$('save-state');if(span){span.textContent='Unsaved changes';span.classList.add('dirty');}const name=$('application-name');if(name&&!preview?.live)name.textContent=draft().name;}
+function markDirty(){const span=$('save-state');if(span){span.textContent='Unsaved changes';span.classList.add('dirty');}const name=$('application-name');if(name&&['build','test'].includes(workspaceMode))name.textContent=draft().name;}
 function updateField(path,value){
   const d=draft(),parts=path.split('.');if(parts[0]==='budget_warnings')d.budget_warnings??={};let object=d;for(const part of parts.slice(0,-1))object=object[part];const key=parts.at(-1),before=object[key];
   if(path.endsWith('.statuses'))value=value.split(',').map(x=>x.trim()).filter(Boolean);if(path.endsWith('.required'))value=value==='true';if(path.startsWith('run_config.')||path.startsWith('run_budget.')||path.startsWith('budget_warnings.'))value=value===''?null:Number(value);object[key]=value;
@@ -754,7 +819,7 @@ async function saveLayout(){
   finally{saving=false;render();}
 }
 function pauseActiveRun(){stopFollowingLiveRun();}
-function resetRuns(){layoutSaved=false;clearTimeout(layoutSaveTimer);layoutSaveTimer=null;stopFollowingLiveRun();liveError='';preview=null;requests={live:''};}
+function resetRuns(){workspaceMode='build';stepExamples=null;stepExamplesApp=null;layoutSaved=false;clearTimeout(layoutSaveTimer);layoutSaveTimer=null;stopFollowingLiveRun();liveError='';preview=null;requests={live:''};}
 function createApplication(templateId='blank',brief={}){
   const definition=composeCatalogApplication(templateId,brief.roles||[],brief.tools||{});
   if(brief.name)definition.name=brief.name.trim();if(brief.purpose)definition.description=brief.purpose.trim();if(brief.result)definition.workflow.at(-1).task=brief.result.trim();validateDefinition(definition);
@@ -915,11 +980,12 @@ function renderEditor(){
   $('editor-content').innerHTML=`<span class="eyebrow">${s.kind==='new'?'NEW APPLICATION':'APPLICATION SETUP'}</span><h2 id="editor-title">${escape(title)}</h2>${body}<div id="editor-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="button" data-dialog-cancel>Cancel</button><button type="submit" ${s.kind==='import'&&!s.parsed?'disabled':''} class="button ${s.kind.startsWith('remove')?'danger':'primary'}">${submit}</button></div>`;
   for(const item of editorDisclosures){const element=$('editor-content').querySelector(`[data-editor-disclosure="${CSS.escape(item.key)}"]`);if(element)element.open=item.open;}
 }
-async function submitEditor(){const s=dialogState;if(s.kind==='source-settings'){const sources=JSON.parse(s.sourcesText);if(s.source&&!sources[s.source])throw new Error('Choose an authorized source ID.');await request('/api/settings/sources',{method:'PUT',body:JSON.stringify({sources})});if(s.source)draft().resources={source:s.source};else delete draft().resources;markDirty();await saveApplication();runtime=await request('/api/runtime');registerHostTools(runtime.tool_descriptors||[]);dialogState=null;$('editor-dialog').close();render();notify('Source settings saved.');return;}if(s.kind==='workspace-catalogue'){const catalogue=validateWorkspaceCatalogue(JSON.parse(s.catalogueText));workspaceCatalogue=await request('/api/catalogue',{method:'PUT',body:JSON.stringify({catalogue,revision:workspaceCatalogue.revision})});installWorkspaceCatalogue(catalogue);$('editor-dialog').close();dialogState=null;render();notify('Custom catalog saved.');return;}if(s.kind==='goal'){await askGoalQuestions(s);return;}if(s.kind==='goal-questions'){await continueGoalQuestions(s);return;}if(s.kind==='proposed-new'){createImportedApplication(s.definition);$('editor-dialog').close();dialogState=null;return;}if(s.kind==='new'&&s.goalBased){const d=composeGoalDefinition(s);createImportedApplication(d);buildStep=4;render();$('editor-dialog').close();dialogState=null;notify('Application created. Review its steps on the canvas, then save it.');return;}if(s.kind==='import'){if(!s.parsed)throw new Error('Validate and review the definition first.');createImportedApplication(s.parsed);}else if(s.kind==='new'){if(!s.name.trim()||!s.purpose.trim()||!s.result.trim())throw new Error('Give the application a name, purpose and expected result.');createApplication(s.template,{name:s.name,purpose:s.purpose,result:s.result,roles:s.roles,tools:s.tools});}else if(s.kind==='assign-tool')assignCatalogTool(s.tool,s.agent);else if(s.kind==='add-role')addRole({...s,kind:s.memberKind});else if(s.kind==='add-output')addOutput({...s,kind:s.outputKind});else if(s.kind==='remove-role')removeRole(s.index,s.reassign);else if(s.kind==='remove-output')removeOutput(s.index);$('editor-dialog').close();dialogState=null;}
+async function submitEditor(){const s=dialogState;if(s.kind==='source-settings'){const sources=JSON.parse(s.sourcesText);if(s.source&&!sources[s.source])throw new Error('Choose an authorized source ID.');await request('/api/settings/sources',{method:'PUT',body:JSON.stringify({sources})});if(s.source)draft().resources={source:s.source};else delete draft().resources;markDirty();await saveApplication();runtime=await request('/api/runtime');registerHostTools(runtime.tool_descriptors||[]);dialogState=null;$('editor-dialog').close();render();notify('Source settings saved.');return;}if(s.kind==='workspace-catalogue'){const catalogue=validateWorkspaceCatalogue(JSON.parse(s.catalogueText));workspaceCatalogue=await request('/api/catalogue',{method:'PUT',body:JSON.stringify({catalogue,revision:workspaceCatalogue.revision})});installWorkspaceCatalogue(catalogue);$('editor-dialog').close();dialogState=null;render();notify('Custom catalog saved.');return;}if(s.kind==='goal'){await askGoalQuestions(s);return;}if(s.kind==='goal-questions'){await continueGoalQuestions(s);return;}if(s.kind==='proposed-new'){createImportedApplication(s.definition);$('editor-dialog').close();dialogState=null;return;}if(s.kind==='new'&&s.goalBased){const d=composeGoalDefinition(s);createImportedApplication(d);buildStep=4;render();$('editor-dialog').close();dialogState=null;notify('Workflow created. Review and save it, then test one step with sample inputs before running.');return;}if(s.kind==='import'){if(!s.parsed)throw new Error('Validate and review the definition first.');createImportedApplication(s.parsed);}else if(s.kind==='new'){if(!s.name.trim()||!s.purpose.trim()||!s.result.trim())throw new Error('Give the application a name, purpose and expected result.');createApplication(s.template,{name:s.name,purpose:s.purpose,result:s.result,roles:s.roles,tools:s.tools});}else if(s.kind==='assign-tool')assignCatalogTool(s.tool,s.agent);else if(s.kind==='add-role')addRole({...s,kind:s.memberKind});else if(s.kind==='add-output')addOutput({...s,kind:s.outputKind});else if(s.kind==='remove-role')removeRole(s.index,s.reassign);else if(s.kind==='remove-output')removeOutput(s.index);$('editor-dialog').close();dialogState=null;}
 function updatePlan(next,focusId=null){const before=draft();if(!next.canvas&&before?.workflow.some(step=>next.workflow.some(item=>item.id===step.id))){let positions;try{positions=canvasPositions(before);}catch{positions={};}next.canvas={positions:{...canvasPositions(next),...Object.fromEntries(Object.entries(positions).filter(([id])=>next.workflow.some(step=>step.id===id)))}};}drafts.set(currentId,next);if(focusId)selectedStepId=focusId;markDirty();render();if(focusId&&!showPlanInspector){const handle=$('app').querySelector(`[data-plan-node="${CSS.escape(focusId)}"] .step-summary`);handle?.focus({preventScroll:true});handle?.scrollIntoView?.({block:'nearest',inline:'nearest'});}}
 // Opening a step's settings. Both ways in land here: the step's own button (a
 // click, or Enter on it) and a double-click anywhere on the card.
 function editPlanStep(id){
+  if(!['build','test'].includes(workspaceMode))workspaceMode='build';
   showPlanInspector=true;showPlanResources=false;showPlanAssistant=false;showPlanReadiness=false;selectedStepId=id;render();
   if(!integrationCatalogue.length)loadIntegrationConnections().then(()=>{if(showPlanInspector&&selectedStepId===id)render();});
   const inspector=$('app').querySelector('.workbench-inspector');
@@ -969,6 +1035,8 @@ function finishCanvasDrop(drag,clientX,clientY){
 }
 function dragAutoScroll(clientY){const canvas=$('app').querySelector('.plan-canvas');if(!canvas)return;const rect=canvas.getBoundingClientRect();if(clientY<rect.top+60)panCanvas(canvas,0,24);else if(clientY>rect.bottom-60)panCanvas(canvas,0,-24);}
 let skipPlanClickUntil=0;
+$('app').addEventListener('change',event=>{try{if(event.target.hasAttribute('data-activity-filter')){activityFilter=event.target.value;render();return;}if(event.target.hasAttribute('data-source-resource')){requestResources[currentId]=event.target.value;render();return;}if(event.target.dataset.stepGroup!==undefined){setStepGroup(event.target.dataset.stepGroup,event.target.value);return;}
+    if(event.target.dataset.stepParent){const {stepParent:from,stepChild:to}=event.target.dataset;updatePlan(event.target.checked?connectPlanSteps(draft(),from,to):disconnectPlanSteps(draft(),from,to),to);return;}if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.dataset.tool){const role=draft().agents[Number(event.target.dataset.index)],tool=event.target.dataset.tool;if(role.kind==='human')throw new Error('Human members do not use agent tools.');if(event.target.checked&&!role.tools.includes(tool))role.tools.push(tool);else if(!event.target.checked)role.tools=role.tools.filter(t=>t!==tool);markDirty();render();}if(event.target.dataset.format!==undefined)setOutputFormat(Number(event.target.dataset.format),event.target.value);if(event.target.dataset.outputKind!==undefined)setOutputKind(Number(event.target.dataset.outputKind),event.target.value);}catch(error){if(event.target.dataset.stepParent)render();notify(error.message);}});
 $('app').addEventListener('input',event=>{if(event.target.dataset.path)updateField(event.target.dataset.path,event.target.value);if(event.target.dataset.requestField){const mode=event.target.dataset.inputMode;requestInputs[mode][currentId]??={};requestInputs[mode][currentId][event.target.dataset.requestField]=event.target.value;}if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;if(event.target.dataset.humanInput)humanDraft[event.target.dataset.humanInput]=event.target.value;if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.hasAttribute('data-assistant-input'))commandState().text=event.target.value;if(event.target.dataset.requirementAnswer!==undefined){const d=draft();if(d.requirements?.[event.target.dataset.requirementAnswer]){d.requirements[event.target.dataset.requirementAnswer].answer=event.target.value;markDirty();}}});
 $('run-form').addEventListener('input',event=>{
   if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;
@@ -977,7 +1045,7 @@ $('run-form').addEventListener('input',event=>{
 $('run-form').addEventListener('click',async event=>{
   const button=event.target.closest('button');if(!button||saving||liveBusy)return;
   if(button.hasAttribute('data-preflight-settings')){$('run-dialog').close();view='setup';buildStep=5;advanced=true;render();return;}
-  if(button.dataset.preflightEdit){$('run-dialog').close();preview=null;editPlanStep(button.dataset.preflightEdit);return;}
+  if(button.dataset.preflightEdit){$('run-dialog').close();editPlanStep(button.dataset.preflightEdit);return;}
   if(button.dataset.preflightFix===undefined)return;
   const issue=preflightIssues(current().definition)[Number(button.dataset.preflightFix)];if(!issue)return;
   if(dirty()){notify('Save or resolve your unsaved edits before applying this fix.');return;}
@@ -1000,14 +1068,31 @@ $('run-form').addEventListener('submit',async event=>{
   await liveAction('start-live');
 });
 $('close-run').addEventListener('click',()=>$('run-dialog').close());
-$('app').addEventListener('change',event=>{try{if(event.target.hasAttribute('data-activity-filter')){activityFilter=event.target.value;render();return;}if(event.target.hasAttribute('data-source-resource')){requestResources[currentId]=event.target.value;render();return;}if(event.target.dataset.stepParent){const {stepParent:from,stepChild:to}=event.target.dataset;updatePlan(event.target.checked?connectPlanSteps(draft(),from,to):disconnectPlanSteps(draft(),from,to),to);return;}if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.dataset.tool){const role=draft().agents[Number(event.target.dataset.index)],tool=event.target.dataset.tool;if(role.kind==='human')throw new Error('Human members do not use agent tools.');if(event.target.checked&&!role.tools.includes(tool))role.tools.push(tool);else if(!event.target.checked)role.tools=role.tools.filter(t=>t!==tool);markDirty();render();}if(event.target.dataset.format!==undefined)setOutputFormat(Number(event.target.dataset.format),event.target.value);if(event.target.dataset.outputKind!==undefined)setOutputKind(Number(event.target.dataset.outputKind),event.target.value);}catch(error){if(event.target.dataset.stepParent)render();notify(error.message);}});
+$('app').addEventListener('input',event=>{
+  if(!event.target.hasAttribute('data-plan-search'))return;
+  planSearch=event.target.value;planSearchAt=0;applyPlanSearch();
+});
+$('app').addEventListener('keydown',event=>{
+  if(!event.target.hasAttribute?.('data-plan-search'))return;
+  if(event.key==='Enter'){event.preventDefault();stepThroughSearch(event.shiftKey?-1:1);return;}
+  if(event.key==='Escape'&&planSearch){event.stopPropagation();planSearch='';planSearchAt=0;event.target.value='';applyPlanSearch();}
+});
 $('app').addEventListener('click',async event=>{
   const button=event.target.closest('button');if(!button||button.disabled||saving||Date.now()<skipPlanClickUntil)return;
+  if(button.hasAttribute('data-plan-search-next')){stepThroughSearch();return;}
+  if(button.dataset.groupToggle){togglePlanGroup(button.dataset.groupToggle);return;}
+  if(button.dataset.addGroup){const input=$('app').querySelector('[data-new-group]');addPlanGroup(button.dataset.addGroup,input?.value||'');return;}
+  if(button.dataset.workspaceMode){
+    const mode=button.dataset.workspaceMode;if(!['build','test','run','results'].includes(mode))return;
+    workspaceMode=mode;view='plan';
+    if(mode==='test')showPlanInspector=true;
+    render();followLiveRun();if(mode==='run'&&!preview?.live)openRunConfiguration();return;
+  }
   // A menu item closes its menu, then does exactly what the control it stands for does.
   if(button.closest('[data-canvas-menu]'))closeMenu({restoreFocus:false});
   // Testing a step is offered on the plan canvas and in the run inspector, so the
   // step comes from the control rather than from whichever view happens to be open.
-  if(button.dataset.stepTest){if(button.dataset.testStep&&button.closest('.run-inspector-drawer'))selectedRunStepId=button.dataset.testStep;await stepTests.open(button.dataset.stepTest,button.dataset.testStep);return;}
+  if(button.dataset.stepTest){if(!current().revision){notify('Save the workflow once before storing test examples. You can test unsaved edits after that.');return;}if(button.dataset.testStep&&button.closest('.run-inspector-drawer'))selectedRunStepId=button.dataset.testStep;await stepTests.open(button.dataset.stepTest,button.dataset.testStep);return;}
   // A command that acts inside the step panel opens it, so its result is visible.
   if(button.dataset.menuReveal==='panel'&&!showPlanInspector){showPlanInspector=true;render();}if(button.hasAttribute('data-apply-schema')){try{const index=Number(button.dataset.applySchema),fields=JSON.parse($('schema-'+index).value);validateRecordFields(fields);draft().state[index].fields=fields;markDirty();render();notify('Record fields applied to the draft.');}catch(error){notify(error.message);}return;}
   try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.removeRequirement!==undefined){const d=draft();d.requirements?.splice(Number(button.dataset.removeRequirement),1);if(d.requirements&&!d.requirements.length)delete d.requirements;markDirty();render();return;}if(button.dataset.step!==undefined){buildStep=Number(button.dataset.step);advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.downloadOutput){downloadResult(button.dataset.downloadOutput);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
@@ -1048,6 +1133,7 @@ $('app').addEventListener('click',async event=>{
     if(button.dataset.action==='toggle-activity'){activityExpanded=!activityExpanded;render();return;}
   if(button.dataset.action==='close-run-inspector'){closeRunInspector();return;}
   if(button.dataset.action==='follow-active'){followActive=!followActive;lastFollowedStep=null;render();return;}
+  if(button.dataset.action==='view-results'){workspaceMode='results';render();return;}
   if(button.dataset.action==='view-results'||button.dataset.action==='view-review'||button.dataset.action==='view-run-info'){const selector=button.dataset.action==='view-results'?'[data-disclosure="live-results"]':button.dataset.action==='view-review'?'.human-checkpoint':'[data-disclosure="live-request-details"]';const panel=$('app').querySelector(selector);if(panel){if(panel.tagName==='DETAILS')panel.open=true;panel.scrollIntoView({block:'start'});panel.querySelector('summary,input,textarea,button')?.focus({preventScroll:true});}return;}
   if(button.dataset.runStep){suspendRunFollow();selectedRunStepId=button.dataset.runStep;const fromActivity=!!button.closest('.activity-panel');render();if(fromActivity)focusRunNode(selectedRunStepId);$('app').querySelector('[data-action="close-run-inspector"]')?.focus({preventScroll:true});return;}
     if(button.dataset.assistantExample){proposeCommand(button.dataset.assistantExample);return;}
@@ -1072,7 +1158,7 @@ $('app').addEventListener('click',async event=>{
     // The plan tools are in the same bar as the run controller. Using one while a
     // finished run is open leaves the run first: the canvas shows that run's
     // snapshot, so editing underneath it would change something not on screen.
-    if(['toggle-plan-resources','suggest-plan-change','tidy-canvas'].includes(action)&&preview?.live)preview=null;
+    if(['toggle-plan-resources','suggest-plan-change','tidy-canvas'].includes(action))workspaceMode='build';
     if(action==='back-to-plan'){showView('plan');return;}
     if(action==='sign-out'){try{await request(account.login.logout,{method:'POST',body:'{}'});}finally{location.reload();}return;}
     if(action==='set-up'){showView('setup');return;}
@@ -1432,7 +1518,7 @@ $('app').addEventListener('keydown',event=>{
   const edge=event.target.closest?.('[data-canvas-edge]');
   if(edge&&(event.key==='Enter'||event.key===' ')){event.preventDefault();selectedEdge=selectedEdge===edge.dataset.canvasEdge?null:edge.dataset.canvasEdge;render();
     $('app').querySelector(`[data-canvas-edge-menu]`)?.focus({preventScroll:true});return;}
-  if(event.key==='Escape'&&!preview?.live){showPlanInspector=false;showPlanResources=false;showPlanAssistant=false;showPlanReadiness=false;connectSource=null;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId||'')}"]`)?.focus({preventScroll:true});}});
+  if(event.key==='Escape'&&['build','test'].includes(workspaceMode)){showPlanInspector=false;showPlanResources=false;showPlanAssistant=false;showPlanReadiness=false;connectSource=null;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId||'')}"]`)?.focus({preventScroll:true});}});
 
 $('app').addEventListener('change',event=>{
   const name=event.target.dataset.connectionTool;if(!name)return;

@@ -26,7 +26,7 @@ vm.runInContext(`let saving=false,liveBusy=false,liveError='',view='plan',curren
 const requests={live:'Repeat this task'},requestInputs={live:{app:{context:'Prior context'}}},requestResources={app:'source-a'};
 ${functionSource('openRunConfiguration','nextIdentifier')}
 async ${functionSource('liveAction','studioLiveMarkup')}
-${source.slice(source.indexOf("$('run-form').addEventListener('input'"),source.indexOf("$('app').addEventListener('change'"))}
+${source.slice(source.indexOf("$('run-form').addEventListener('input'"),source.indexOf("$('close-run').addEventListener('click'"))}
 `,context);
 vm.runInContext('openRunConfiguration()',context);
 assert.equal(elements['run-dialog'].open,true,'Run opens a modal');

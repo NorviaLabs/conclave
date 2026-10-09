@@ -27,9 +27,9 @@ export function uiIcon(name){
 export function canvasFitZoom(viewWidth,viewHeight,boardWidth,boardHeight){
   return Math.min(1,Math.max(1,viewWidth-64)/Math.max(1,boardWidth),Math.max(1,viewHeight-112)/Math.max(1,boardHeight));
 }
-export function canvasStepMarkup({id,index,human,selected,position,escape:e,mode,header='',content='',footer='',stale=false,status='waiting',tested=false}){
+export function canvasStepMarkup({id,index,human,selected,position,escape:e,mode,header='',content='',footer='',stale=false,status='waiting',tested=false,branch=false,connectTarget=false}){
   const run=mode==='run';
-  return `<section class="plan-node compact ${run?'run-node':''} ${human?'human':''} ${selected?'selected':''} ${stale?'stale':''} ${tested?'tested':''}" ${run?'data-run-node':'data-plan-node'}="${e(id)}"${run?` data-status="${e(status)}"`:''}${stale?' data-run-stale="true"':''}${tested?' data-run-tested="true"':''}${run?'':` data-plan-tool-target="${e(id)}"`} style="left:${position.x}px;top:${position.y}px"><div class="plan-node-head"><span class="plan-number">${index+1}</span><span class="kind-tag ${human?'human':'ai'}">${human?'Human':'AI'}</span>${header}</div>${content}${footer}</section>`;
+  return `<section class="plan-node compact ${run?'run-node':''} ${human?'human':''} ${selected?'selected':''} ${branch?'branch':''} ${stale?'stale':''} ${tested?'tested':''} ${connectTarget?'connect-target':''}" ${run?'data-run-node':'data-plan-node'}="${e(id)}"${run?` data-status="${e(status)}"`:''}${stale?' data-run-stale="true"':''}${tested?' data-run-tested="true"':''}${branch?' data-plan-branch="true"':''}${run?'':` data-plan-tool-target="${e(id)}"`} style="left:${position.x}px;top:${position.y}px"><div class="plan-node-head"><span class="plan-number">${index+1}</span><span class="kind-tag ${human?'human':'ai'}">${human?'Human':'AI'}</span>${header}</div>${content}${footer}</section>`;
 }
 export function canvasMarkup({mode,width,height,metrics,edges,nodes,overlay='',dock='',zoom=1}){
   const run=mode==='run',zoomAttribute=run?'data-run-zoom':'data-canvas-zoom';
@@ -53,14 +53,13 @@ function selectionMarkup(id,escape,view){
        action('Show this step in activity',`data-menu-step-activity="${escape(id)}"`,'list'),
        action('Copy this step’s output',`data-menu-copy-output="${escape(id)}"`,'copy')]
     : [action('Edit step',`data-plan-select="${escape(id)}"`,'pencil'),
-       action('Test this step',`data-step-test="author" data-test-step="${escape(id)}"`,'play'),
        action('Duplicate step',`data-plan-duplicate="${escape(id)}"`,'copy'),
        action('Connect to another step',`data-canvas-port="${escape(id)}"`,'link'),
        action('Centre in view',`data-menu-centre="${escape(id)}"`,'centre')];
   return `<span class="canvas-dock-group" role="group" aria-label="Selected step">${actions.join('')}</span><span class="canvas-dock-separator" aria-hidden="true"></span>`;
 }
 export function planToolsMarkup(disabled=false,expanded=false,{selection='',view='plan',escape=value=>String(value??'')}={}){
-  // Icons only: the bar is a strip of symbols, so each one carries its name in
+  // Primary actions keep labels; navigation symbols carry their names in
   // the hovertext and for a screen reader. A disabled control keeps its own name
   // and says why in the hovertext, so the reason never replaces what it does.
   const why='finish or stop the run to change the plan';
@@ -73,8 +72,8 @@ export function planToolsMarkup(disabled=false,expanded=false,{selection='',view
     + `<button type="button" class="canvas-action" ${zoomAttribute}="fit" title="Fit entire graph" aria-label="Fit entire graph">${uiIcon('fit')}</button>`
     + (view==='run'?'':`<button type="button" class="canvas-action" data-action="canvas-fullscreen" aria-pressed="false" title="Full screen" aria-label="Full screen">${uiIcon('expand')}</button>`)
     + `</span>`;
-  return `${selection?selectionMarkup(selection,escape,view):''}<button type="button" class="canvas-action" data-action="toggle-plan-resources" aria-expanded="${expanded}" ${off} title="${name('Add step')}" aria-label="Add step">${uiIcon('plus')}</button><button type="button" class="canvas-action" data-action="suggest-plan-change" ${off} title="${name('Suggest a change to the plan')}" aria-label="Suggest a change to the plan">${uiIcon('sparkle')}</button><button type="button" class="canvas-action" data-action="tidy-canvas" ${off} title="${name('Arrange positions only; keep connections')}" aria-label="Arrange positions only; keep connections">${uiIcon('tidy')}</button>${viewGroup}`;
+  return `${selection?selectionMarkup(selection,escape,view):''}${view==='plan'?`<button type="button" class="canvas-action labelled" data-step-test="author" data-test-step="${escape(selection)}" ${!selection||disabled?'disabled':''} title="${selection?'Test the selected step safely':'Select a step to test'}">${uiIcon('play')}<span>Test step</span></button>`:''}<button type="button" class="canvas-action" data-action="toggle-plan-resources" aria-expanded="${expanded}" ${off} title="${name('Add step')}" aria-label="Add step">${uiIcon('plus')}<span>Add step</span></button><button type="button" class="canvas-action" data-action="suggest-plan-change" ${off} title="${name('Suggest a change to the plan')}" aria-label="Suggest a change to the plan">${uiIcon('sparkle')}</button><button type="button" class="canvas-action" data-action="tidy-canvas" ${off} title="${name('Arrange positions only; keep connections')}" aria-label="Arrange positions only; keep connections">${uiIcon('tidy')}</button>${viewGroup}`;
 }
 export function canvasDockMarkup({controller='',toolsDisabled=false,resourcesOpen=false,selection='',view='plan',escape}={}){
-  return `<div class="canvas-dock" role="group" aria-label="Canvas controls" data-canvas-dock><span class="canvas-dock-grip" aria-hidden="true">${uiIcon('grip')}</span>${controller?`<span class="canvas-dock-group" role="group" aria-label="Run controls">${controller}</span><span class="canvas-dock-separator" aria-hidden="true"></span>`:''}${planToolsMarkup(toolsDisabled,resourcesOpen,{selection,view,escape})}</div>`;
+  return `<div class="canvas-dock" role="group" aria-label="Canvas controls" data-canvas-dock>${controller?`<span class="canvas-dock-group" role="group" aria-label="Run controls">${controller}</span><span class="canvas-dock-separator" aria-hidden="true"></span>`:''}${planToolsMarkup(toolsDisabled,resourcesOpen,{selection,view,escape})}</div>`;
 }

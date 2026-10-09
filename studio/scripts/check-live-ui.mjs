@@ -168,6 +168,6 @@ console.log('PASS: the page renders from the reported host profile instead of as
   assert.equal(stopped.resumable, true, 'the projection carries it');
   assert.equal(projectLiveRun({...run, status: 'stopped'}).resumable, false, 'and defaults to no');
   const source = await readFile(new URL('../web/studio.js', import.meta.url), 'utf8');
-  assert.match(source, /preview\.mode==='paused'\|\|\(preview\.mode==='stopped'&&preview\.resumable\)/, 'the resume control is offered for a resumable stop');
+  assert.match(source, /preview\.mode==='paused'\|\|\(\['stopped','failed','interrupted'\]\.includes\(preview\.mode\)&&preview\.resumable\)/, 'resume requires a resumable checkpoint after a stop, failure or interruption');
   assert.ok(!/checkpoint/.test(stopped.events.map(event => JSON.stringify(event)).join('')), 'no checkpoint reaches the page');
 }

@@ -79,8 +79,8 @@ resuming the old one.
 
 ### The canvas action bar
 
-The canvas floats one action bar over the graph (`canvas-dock`). It is icons
-only — no words — so every control carries its name in `title` and `aria-label`,
+The canvas floats one action bar over the graph (`canvas-dock`). Primary commands — Run workflow, Add step and Test step — have labels.
+Navigation icons carry their names in `title` and `aria-label`,
 and each button in it is one thing a person can do:
 
 | Run state | Run controls | Plan tools |
@@ -99,11 +99,9 @@ put, greyed out, with the reason in their hovertext ("Add step · finish or stop
 the run to change the plan") rather than disappearing, so nothing moves under
 your hands mid-run. They work again as soon as the run stops, finishes or fails.
 
-**The bar can be moved.** Drag it by its grip (or any part of its surface that
-is not a button) to put it out of the way of the graph; the position is
-remembered per application for the session and clamped to the canvas.
-Double-clicking the bar puts it back where it started. Pressing it never pans
-the canvas.
+**The bar stays fixed.** It is anchored to the bottom of the canvas viewport,
+outside the transformed board. Panning and zooming never move it. On narrow
+screens it scrolls horizontally rather than hiding commands.
 
 **What the run is waiting for stays in words above the canvas.** Review input and
 View results live in the status line (`run-overview`), not in the bar, so no
@@ -508,9 +506,52 @@ The drawer becomes a bottom sheet on mobile; Escape closes secondary panels.
 Add opens a compact picker for AI work, human review, existing members, presets
 and saved members. The editor offers **Add after** and **Add parallel branch**;
 select a connection to insert between its endpoints or remove it. Drag a
-connection handle, or press Enter on it and choose **Connect here**. Dragging a
+connection handle, or press Enter on its port and click the step to connect to —
+while a connection is in progress every other card is a target, and the card you
+click completes the connection. Dragging a
 card changes only its position. List ordering also preserves dependencies.
 Adding an independent step never silently connects neighbouring list entries.
+
+**Groups arrange the canvas.** A step's settings carry a **Group** field, so a
+step can be put in a named group (Research, Review, Delivery) or a new one
+created from that step. A group draws a labelled box behind its steps and a header
+that folds them away: **collapsed hides the cards and their connections, and says
+"still runs"**, because a group is arrangement only — the runtime never reads it,
+and folding one cannot change order, dependencies or output. Groups live in
+`canvas.groups` in the definition, beside the saved positions, and a step records
+which group it belongs to. The format stays compatible: a definition with no
+groups is valid, both validators accept it, and export/import carries it
+unchanged. Limits are enforced where the format is: up to 20 groups, unique
+identifiers, a named group, and a step may only claim a group the plan declares.
+
+**Find a step.** A workflow longer than a screen is searched from the canvas
+heading: the field matches a step's name, the member who does it, or what it
+produces, and the count beside it says how many steps match. Matches are marked on
+the graph and the rest are dimmed rather than hidden, so the shape of the workflow
+stays visible while you look. **Enter** steps through the matches and opens the
+step; **Shift+Enter** goes back; **Escape** clears the search. Typing marks the
+drawn canvas directly instead of redrawing it, so the caret never leaves the field
+and a pan in progress is never interrupted.
+
+**A saved test example is visible before you open the step.** A step that has one
+carries a **Saved example** badge on its card; when the plan's outputs or
+connections have moved since that example was written, the badge reads **Example
+out of date** in red, because the next test would be refused rather than guessed.
+Hovering names the example, whether it was pinned from a run or written by hand,
+and whether a reference output is recorded. The badge appears for every step at
+once — the examples are read once per application and refreshed whenever a test
+example is saved or a test starts, not on every step you click.
+
+**A connection explains itself.** Selecting one draws the chain that has to
+finish first — the step it comes from and everything that step itself waits for —
+and shows what the connection means in words: *"Draft waits for Research;
+Findings is shared with Draft and every step after it."* The wording names the
+order a connection enforces and the collection it shares, and does not claim a
+private hand-off between two steps, because a step reads every prerequisite's
+contribution to one shared collection. The same sentence is the connection's
+accessible name, so it is readable without selecting it. Actions stay in the
+connection's menu, opened from the handle on the selected connection or by
+right-click.
 
 Readiness uses definition validation, existing preflight findings and reported
 host capabilities. Errors and warnings are distinct, selectable, and associated
@@ -760,3 +801,37 @@ Discard, Cancel, Stop, Run, Save, Resume, Connect, Authorize account, Add to
 plan, and every recovery action such as Try again or Reload. Approving an
 external change must be unambiguous at a glance, so it never becomes a bare
 checkmark.
+
+### Build, Test, Run and Results
+
+The workspace navigation separates editing the current draft, safe step tests,
+execution of the saved version, and readable production outputs. Switching modes
+retains the draft, selected steps, pan/zoom and the open historical run. A new run
+opens Run mode; polling never forces someone out of Build or Test.
+
+The step inspector leads with **Test this step**, then **Inputs**, **Output** and
+**Test**. Inputs names each declared request field and each prerequisite step with
+the value it actually carried, and says where the values came from: the run open
+on the canvas first, otherwise the latest saved test example, otherwise nothing at
+all — an empty state is never presented as a value. Output shows what the step
+produced, and Test names the latest saved example for that step, whether it was
+pinned from a run or written by hand, and whether a comparison exists. Long values
+are summarised to one readable line; the payload stays behind **Advanced · … as
+JSON**, and every value is escaped. Editing which steps this one waits for stays in
+**Depends on**, separate from the record of what arrived. Saved examples are read
+when a step's settings open, and the underlying fixture API is unchanged — the
+interface calls fixtures “saved test examples”. Save a new workflow once before
+storing examples; subsequent unsaved edits can be tested directly.
+
+Results show deliverables using the existing views, with request and activity
+collapsed. Interrupted, failed and paused runs explicitly distinguish completed
+saved work from incomplete output; continuation is offered only for resumable
+checkpoints. Production approvals and test outputs remain separate.
+
+Goal-based creation and templates still produce a reviewable draft, not an
+automatic execution. Review and save the workflow, test a useful step, and
+configure account access when the relevant tools need it.
+
+```sh
+node studio/scripts/check-workspace.mjs
+```
