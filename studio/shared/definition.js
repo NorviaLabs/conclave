@@ -138,13 +138,16 @@ export function planShape(d){
 export function canvasPositions(d){const positions={},levels={},counts={};for(const id of executionOrder(d)){const parents=planConnections(d).filter(e=>e.to===id).map(e=>e.from);const level=parents.length?Math.max(...parents.map(p=>levels[p]))+1:0;levels[id]=level;const column=counts[level]||0;counts[level]=column+1;const saved=d.canvas?.positions?.[id];positions[id]=saved?{x:Number(saved.x)||0,y:Number(saved.y)||0}:{x:canvasMetrics.padX+level*(canvasMetrics.nodeWidth+canvasMetrics.gapX),y:canvasMetrics.padY+column*(canvasMetrics.nodeHeight+canvasMetrics.gapY)};}return positions;}
 // Both canvases draw dependencies from the right of one node to the left of
 // the next, so geometry lives here rather than in either view.
-export let canvasNodeWidth=350,canvasNodeHeight=220;
+export let canvasNodeWidth=350,canvasNodeHeight=240;
 // Keep cards readable; the board grows and scrolls when the plan outgrows it.
-let canvasMetrics={nodeWidth:350,nodeHeight:220,gapX:60,gapY:60,padX:60,padY:50};
+// The card height is what a step card's own content costs: card padding, the
+// head, a two-line title, then the facts — a two-line output, the member row
+// and its badge, a two-line backend. 220 cut the last line of the title.
+let canvasMetrics={nodeWidth:350,nodeHeight:240,gapX:60,gapY:60,padX:60,padY:50};
 export function currentCanvasMetrics(){return canvasMetrics;}
 export function setCanvasMetrics({width,height,levels,columns}){
   const rows=Math.max(1,columns),cols=Math.max(1,levels);
-  const nodeWidth=350,nodeHeight=220,gapX=60,gapY=60;
+  const nodeWidth=350,nodeHeight=240,gapX=60,gapY=60;
   // Centre what there is, so a short plan looks placed rather than abandoned.
   const spanX=nodeWidth*cols+gapX*(cols-1),spanY=nodeHeight*rows+gapY*(rows-1);
   canvasMetrics={nodeWidth,nodeHeight,gapX,gapY,padX:Math.max(40,Math.round((width-spanX)/2)),padY:Math.max(50,Math.round((height-spanY)/2)),width,height};

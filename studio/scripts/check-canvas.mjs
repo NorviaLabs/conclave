@@ -194,7 +194,7 @@ rewired.connections = [{from: 'step_1', to: 'step_3'}];
 // both steps now describe a plan that no longer exists.
 assert.deepEqual([...staleRunSteps(plan, rewired)].sort(), ['step_2', 'step_3'], 'rewiring marks both ends whose input changed');
 // The curve and the handle agree on where the middle of an edge is.
-assert.match(canvasEdgePaths(plan, {step_1: {x: 60, y: 50}, step_2: {x: 60, y: 450}, step_3: {x: 60, y: 850}}, escape, 'step_1|step_2'), /M 410 160 C 585 160, -115 560, 60 560/);
+assert.match(canvasEdgePaths(plan, {step_1: {x: 60, y: 50}, step_2: {x: 60, y: 450}, step_3: {x: 60, y: 850}}, escape, 'step_1|step_2'), /M 410 170 C 585 170, -115 570, 60 570/);
 // A connection the canvas cannot draw must be refused before it is saved: the
 // plan is drawn from its own edges, so a loop would leave nothing to render.
 assert.throws(() => connectPlanSteps(plan, 'step_3', 'step_1'), /That connection creates a loop. Remove it so work can finish./);

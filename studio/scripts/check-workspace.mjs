@@ -143,9 +143,15 @@ assert.match(css,/\.graph-canvas \.step-summary\{overflow:hidden/);
 assert.match(css,/\.graph-canvas \.step-facts div\{display:grid;grid-template-columns:64px minmax\(0,1fr\)/);
 assert.match(css,/\.graph-canvas \.step-facts dd\.step-output\{display:-webkit-box;-webkit-line-clamp:2/);
 assert.match(css,/\.graph-canvas \.step-backend\{display:-webkit-box;-webkit-line-clamp:2/);
-assert.match(css,/\.graph-canvas \.step-summary>strong\{display:-webkit-box;-webkit-line-clamp:2/);
+assert.match(css,/\.graph-canvas \.step-summary>strong\{flex:none;display:-webkit-box;-webkit-line-clamp:2/,'a clamped title keeps its two lines; it is never the flex item that pays for an overflowing card');
+assert.doesNotMatch(css,/\.graph-canvas \.plan-node \.step-output\{/,'the old card-body output rule no longer reaches into the facts grid and inflates a row');
+assert.match(css,/\.graph-canvas \.step-summary>\.step-output\{[^}]*margin:0\}/,'the run card spaces its output with the column gap, not with margins');
 assert.doesNotMatch(css,/\.canvas-first-plan \.plan-node \.step-member\{order:1\}/,'the card no longer shuffles its rows');
 assert.doesNotMatch(css,/\.canvas-first-plan \.plan-node \.step-output\{order:2\}/);
+// The card has to be tall enough to hold what the card is made of; a card that
+// is short by a few pixels takes them out of the title's second line.
+const cardHeight=Number(/canvasNodeHeight=(\d+)/.exec(await read('../shared/definition.js'))[1]);
+assert.ok(cardHeight>=240,`the step card has room for a two-line title and three facts (currently ${cardHeight}px)`);
 assert.match(inspector,/<dl class="step-facts">/);
 const cardFacts=inspector.slice(inspector.indexOf('<dl class="step-facts">'),inspector.indexOf('</dl></button>'));
 for(const label of ['Produces','Member','Runs on'])assert.equal((cardFacts.match(new RegExp(`<dt>${label}</dt>`,'g'))||[]).length,1,`the card labels ${label} once`);
@@ -156,4 +162,4 @@ assert.match(inspector,/\$\{connectTo\?`data-connect-target="\$\{e\(step\.id\)\}
 assert.match(canvasModule,/connectTarget=false/);
 assert.match(canvasModule,/\$\{connectTarget\?'connect-target':''\}/);
 assert.match(css,/\.graph-canvas \.plan-node\.connect-target\{cursor:crosshair\}/);
-console.log('PASS: workspace modes retain drafts/history, the dock is fixed, primary actions are labelled, a step shows readable inputs and output, a connection explains the order it enforces and the collection it shares, saved test data is visible on the card, a large workflow can be searched, groups arrange the canvas without changing what runs, and the step card is readable rather than scrollable.');
+console.log('PASS: workspace modes retain drafts/history, the dock is fixed, primary actions are labelled, a step shows readable inputs and output, a connection explains the order it enforces and the collection it shares, saved test data is visible on the card, a large workflow can be searched, groups arrange the canvas without changing what runs, and the step card is readable rather than scrollable, with a title that keeps both of its lines.');

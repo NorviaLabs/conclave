@@ -364,6 +364,14 @@ content and actions. Run mode is read-only; planning owns layout editing and
 connection controls. Rendering still rebuilds the DOM rather than retaining a
 canvas element across page renders.
 
+A card reads top to bottom — what the step is called, what it produces, who does
+it, what runs it — and is a fixed 350×240 box that never scrolls. Every value
+therefore clamps rather than pushing a neighbour out: the title clamps to two
+lines with an ellipsis, and so do the output and the backend, whose full text
+stays on hover. The title is the one row exempt from the card's flexible height,
+so a card that runs out of room takes the shortage from the facts below it and
+never from the second line of the name.
+
 Both modes hide native canvas scrollbars without clipping navigation. Drag the
 background, use a trackpad, or focus the canvas and use arrow keys to pan. Fit
 shows the entire graph, including layouts larger than the manual zoom range;
