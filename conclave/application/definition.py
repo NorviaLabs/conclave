@@ -7,6 +7,8 @@ It does not create a web server or use browser-supplied provider credentials.
 """
 from __future__ import annotations
 
+from .capture import redact
+
 import asyncio
 import copy
 import hashlib
@@ -591,7 +593,7 @@ async def _restore_checkpoint(checkpoint, fingerprint, definition, store, budget
     return copy.deepcopy(patches)
 
 
-async def run_application(definition: dict[str, Any], provider: Any, tools: Any, task: str, *, inputs: dict[str, Any] | None = None, approver: Any = None, human_handler: Any = None, checkpoint: dict | None = None, human_inputs: dict | None = None, loop: Any = None, pause_requested: Any = None) -> AsyncIterator[dict[str, Any]]:
+async def run_application(definition: dict[str, Any], provider: Any, tools: Any, task: str, *, inputs: dict[str, Any] | None = None, approver: Any = None, human_handler: Any = None, checkpoint: dict | None = None, human_inputs: dict | None = None, loop: Any = None, pause_requested: Any = None, execution_steps: set[str] | None = None, seed_patches: dict | None = None) -> AsyncIterator[dict[str, Any]]:
     """Run an acyclic application in dependency order and yield safe events.
 
     Ready AI steps run in bounded batches, with dependency-scoped inputs.
@@ -634,6 +636,25 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
     store = SharedStore(schema, initial={item["key"]: "" if item["type"] == "text" else [] for item in definition["state"]})
     fingerprint = _request_fingerprint(definition, task, request_inputs)
     patches = await _restore_checkpoint(checkpoint, fingerprint, definition, store, budget) if checkpoint is not None else {}
+    selected = set(execution_steps) if execution_steps is not None else {step['id'] for step in definition['workflow']}
+    known = {step['id'] for step in definition['workflow']}
+    if not selected or not selected <= known or checkpoint is not None and execution_steps is not None:
+        raise ValueError('Invalid isolated execution scope')
+    if seed_patches is not None:
+        if checkpoint is not None or not isinstance(seed_patches, dict) or not set(seed_patches) <= known - selected:
+            raise ValueError('Invalid recorded prerequisite patches')
+        for step in _execution_order(definition):
+            if step['id'] in seed_patches:
+                collection = next(item for item in definition['state'] if item['key'] == step['output'])
+                value = seed_patches[step['id']]
+                payload = _validated_output(SimpleNamespace(data={'text': value} if collection['type'] == 'text' else {'records': value}), collection, {'agent': step['agent'], 'stage': step['id']})
+                # Validation must not rewrite recorded contribution provenance.
+                payload = copy.deepcopy(value)
+                patches[step['id']] = copy.deepcopy(payload)
+                await store.merge({step['output']: payload}, writer=step['agent'])
+    for edge in plan_connections(definition):
+        if edge['to'] in selected and edge['from'] not in selected and edge['from'] not in patches:
+            raise ValueError('Missing recorded prerequisite: ' + edge['from'])
     human_inputs = copy.deepcopy(human_inputs if human_inputs is not None else {})
     human_stages = {stage["id"] for stage in definition["workflow"] if members[stage["agent"]].get("kind") == "human"}
     if not isinstance(human_inputs, dict) or set(human_inputs) - (human_stages - set(patches)):
@@ -644,7 +665,7 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
     yield {"type": "ApplicationResumed" if checkpoint is not None else "ApplicationStarted", "name": definition["name"], "state": store.snapshot(), "views": project_views(definition, store.snapshot())}
     order = _execution_order(definition)
     links = plan_connections(definition)
-    while len(patches) < len(order):
+    while not selected <= set(patches):
         # Between steps only: a step that has started always finishes, so a pause
         # can never abandon a half-done call or repeat an approved external action.
         if pause_requested is not None and pause_requested():
@@ -653,7 +674,7 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
                    "state": store.snapshot(), "views": project_views(definition, store.snapshot()),
                    "checkpoint": _checkpoint(fingerprint, patches, budget)}
             return
-        ready = [step for step in order if step["id"] not in patches and
+        ready = [step for step in order if step['id'] in selected and step["id"] not in patches and
                  all(edge["from"] in patches for edge in links if edge["to"] == step["id"])]
         stage = ready[0]
         available_state = _dependency_state(definition, stage["id"], patches)
@@ -680,7 +701,7 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
             change = await store.merge({stage["output"]: payload}, writer=stage["agent"])
             patches[stage["id"]] = copy.deepcopy(payload)
             yield {"type": "HumanInputRecorded", "stage": stage["id"], "agent": stage["agent"]}
-            yield {"type": "ApplicationStateChanged", "stage": stage["id"], "writer": stage["agent"], "version": change.version, "keys": list(change.changed_keys), "state": store.snapshot(), "views": project_views(definition, store.snapshot()), "checkpoint": _checkpoint(fingerprint, patches, budget)}
+            yield {"type": "ApplicationStateChanged", "stage": stage["id"], "writer": stage["agent"], "patch": copy.deepcopy(payload), "version": change.version, "keys": list(change.changed_keys), "state": store.snapshot(), "views": project_views(definition, store.snapshot()), "checkpoint": _checkpoint(fingerprint, patches, budget)}
             if collection.get("kind") == "decision" and any(record["status"] in {"rejected", "changes_requested"} for record in payload):
                 yield {"type": "ApplicationFinished", "status": "stopped", "stage": stage["id"], "reason": "Human decision requires stopping or changes", "state": store.snapshot(), "views": project_views(definition, store.snapshot())}
                 return
@@ -721,7 +742,8 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
             stream = runtime.stream(spec, prompt)
             try:
                 await queue.put({"type": "StageStarted", "stage": candidate["id"], "agent": candidate["agent"], "output": candidate["output"],
-                                 "provider": spec.provider, "model": spec.model})
+                                 "provider": spec.provider, "model": spec.model,
+                                 "effective_input": redact({"inputs": copy.deepcopy(request_inputs), "state": _dependency_state(definition, candidate['id'], patches)})})
                 async for event in stream:
                     if isinstance(event, RunStarted):
                         run_id = event.run_id
@@ -817,7 +839,7 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
             payload = payloads[candidate["id"]]
             change = await store.merge({candidate["output"]: payload}, writer=candidate["agent"])
             patches[candidate["id"]] = copy.deepcopy(payload)
-            event = {"type": "ApplicationStateChanged", "stage": candidate["id"], "writer": candidate["agent"], "version": change.version, "keys": list(change.changed_keys), "state": store.snapshot(), "views": project_views(definition, store.snapshot())}
+            event = {"type": "ApplicationStateChanged", "stage": candidate["id"], "writer": candidate["agent"], "patch": copy.deepcopy(payload), "version": change.version, "keys": list(change.changed_keys), "state": store.snapshot(), "views": project_views(definition, store.snapshot())}
             if index == len(batch) - 1:
                 event["checkpoint"] = _checkpoint(fingerprint, patches, budget)
             yield event

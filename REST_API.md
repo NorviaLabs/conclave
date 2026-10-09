@@ -99,6 +99,16 @@ provider logs, raw model replies and tool arguments are not exposed in run event
 | POST | `/api/runs/{id}/resume` | `{}`; continue a waiting run after its contribution, or a paused run from its checkpoint |
 | POST | `/api/runs/{id}/pause` | `{}`; ask a running run to stop **between steps** and keep a checkpoint |
 | POST | `/api/runs/{id}/cancel` | `{}`; stop active, waiting or paused work |
+| POST | `/api/applications/{id}/fixtures/preview` | `{run_id, step_id}`; the recorded input snapshot and reference output of one completed step, redacted and ready to inspect |
+| POST | `/api/applications/{id}/fixtures` | `{run_id, step_id, name, data?}`; save a named fixture from that preview, with `data` the inspected/edited envelope |
+| POST | `/api/applications/{id}/fixtures/author` | `{step_id, name, definition?, inputs?, upstream?, reference?, reference_recorded?, task?}`; write a fixture for a step that has never run, 201 |
+| GET | `/api/applications/{id}/fixtures` | List this owner's saved fixtures for the application |
+| GET | `/api/applications/{id}/fixtures/{fixture_id}` | Read one saved fixture |
+| DELETE | `/api/applications/{id}/fixtures/{fixture_id}` | `{}`; remove a saved fixture, 204 |
+| POST | `/api/applications/{id}/tests` | `{fixture_id, scope:'step'\|'downstream', definition?, model?, mocks?}`; start an isolated test, 202 |
+| GET | `/api/applications/{id}/tests` | List this owner's test executions |
+| GET | `/api/applications/{id}/tests/{test_id}` | Test status, its own events, reference and new output, and a comparison |
+| GET | `/api/applications/{id}/tests/{test_id}/compare?other={test_id}` | Compare this test's output with its fixture, or with another test of the same fixture |
 | GET | `/api/me` | Who this request is, and how to sign in or out when the deployment has a login |
 | GET | `/auth/google/start` | Begin Google sign-in; answers 302 to Google, or 400 when the redirect is not authorized |
 | GET | `/auth/google/callback` | 302 to `/` with the session cookie, or to `/?signin=failed` |
@@ -667,3 +677,79 @@ question is kept with an empty answer so the plan can show it as open, and only
 answered requirements are put in front of the agents when the application runs.
 A definition without `requirements` is valid, so applications saved before this
 existed keep working.
+
+## Testing one step against a pinned fixture
+
+A saved run's steps can be re-run on their own. The backend records each step's
+effective input when it starts, so a completed step's real inputs and output can
+be pinned as a named **fixture** and replayed later without re-running the DAG.
+
+`POST /api/applications/{id}/fixtures/preview` reads one completed step's recorded
+`effective_input` and its output patch from the run record, verifies that the
+input still reconstructs exactly from the run's own patches, and returns a
+redacted envelope. A step with no recorded snapshot is refused rather than
+guessed at. Automatic redaction is conservative — it covers sensitive key names
+and obvious credential shapes — so the preview is meant to be inspected and
+edited before saving; a fixture is recorded data, never a live source.
+
+`POST /api/applications/{id}/tests` runs the selected step (or, with
+`scope: "downstream"`, the selected step and its descendants) on the pinned
+inputs. It uses the same runtime, DAG merge rules and output contracts as an
+ordinary run:
+
+- Only the tested subgraph runs. Recorded ancestors are seeded from the fixture;
+  unrelated branches and ancestors are never re-run, and a missing direct
+  prerequisite is refused before any provider call.
+- If the definition's state schema or connections changed since the fixture was
+  recorded, or a step's output moved, the test is refused. A changed agent
+  assignment is allowed with a recorded warning.
+- A test never writes to the production run. It is stored separately, scoped to
+  the application **and its owner**, and survives a restart.
+- Tools run in a safe mode: every registered tool is forced destructive and a
+  mock executor answers only the tools named in `mocks`, so an unlisted call is
+  blocked instead of executed. Delegated agents use the same restricted
+  registry. A test inherits **no** production approval.
+- A finite `cost_usd` budget is refused, because the provider interface reports
+  tokens and not cost; a finite wall-clock budget becomes a hard deadline on the
+  whole test.
+
+The result holds the test's own events (renamed `TestStarted`/`TestFinished` so a
+test is never mistaken for a workflow run), its output patch, and a comparison:
+a unified text diff for prose, per-record changes for records, and a value
+comparison otherwise. The comparison reports exact data differences and does not
+claim semantic equivalence.
+
+A reproducible multi-step demonstration with parallel branches lives in
+`tests/test_step_testing_api.py` (and the DAG mechanics in
+`tests/test_step_testing.py`):
+
+```sh
+uv run pytest --no-cov tests/test_step_testing_api.py tests/test_step_testing.py -q
+```
+
+### Testing a step that has never run
+
+A fixture does not have to come from a run. `POST
+/api/applications/{id}/fixtures/author` writes one from values a person
+supplies: the definition to test against (the draft, or the saved version), the
+application's declared request inputs, and the output of every step the selected
+step depends on. The fixture is stored with `source_run: null`,
+`recorded: false` and `authored: true`, so nothing downstream can mistake it for
+a run.
+
+- A prerequisite with no value is **refused**, never filled in: the response
+  names the steps still needed, and each supplied value is validated against the
+  collection it feeds before anything is saved. A step with no prerequisites
+  needs none, so a first step can be tested on its own.
+- The state the tested step receives is computed by the backend from those
+  prerequisite values and the definition's own merge rules, so the input the
+  step is given is the same one the DAG would have built — it is not taken from
+  the request.
+- A reference output is optional. With `reference_recorded: true` the test
+  compares against it; without it the test records no comparison at all, and
+  `GET /api/applications/{id}/tests/{test_id}/compare` answers
+  `{kind: "none", equal: null}` rather than reporting an inequality against
+  nothing.
+- Because the fixture belongs to the definition it was written against, a test
+  started without a `definition` uses the fixture's own definition. A definition
+  whose state schema or connections have since changed is still refused.

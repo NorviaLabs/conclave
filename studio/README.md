@@ -262,6 +262,7 @@ node scripts/check-hosted-ui.mjs   # API configuration, push or ask, host copy
 node scripts/check-live-ui.mjs     # run projection and rendered markup
 node scripts/check-canvas.mjs      # plan and run canvas markup, connections, run states
 node scripts/check-studio-source.mjs  # the page markup and the controls that switch view
+node scripts/check-step-tests.mjs  # pinned fixtures, isolated tests and comparison
 node scripts/check-config.mjs      # host configuration and catalogues
 node scripts/check-api-proxy.mjs   # the same-origin proxy and its token
 ```
@@ -413,6 +414,54 @@ Use Advanced in the left sidebar to delete the selected application. Deletion
 requires confirmation and checks the saved revision. Saved run history remains
 available through Conclave, and deleted starter applications stay deleted after
 restarting the backend. Unsaved drafts can also be removed.
+
+### Testing one step
+
+A completed step's inspector offers four actions in place, rather than another
+permanently visible sidebar: **Pin output**, **Test step**, **Test from here**
+(the step and its descendants), and **Compare results**. They need the recorded
+snapshot of a completed step, so they appear on a finished step of the run you
+are viewing — for a step that has never run, use the plan action below.
+
+**Pin output** shows the recorded input snapshot and output of that step, read
+from the run record and redacted. It is recorded data, not live sources; inspect
+and edit it, then save it under a name. **Test step** runs only that step against
+a chosen fixture — the current draft or the saved version — with the provider's
+real model and an optional model override. Advanced settings (model, explicit
+mock results) stay collapsed. **Test from here** runs the step and its
+descendants, seeding the recorded ancestors and leaving unrelated branches alone.
+
+Testing is isolated and non-mutating by default: every tool is treated as
+destructive and only the tools you name in the mock results answer, so an
+unlisted call is blocked instead of executed. A test never inherits a production
+approval, and it never overwrites the run's results. If the state schema or the
+connections changed since the fixture was recorded, the test is refused instead
+of guessing; a changed agent assignment is reported as a warning.
+
+Results show the test's own status, its output beside the reference, and an exact
+comparison — a readable diff for prose, per-record changes for records. Tested
+steps are marked on the canvas with a distinct TEST state while the draft, pan,
+zoom and selection stay as they were; closing the dialog returns to editing with
+nothing lost.
+
+**Testing a step that has never run.** A step can also be tested straight from
+the plan, without running the application first: select the step on the plan
+canvas and use **Test this step** in the dock, or the same item in the step's
+right-click menu. Because there is no run to read, you supply what the step would
+have received — the application's request fields, and the output of each step it
+depends on, listed from the plan's own connections rather than from the step that
+happens to sit above it on the canvas. A step with no prerequisites needs none.
+The dialog shows the exact fixture it will save, and a reference output is
+optional: with one, the result is compared against it; without one, no comparison
+is claimed and the results say so plainly. The fixture is stored as written by
+hand, with no source run, and is told apart from a recorded one everywhere it is
+read. The test runs in the same safe mode, against the draft as it stands now.
+
+Offline check for this flow:
+
+```sh
+node studio/scripts/check-step-tests.mjs
+```
 
 ### Canvas-first Run screen
 
@@ -637,6 +686,44 @@ host's rather than guessed at. On the run canvas the card shows what the run
 *recorded* for that step once it has started, falling back to the plan's
 declaration before then, so a step that ran on another backend says so. The
 choice itself is `stageBackend`'s, so the card and the run cannot disagree.
+
+### The dock
+
+The dock is the bar of canvas actions, and it holds what you reach for while
+looking at the canvas rather than at one step's settings:
+
+- **Always**: Add step · Suggest a change · Arrange · **Fit** (the way back from
+  anywhere, now that the canvas has no edge) · Full screen (the plan canvas).
+- **On a run**: the run controls — Run or Run again, Pause, Stop — with the plan
+  tools still visible but disabled, so the bar never changes shape under your
+  hands.
+- **When a step is selected**: that step's own actions, in front of the rest. On
+  the plan: Edit · Duplicate · Connect · Centre in view. On a run: Step details ·
+  Show this step in activity · Copy its output. Removing a step is deliberately
+  not here — it stays behind the right-click, where a stray click cannot delete.
+
+The zoom stepper (−, the level, +) stays in the corner: it is a readout with a
+step either side of it rather than an action. Every dock action is icon-only with
+its name in the hovertext, and every one is also in the right-click menu, so the
+menu remains a complete route to everything.
+
+### The canvas has no edge
+
+The plan and run canvases are infinite: the board is *moved*, not scrolled, so
+panning continues past the last step in every direction and there is nothing to
+reach the end of.
+
+- **Drag the background** to pan, or use the **arrow keys** (a screenful at a
+  time). The wheel and trackpad also pan.
+- **⌘/Ctrl with the wheel** zooms where the pointer is, so the step you are
+  looking at stays under it. The zoom buttons zoom the middle of the view, and
+  **Fit** brings the whole graph back. Zoom runs from 40% to 250%.
+- Zoom and pan are per canvas, and kept while you work: drawing the canvas again
+  (a run event, a re-render) puts the board back exactly where it was.
+
+Steps themselves still live on a grid that starts at the top-left, so a step
+cannot be dragged above or left of the origin — the canvas around them is what is
+unbounded.
 
 ### Watching a step work
 

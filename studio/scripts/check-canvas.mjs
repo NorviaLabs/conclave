@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
-import {canvasFitZoom} from '../web/canvas-ui.js';
+import {canvasFitZoom, canvasDockMarkup} from '../web/canvas-ui.js';
 // A web module loads in node once its absolute browser specifiers point at the
 // file they are served from. Modules that import each other become data: URLs,
 // so each one carries its own rewritten specifiers.
@@ -34,7 +34,12 @@ const capabilityName = id => id.replaceAll('_', ' ');
 // Exercise the browser sizing functions without requiring a browser or API.
 const studioSource = await readFile(new URL('../web/studio.js', import.meta.url), 'utf8');
 const runSizing = studioSource.slice(studioSource.indexOf('function applyRunZoom(){'), studioSource.indexOf("window.addEventListener('resize',sizeRunCanvas);"));
-const area = {closest:()=>({querySelector:()=>null,style:{setProperty(){}}}),clientWidth: 1800, clientHeight: 0, style: {}, getBoundingClientRect: () => ({top: 240})};
+// The canvas moves rather than scrolls, so sizing the run canvas needs the pan too.
+const runPanning = studioSource.slice(studioSource.indexOf('const canvasOffsets='), studioSource.indexOf('function canvasDropPoint('));
+const area = {closest:()=>({querySelector:()=>null,style:{setProperty(){}}}),clientWidth: 1800, clientHeight: 0, style: {},
+  // The canvas is moved, not scrolled, so it is asked for its board and its box.
+  querySelector: selector => selector.includes('canvas-flow') ? flow : null, dataset: {canvasMode: 'run'},
+  getBoundingClientRect: () => ({top: 240, left: 0})};
 Object.defineProperty(area.style, 'height', {set(value){area.clientHeight = parseFloat(value);}});
 const flow = {style: {width: '2800px', height: '1200px'}, closest: () => area};
 // The floating action bar is dragged with the pointer, and its position has to
@@ -100,7 +105,7 @@ assert.equal(dockContext.rendered, 1, 'a moved bar is redrawn in its default pla
 const level = {};
 const app = {querySelector: selector => selector.includes('canvas-flow') ? flow : selector.includes('canvas-view-level') ? level : area};
 const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0,addEventListener(){}}, canvasFitZoom, runCanvasZoom: null};
-runInNewContext(`${runSizing}\nsizeRunCanvas();`, sizing);
+runInNewContext(`${runPanning}\n${runSizing}\nsizeRunCanvas();`, sizing);
 assert.equal(area.clientHeight, 694, 'the run canvas fills the remaining browser height');
 assert.equal(flow.style.zoom, canvasFitZoom(1800, 694, 2800, 1200), 'the whole run board fits on first render');
 assert.equal(level.textContent, `${Math.round(flow.style.zoom * 100)}%`, 'the level reports the fitted scale');
@@ -181,13 +186,43 @@ assert.match(header,/toggle-readiness/, 'readiness is actionable');
 assert.match(header, /3 members · 3 steps/);
 assert.match(planMarkup, /id="plan-keyboard-help"[^>]*>Arrow keys move a focused step\. Enter on a step opens its settings;/, 'the step help names the way in for a keyboard or a screen reader');
 const viewStart = planMarkup.indexOf('class="canvas-view"');
-const view = planMarkup.slice(viewStart, planMarkup.indexOf('</div>', planMarkup.indexOf('canvas-fullscreen')));
+const view = planMarkup.slice(viewStart, planMarkup.indexOf('</div>', viewStart));
 assert.match(view, /data-canvas-zoom="out"/);
 assert.match(view, /data-canvas-zoom="reset"/);
 assert.match(view, /data-canvas-zoom="in"/);
-assert.match(view, /class="canvas-view-level" data-canvas-zoom="reset"/, 'the level doubles as fit');
+assert.match(view, /class="canvas-view-level" data-canvas-zoom="reset"/, 'the level doubles as reset');
 assert.match(view, /100%/, 'the level starts at 100%');
-assert.equal((view.match(/data-action="canvas-fullscreen"/g) || []).length, 1, 'full screen sits with the zoom controls');
+assert.ok(!/fit|fullscreen/.test(view), 'and the stepper is only a stepper: fit and full screen moved to the dock');
+
+// The dock: the actions a person reaches for while looking at the canvas, in one
+// bar. Fit is there because the canvas has no edge; full screen stays on the plan.
+const planDock = planMarkup.slice(planMarkup.indexOf('data-canvas-dock'), planMarkup.indexOf('class="canvas-view"'));
+assert.match(planDock, /data-canvas-zoom="fit"[^>]*title="Fit entire graph"/, 'fit is on the dock');
+assert.equal((planDock.match(/data-action="canvas-fullscreen"/g) || []).length, 1, 'so is full screen');
+assert.equal((planMarkup.match(/data-canvas-zoom="fit"/g) || []).length, 1, 'and neither is offered twice');
+assert.equal((planMarkup.match(/data-action="canvas-fullscreen"/g) || []).length, 1, 'in either direction');
+
+// A selection is what the canvas is about at that moment, so the dock says so.
+const dockFor = selection => canvasDockMarkup({selection, view: 'plan', escape});
+const emptyDock = dockFor('');
+assert.ok(!/data-plan-select/.test(emptyDock), 'nothing selected, nothing about a step');
+const selectedDock = dockFor('step_2');
+for (const [attribute, label] of [['data-plan-select="step_2"', 'Edit step'], ['data-plan-duplicate="step_2"', 'Duplicate step'],
+  ['data-canvas-port="step_2"', 'Connect to another step'], ['data-menu-centre="step_2"', 'Centre in view']]) {
+  assert.ok(selectedDock.includes(attribute) && selectedDock.includes(`title="${label}"`), `${label} is offered for the selection`);
+}
+assert.ok(!/data-plan-remove/.test(selectedDock), 'removing a step stays behind the right-click, where a stray click cannot delete it');
+assert.match(selectedDock, /aria-label="Selected step"/, 'and the group names itself for a screen reader');
+
+// A run's steps are not the plan's: what you can do to one you are watching is
+// read it, find it in the activity, and take its output. Plan edits wait.
+const runDock = canvasDockMarkup({selection: 'step_2', view: 'run', escape});
+assert.match(runDock, /data-run-step="step_2"[^>]*title="Step details"/, 'a run step offers its details');
+assert.match(runDock, /data-menu-step-activity="step_2"/, 'and its place in the activity');
+assert.match(runDock, /data-menu-copy-output="step_2"/, 'and its output');
+assert.ok(!/data-plan-select|data-plan-duplicate|data-canvas-port|data-menu-centre/.test(runDock),
+          'but not the plan edits, which wait until the run is over');
+assert.ok(!/canvas-fullscreen/.test(runDock), 'and full screen belongs to the plan canvas');
 // The plan's own actions live on the canvas the person is working on, so the
 // page header above it stays a caption and a menu of application actions.
 // Both canvas actions are icon-only, so their hovertext is the label.
@@ -305,7 +340,10 @@ assert.equal(payloadLabel({}, 'text'), 'written');
 const runContext = {escape, agentName, outputName, capabilityName, zoom: 1};
 const canvas = runCanvasMarkup(plan, projected, 'step_2', runContext);
 assert.equal((canvas.match(/data-run-node="/g) || []).length, 3, 'a node per step');
-assert.equal((canvas.match(/data-run-step="/g) || []).length, 5, 'steps and delegations are inspectable');
+const canvasBody = canvas.slice(0, canvas.indexOf('data-canvas-dock'));
+assert.equal((canvasBody.match(/data-run-step="/g) || []).length, 5, 'steps and delegations are inspectable');
+assert.match(canvas.slice(canvas.indexOf('data-canvas-dock')), /data-run-step="step_2"[^>]*title="Step details"/,
+             'and the dock offers the selected step as well');
 assert.equal((canvas.match(/class="run-node-status" data-status="complete"/g) || []).length, 2, 'two steps finished before the review');
 assert.equal((canvas.match(/class="run-node-status" data-status="needs-input"/g) || []).length, 1, 'the human gate is marked');
 assert.equal((canvas.match(/class="run-node-status"/g) || []).length, 3, 'every step carries its status');
@@ -633,14 +671,94 @@ assert.equal(canvasFitZoom(1000,700,400,220),1);
 assert.equal(canvasFitZoom(1000,700,12000,600),936/12000,'wide saved layouts fit below the manual zoom minimum');
 assert.equal(canvasFitZoom(1000,700,600,10000),588/10000,'tall layouts and delegations fit');
 for(const mode of ['plan','run']){
-  const frame=canvasMarkup({mode,width:12000,height:10000,metrics:{nodeWidth:350,nodeHeight:220},edges:'',nodes:''});
+  const attribute=mode==='run'?'data-run-zoom':'data-canvas-zoom';
+  const frame=canvasMarkup({mode,width:12000,height:10000,metrics:{nodeWidth:350,nodeHeight:220},edges:'',nodes:'',
+    dock:canvasDockMarkup({view:mode==='run'?'run':'plan',escape})});
   assert.match(frame,/tabindex="0"/);
-  assert.match(frame,/="fit" aria-label="Fit entire graph"/);
+  assert.match(frame,new RegExp(`${attribute}="fit" title="Fit entire graph"`),`fit is on the ${mode} dock`);
+  assert.match(frame,new RegExp(`${attribute}="out"`),'and the stepper stays in the corner');
+  assert.equal((frame.match(new RegExp(`${attribute}="fit"`,'g'))||[]).length,1,`and the ${mode} canvas offers fit once`);
 }
 const canvasStyles=await readFile(new URL('../web/studio.css',import.meta.url),'utf8');
 assert.match(canvasStyles,/\.run-workbench \.plan-canvas\{[^}]*max-width:none/,'the run canvas overrides the legacy 850px canvas width cap');
-assert.match(canvasStyles,/\.canvas-viewport\{scrollbar-width:none;overflow:auto;/,'scrollbars are hidden without disabling navigation');
+// An infinite canvas: the board is moved, not scrolled, so the viewport never
+// scrolls and nothing bounds the pan.
+assert.match(canvasStyles,/\.canvas-viewport\{scrollbar-width:none;overflow:hidden;overscroll-behavior:contain;cursor:grab\}/,'the viewport is a window, not a scrolled box');
 assert.match(canvasStyles,/\.canvas-viewport::-webkit-scrollbar\{display:none\}/);
+{
+  const studio = await readFile(new URL('../web/studio.js', import.meta.url), 'utf8');
+  assert.match(studio, /flow\.style\.transform=`translate\(\$\{offset\.x\}px, \$\{offset\.y\}px\)`/, 'the board is translated, so it has no edge');
+  assert.match(studio, /offset\.x\+=dx\/zoom;offset\.y\+=dy\/zoom;/, 'a screen delta is divided by the zoom, so panning tracks the pointer');
+  assert.match(studio, /const point=\{x:\(clientX-view\.left\)\/current-offset\.x,y:\(clientY-view\.top\)\/current-offset\.y\};/,
+               'zoom is anchored at the pointer, which is what makes it feel like the canvas');
+  assert.match(studio, /\{passive:false\}\);/, 'and the wheel is ours rather than the browser\'s');
+  assert.ok(!/area\.scrollLeft/.test(studio) && !/canvasPan\.area\.scroll/.test(studio), 'nothing pans by scrolling any more');
+
+  // The dock is stitched to the view, not to the canvas. It is a sibling of the
+  // board, and the board is the only thing that moves, so panning and zooming
+  // cannot carry the controls away — which is what a scrolling canvas used to do.
+  const docked = canvasMarkup({mode: 'plan', width: 900, height: 600, metrics: {nodeWidth: 350, nodeHeight: 220},
+    edges: '', nodes: '<b>step</b>', dock: '<div class="canvas-dock" data-canvas-dock>controls</div>'});
+  const board = docked.slice(docked.indexOf('<div class="canvas-flow"'), docked.indexOf('<div class="canvas-dock"'));
+  assert.ok(board.length > 100, 'the board is drawn');
+  assert.ok(!/canvas-dock/.test(board), 'and the dock is not inside it');
+  assert.match(docked, /<\/div><div class="canvas-dock" data-canvas-dock>controls<\/div>/, 'the dock is a sibling of the board');
+  assert.match(studio, /flow\.style\.transform=`translate/, 'only the board is transformed');
+  const canvasMoves = studio.slice(studio.indexOf('function applyCanvasOffset('), studio.indexOf('function canvasDropPoint('));
+  assert.ok(canvasMoves.length > 500 && !/dock/.test(canvasMoves), 'and nothing that moves the canvas touches the dock');
+  assert.match(studio, /const box=dock\.offsetParent\?\.getBoundingClientRect\(\);/, 'and it is placed against the view it sits in');
+
+  // The maths, exercised rather than described: the board moves in its own
+  // coordinates, and the point under the pointer stays under it while zooming.
+  const moving = {runCanvasZoom: 2, canvasZoom: 2, flow: {style: {}}, applyRunZoom() {}, applyCanvasZoom() {}};
+  moving.board = {querySelector: () => moving.flow, dataset: {canvasMode: 'run'}, getBoundingClientRect: () => ({left: 100, top: 50})};
+  runInNewContext(`${runPanning}
+panCanvas(board,100,0);globalThis.moved={...canvasOffsets.run};
+zoomCanvasAt(board,300,250,1.25);globalThis.zoomed={...canvasOffsets.run};
+zoomCanvasAt(board,300,250,2);globalThis.capped=runCanvasZoom;`, moving);
+  assert.deepEqual({...moving.moved}, {x: 50, y: 0}, 'a 100px drag at 200% moves the board 50 of its own pixels');
+  // The pointer sits at board point ((300-100)/2 - 50, (250-50)/2 - 0) = (50, 100) and
+  // must sit there at 250% too, so the offset becomes (200/2.5 - 50, 200/2.5 - 100).
+  assert.deepEqual({...moving.zoomed}, {x: 30, y: -20}, 'the point under the pointer is still under it at the new zoom');
+  assert.equal(moving.runCanvasZoom, 2.5, 'and the zoom is the one asked for, up to the ceiling');
+  assert.equal(moving.capped, 2.5, 'and a larger step cannot pass the ceiling');
+}
+
+// Fit, centring and following are *run*, not described: they were the only part
+// of the canvas no check executed, which is how a missing declaration reached a
+// person as "width not defined" in the notice, and a reversed centring with it.
+{
+  const fitSource = studioSource.slice(studioSource.indexOf('function fitCanvas('), studioSource.indexOf('async function deleteApplication('));
+  const centreSource = studioSource.slice(studioSource.indexOf('function centreRect('), studioSource.indexOf('function stepsArea('));
+  const focusSource = studioSource.slice(studioSource.indexOf('function focusRunNode('), studioSource.indexOf('function followActiveNode('));
+  const view = {left: 0, top: 0, right: 1000, bottom: 800};
+  const board = {style: {width: '400px', height: '200px', zoom: 1}};
+  const areaFor = mode => ({clientWidth: 1000, clientHeight: 800, dataset: {canvasMode: mode}, querySelector: () => board,
+    getBoundingClientRect: () => view});
+  const planArea = areaFor('plan'), runArea = areaFor('run');
+  const node = {getBoundingClientRect: () => ({left: 4000, right: 4400, top: 3000, bottom: 3200}), closest: () => runArea};
+  const app = {querySelector: selector => selector.includes('data-run-node') ? node : selector.includes('"run"') ? runArea : planArea};
+  const fitting = {$: () => app, board, planArea, runArea, CSS: {escape: value => value}, canvasFitZoom, canvasZoom: null, runCanvasZoom: null, rendered: [],
+    applyCanvasZoom() { fitting.rendered.push('plan'); }, applyRunZoom() { fitting.rendered.push('run'); }};
+  runInNewContext(`${runPanning}\n${fitSource}\n${centreSource}\n${focusSource}
+fitCanvas('plan');globalThis.plan={...canvasOffsets.plan,zoom:canvasZoom};
+fitCanvas('run');globalThis.run={...canvasOffsets.run,zoom:runCanvasZoom};
+centreRect({left:100,right:300,top:100,bottom:200},planArea);globalThis.centred={...canvasOffsets.plan};
+canvasOffsets.run={x:0,y:0};focusRunNode('step_1');globalThis.followed={...canvasOffsets.run};`, fitting);
+
+  const zoom = canvasFitZoom(1000, 800, 400, 200);
+  assert.equal(fitting.plan.zoom, zoom, 'fit uses the board it measured');
+  assert.equal(Math.round((fitting.plan.x + 200) * zoom), 500, 'and puts the board in the middle of the view, horizontally');
+  assert.equal(Math.round((fitting.plan.y + 100) * zoom), 400, 'and vertically');
+  assert.equal(fitting.run.zoom, zoom, 'the run canvas fits the same way');
+  assert.deepEqual(fitting.rendered, ['plan', 'run'], 'and each fit redraws its own canvas');
+  // A box whose middle is at (200,150) has to end up at the view's middle (500,400).
+  assert.equal(Math.round(200 + (fitting.centred.x - fitting.plan.x) * zoom), 500, 'centring brings the box to the middle');
+  assert.equal(Math.round(150 + (fitting.centred.y - fitting.plan.y) * zoom), 400, 'in both directions');
+  // The step is off-view, so following it brings its middle (4200,3100) to (500,400).
+  assert.equal(Math.round(4200 + fitting.followed.x * zoom), 500, 'following an off-view step brings it to the middle');
+  assert.equal(Math.round(3100 + fitting.followed.y * zoom), 400, 'vertically too');
+}
 for(const mode of ['plan','run']){
   const frame=canvasMarkup({mode,width:900,height:600,metrics:{nodeWidth:350,nodeHeight:220},edges:'',nodes:''});
   for(const button of frame.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)){

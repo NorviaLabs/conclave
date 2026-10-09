@@ -33,7 +33,7 @@ from urllib.parse import (
 from .api import TenantAPIs, reject_nonfinite
 from .identity import GoogleLoginError, cookie_value
 from .application.principal import Principal, resolve_principal
-from .application.service import setting, request_body_limit
+from .application.service import public_record, setting, request_body_limit
 
 
 JSON_TYPE = "application/json"
@@ -285,7 +285,7 @@ def application(*, apis=None, token=None, origins=(), principal_for=None, fallba
         # A run's events can be pushed here, so the host says so, and a caller
         # that asks for the stream gets one instead of polling.
         if method == "GET" and (run_id := streamed_run(target)) is not None:
-            return await stream_run(send, api, run_id, extra)
+            return await stream_run(send, api, run_id, extra, principal)
 
         status, payload = await api.dispatch(method, target, value, principal=principal, streaming=True)
 
@@ -352,18 +352,22 @@ def streamed_run(target: str) -> str | None:
     return None
 
 
-async def stream_run(send, api, run_id: str, extra) -> None:
+async def stream_run(send, api, run_id: str, extra, principal=None) -> None:
     """One run's record, sent again whenever it changes.
 
     Server-sent events, so an ordinary HTTP client can watch a run with curl and
     a browser can watch it with a reader. A caller that disconnects stops the
     watch: the repository drops the subscription when the generator is closed.
+
+    Authorization and projection are the same ones an ordinary GET applies: a
+    stream is a different transport for one run's record, not a way around who
+    may read it or around the fields a saved run never publishes.
     """
 
     try:
-        api.host.repository.get(run_id)
+        await api.host.handle("get", {"run_id": run_id}, principal=principal)
 
-    except KeyError:
+    except (KeyError, ValueError):
         return await reply(send, response(404, {"error": "No such run"}, headers=extra))
 
     await send({"type": "http.response.start", "status": 200,
@@ -375,7 +379,7 @@ async def stream_run(send, api, run_id: str, extra) -> None:
 
     try:
         async for record in watching:
-            body = b"data: " + json.dumps(record, allow_nan=False).encode() + b"\n\n"
+            body = b"data: " + json.dumps(public_record(record), allow_nan=False).encode() + b"\n\n"
             await send({"type": "http.response.body", "body": body, "more_body": True})
 
     finally:

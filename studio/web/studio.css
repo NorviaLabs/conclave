@@ -164,7 +164,7 @@
 .canvas-view button:focus-visible,.canvas-dock button:focus-visible,.inspector-move button:focus-visible,.inspector-actions button:focus-visible,.inspector-close:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
 /* The canvas carries its own view controls, so the header stays a caption. */
 .workbench-plan,.run-workbench{position:relative}
-.canvas-viewport{scrollbar-width:none;overflow:auto;overscroll-behavior:contain}
+.canvas-viewport{scrollbar-width:none;overflow:hidden;overscroll-behavior:contain;cursor:grab}
 .canvas-viewport::-webkit-scrollbar{display:none}
 .canvas-viewport:focus-visible{outline:2px solid var(--mint);outline-offset:-2px}
 .canvas-view{position:absolute;left:16px;bottom:16px;display:flex;align-items:center;gap:2px;padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 4px 14px #25304718;z-index:4}
@@ -214,6 +214,19 @@
 .graph-canvas .run-node[data-status="needs-input"]{--run-color:var(--amber);--run-fill:#fff6e4}
 .graph-canvas .run-node[data-status].stale{--run-color:var(--amber);--run-fill:#fff6e4;animation:none}
 .graph-canvas .run-node[data-status].selected{outline:2px solid var(--text);outline-offset:4px}
+/* A step executed by an isolated test, not by the workflow run itself. */
+.graph-canvas .run-node[data-run-tested="true"]{outline:2px dashed var(--blue,var(--text));outline-offset:3px}
+.graph-canvas .run-node[data-run-tested="true"]::after{content:'TEST';position:absolute;top:-9px;right:8px;padding:1px 5px;border-radius:6px;background:var(--blue,var(--text));color:var(--surface,#fff);font:700 10px/1.5 var(--sans);letter-spacing:.08em}
+.step-test-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.step-test-dialog{width:min(920px,94vw);max-height:88vh;overflow:auto;padding:20px;border:1px solid var(--line);border-radius:12px}
+.step-test-dialog header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.step-test-dialog label{display:block;margin:10px 0;font-weight:600}
+.step-test-dialog textarea,.step-test-dialog input,.step-test-dialog select{width:100%;font-family:var(--mono,monospace)}
+.step-test-dialog textarea{min-height:120px}
+.step-test-dialog pre{max-height:260px;overflow:auto}
+.test-comparison{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.test-canvas{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+@media(max-width:720px){.test-comparison{grid-template-columns:1fr}}
 .run-node[data-status] .run-node-status{color:var(--run-color,var(--muted));font-weight:600}
 .run-node[data-status] .run-node-status i{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border:1px solid currentColor;background:transparent;font:700 12px/1 var(--sans);flex-shrink:0}
 .run-node[data-status="complete"] .run-node-status i::after{content:'✓'}

@@ -15,6 +15,7 @@ import {workbenchMarkup,executionPlanMarkup,executionDetailMarkup,canvasEdgePath
 import {runProgressMarkup,runStepWorking} from '/run-canvas.js';
 import {proposePlanChange,parseImportedDefinition,describeDefinitionChanges} from '/plan-assistant.js';
 import {projectLiveRun,liveRunMarkup,liveFollowMode,liveStreamPath} from '/live.js';
+import {createStepTestsController} from '/step-tests.js';
 import {apiUrl,apiHeaders} from '/api.js';
 
 const $ = id => document.getElementById(id);
@@ -69,11 +70,15 @@ async function request(path,options={}){
     throw error;
   }return result;
 }
+const stepTests=createStepTestsController({request,getContext:()=>({applicationId:currentId,runId:preview?.runId,stepId:selectedRunStepId,draft:draft(),backends:runtime.backends||[]}),escape,agentName,outputName,capabilityName});
 function fitCanvas(mode){
   const area=$('app').querySelector(`[data-canvas-mode="${mode}"]`),flow=area?.querySelector('.canvas-flow');if(!flow)return;
-  const zoom=canvasFitZoom(area.clientWidth,area.clientHeight,parseFloat(flow.style.width),parseFloat(flow.style.height));
+  const width=parseFloat(flow.style.width),height=parseFloat(flow.style.height);
+  const zoom=canvasFitZoom(area.clientWidth,area.clientHeight,width,height);
   if(mode==='run'){runCanvasZoom=zoom;applyRunZoom();}else{canvasZoom=zoom;applyCanvasZoom();}
-  area.scrollLeft=0;area.scrollTop=0;
+  const offset=canvasOffsets[mode];
+  offset.x=(area.clientWidth-width*zoom)/2/zoom;offset.y=(area.clientHeight-height*zoom)/2/zoom;
+  applyCanvasOffset(area);
 }
 async function deleteApplication(){
   if(saving||liveBusy)return;
@@ -200,6 +205,7 @@ function outputsMarkup(d){return `<div class="step-heading"><div><span class="ey
 function applyCanvasZoom(){
   const flow=$('app').querySelector('.canvas-flow[data-canvas-drop]');if(!flow)return;
   flow.style.zoom=canvasZoom??1;
+  applyCanvasOffset(flow.closest('.canvas-viewport'));
   const level=$('app').querySelector('.plan-canvas .canvas-view-level');
   if(level)level.textContent=`${Math.round((canvasZoom??1)*100)}%`;
 }
@@ -208,6 +214,7 @@ function applyRunZoom(){
   const area=flow.closest('.canvas-viewport');
   const zoom=runCanvasZoom??canvasFitZoom(area.clientWidth,area.clientHeight,parseFloat(flow.style.width),parseFloat(flow.style.height));
   runCanvasZoom=zoom;flow.style.zoom=zoom;
+  applyCanvasOffset(area);
   const level=$('app').querySelector('.run-workbench .canvas-view-level');
   if(level)level.textContent=`${Math.round(zoom*100)}%`;
 }
@@ -224,8 +231,9 @@ function suspendRunFollow(){followActive=false;const button=$('app').querySelect
 function centreRect(box,area){
   if(!box||!area)return;
   const view=area.getBoundingClientRect();
-  area.scrollLeft+=(box.left+box.right-view.left-view.right)/2;
-  area.scrollTop+=(box.top+box.bottom-view.top-view.bottom)/2;
+  // Scrolling towards a rectangle and moving the board towards it are opposite
+  // signs: the board has to travel by what the box is short of the middle.
+  panCanvas(area,(view.left+view.right-box.left-box.right)/2,(view.top+view.bottom-box.top-box.bottom)/2);
 }
 function stepsArea(...ids){
   for(const id of ids){const node=$('app').querySelector(`[data-plan-node="${CSS.escape(id)}"]`);if(node)return {node,area:node.closest('.canvas-viewport')};}
@@ -245,7 +253,7 @@ function centreEdge(from,to){
 function focusRunNode(id){
   const node=$('app').querySelector(`[data-run-node="${CSS.escape(id)}"]`),area=node?.closest('.canvas-viewport');if(!area)return;
   const box=node.getBoundingClientRect(),view=area.getBoundingClientRect();
-  if(box.left<view.left+20||box.right>view.right-20||box.top<view.top+20||box.bottom>view.bottom-60){area.scrollLeft+=(box.left+box.right-view.left-view.right)/2;area.scrollTop+=(box.top+box.bottom-view.top-view.bottom)/2;}
+  if(box.left<view.left+20||box.right>view.right-20||box.top<view.top+20||box.bottom>view.bottom-60)centreRect(box,area);
 }
 function followActiveNode(){
   const id=preview?.definition?.workflow[preview.activeStep]?.id;
@@ -322,6 +330,7 @@ function planNodeMenu(id,label){
   const parents=planConnections(d).filter(edge=>edge.to===id);
   return {label:`Step actions: ${label}`,items:[
     menuItem('Edit step',{ 'data-plan-select':id }),
+    menuItem('Test this step',{ 'data-step-test':'author','data-test-step':id }),
     menuItem('Advanced limits',{ 'data-menu-panel':'run-limits' }),
     menuSeparator(),
     menuItem('Add step after',{ 'data-add-after':id }),
@@ -738,7 +747,9 @@ async function saveLayout(){
   saving=true;render();
   try{
     const result=await request(`/api/applications/${encodeURIComponent(target)}`,{method:'PUT',body:JSON.stringify({definition,revision:application.revision})});
-    const index=applications.findIndex(item=>item.id===target);if(index>=0)applications[index]=result;if(currentId===target)layoutSaved=result.revision===application.revision;notify('Layout saved.');
+    const index=applications.findIndex(item=>item.id===target);if(index>=0)applications[index]=result;if(currentId===target)layoutSaved=result.revision===application.revision;
+    // Nothing is announced: the cards are where you put them, and the status
+    // already says the layout is saved. A save that fails still says so.
   }catch(error){notify(error.message);}
   finally{saving=false;render();}
 }
@@ -921,6 +932,33 @@ function movePlanStep(id,direction){
 function clearPlanDrag(){dragState=null;pointerDrag=null;$('app').classList.remove('plan-dragging');for(const element of $('app').querySelectorAll('.over,.drag-source,.tool-drop-over,.canvas-drop-over'))element.classList.remove('over','drag-source','tool-drop-over','canvas-drop-over');}
 // Where a drop landed, in the canvas's own coordinates rather than a slot index.
 const canvasScale=()=>canvasZoom??1;
+// An infinite canvas: the board is not a scrolled box, it is moved. The offset is
+// kept in the board's own coordinates, so a screen delta is divided by the zoom,
+// and no edge bounds it: panning continues past the last step in every direction.
+const canvasOffsets={plan:{x:0,y:0},run:{x:0,y:0}};
+const canvasModeOf=area=>area?.dataset.canvasMode==='run'?'run':'plan';
+const canvasZoomOf=mode=>mode==='run'?(runCanvasZoom??1):(canvasZoom??1);
+function applyCanvasOffset(area){
+  const flow=area?.querySelector('.canvas-flow');if(!flow)return;
+  const offset=canvasOffsets[canvasModeOf(area)];
+  flow.style.transform=`translate(${offset.x}px, ${offset.y}px)`;
+}
+function panCanvas(area,dx,dy){
+  const mode=canvasModeOf(area),offset=canvasOffsets[mode],zoom=canvasZoomOf(mode);
+  offset.x+=dx/zoom;offset.y+=dy/zoom;applyCanvasOffset(area);
+}
+// Zoom where the pointer is: the board point under it must still be under it
+// afterwards, which is what makes zooming feel like the canvas rather than the box.
+function zoomCanvasAt(area,clientX,clientY,factor){
+  const mode=canvasModeOf(area),flow=area?.querySelector('.canvas-flow');if(!flow)return;
+  const current=canvasZoomOf(mode),next=Math.max(.4,Math.min(2.5,current*factor));
+  if(Math.abs(next-current)<0.001)return;
+  const view=area.getBoundingClientRect(),offset=canvasOffsets[mode];
+  const point={x:(clientX-view.left)/current-offset.x,y:(clientY-view.top)/current-offset.y};
+  if(mode==='run')runCanvasZoom=next;else canvasZoom=next;
+  offset.x=(clientX-view.left)/next-point.x;offset.y=(clientY-view.top)/next-point.y;
+  if(mode==='run')applyRunZoom();else applyCanvasZoom();
+}
 function canvasDropPoint(clientX,clientY){const flow=$('app').querySelector('[data-canvas-drop]'),rect=flow?.getBoundingClientRect();return rect?{x:(clientX-rect.left)/canvasScale(),y:(clientY-rect.top)/canvasScale()}:null;}
 function finishCanvasDrop(drag,clientX,clientY){
   if(drag.type==='step')return false;
@@ -929,7 +967,7 @@ function finishCanvasDrop(drag,clientX,clientY){
   updatePlan(moveCanvasStep(next,id,point.x-canvasNodeWidth/2,point.y-60),id);
   notify('Step added where you dropped it.');return true;
 }
-function dragAutoScroll(clientY){const canvas=$('app').querySelector('.plan-canvas');if(canvas&&canvas.scrollHeight>canvas.clientHeight){const rect=canvas.getBoundingClientRect();if(clientY<rect.top+60)canvas.scrollTop-=16;else if(clientY>rect.bottom-60)canvas.scrollTop+=16;}else if(clientY<80)window.scrollBy(0,-14);else if(clientY>window.innerHeight-80)window.scrollBy(0,14);}
+function dragAutoScroll(clientY){const canvas=$('app').querySelector('.plan-canvas');if(!canvas)return;const rect=canvas.getBoundingClientRect();if(clientY<rect.top+60)panCanvas(canvas,0,24);else if(clientY>rect.bottom-60)panCanvas(canvas,0,-24);}
 let skipPlanClickUntil=0;
 $('app').addEventListener('input',event=>{if(event.target.dataset.path)updateField(event.target.dataset.path,event.target.value);if(event.target.dataset.requestField){const mode=event.target.dataset.inputMode;requestInputs[mode][currentId]??={};requestInputs[mode][currentId][event.target.dataset.requestField]=event.target.value;}if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;if(event.target.dataset.humanInput)humanDraft[event.target.dataset.humanInput]=event.target.value;if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.hasAttribute('data-assistant-input'))commandState().text=event.target.value;if(event.target.dataset.requirementAnswer!==undefined){const d=draft();if(d.requirements?.[event.target.dataset.requirementAnswer]){d.requirements[event.target.dataset.requirementAnswer].answer=event.target.value;markDirty();}}});
 $('run-form').addEventListener('input',event=>{
@@ -967,6 +1005,9 @@ $('app').addEventListener('click',async event=>{
   const button=event.target.closest('button');if(!button||button.disabled||saving||Date.now()<skipPlanClickUntil)return;
   // A menu item closes its menu, then does exactly what the control it stands for does.
   if(button.closest('[data-canvas-menu]'))closeMenu({restoreFocus:false});
+  // Testing a step is offered on the plan canvas and in the run inspector, so the
+  // step comes from the control rather than from whichever view happens to be open.
+  if(button.dataset.stepTest){if(button.dataset.testStep&&button.closest('.run-inspector-drawer'))selectedRunStepId=button.dataset.testStep;await stepTests.open(button.dataset.stepTest,button.dataset.testStep);return;}
   // A command that acts inside the step panel opens it, so its result is visible.
   if(button.dataset.menuReveal==='panel'&&!showPlanInspector){showPlanInspector=true;render();}if(button.hasAttribute('data-apply-schema')){try{const index=Number(button.dataset.applySchema),fields=JSON.parse($('schema-'+index).value);validateRecordFields(fields);draft().state[index].fields=fields;markDirty();render();notify('Record fields applied to the draft.');}catch(error){notify(error.message);}return;}
   try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.removeRequirement!==undefined){const d=draft();d.requirements?.splice(Number(button.dataset.removeRequirement),1);if(d.requirements&&!d.requirements.length)delete d.requirements;markDirty();render();return;}if(button.dataset.step!==undefined){buildStep=Number(button.dataset.step);advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.downloadOutput){downloadResult(button.dataset.downloadOutput);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
@@ -993,8 +1034,16 @@ $('app').addEventListener('click',async event=>{
       render();return;}
     if(button.dataset.canvasPort){connectSource=button.dataset.canvasPort;selectedEdge=null;render();return;}
     if(button.dataset.canvasDisconnect){const from=button.dataset.canvasDisconnect,to=button.dataset.canvasDisconnectTo;selectedEdge=null;updatePlan(disconnectPlanSteps(draft(),from,to));notify('Connection removed.');return;}
-    if(button.dataset.canvasZoom){const mode=button.dataset.canvasZoom;if(mode==='fit'){fitCanvas('plan');return;}canvasZoom=mode==='reset'?null:Math.max(.4,Math.min(1.6,(canvasZoom??1)+(mode==='in'?.1:-.1)));applyCanvasZoom();return;}
-    if(button.dataset.runZoom){suspendRunFollow();const mode=button.dataset.runZoom;if(mode==='fit'){runCanvasZoom=null;applyRunZoom();const area=$('app').querySelector('[data-canvas-mode="run"]');area.scrollLeft=0;area.scrollTop=0;return;}const flow=$('app').querySelector('[data-run-canvas]');runCanvasZoom=mode==='reset'?1:Math.max(.4,Math.min(1.6,Number(flow?.style.zoom||1)+(mode==='in'?.1:-.1)));applyRunZoom();return;}
+    if(button.dataset.canvasZoom){const mode=button.dataset.canvasZoom;if(mode==='fit'){fitCanvas('plan');return;}
+      const area=$('app').querySelector('[data-canvas-mode="plan"]');
+      // A button zoom keeps the middle of the view: the canvas is not a box you
+      // scroll back to, so nothing should jump under the pointer.
+      if(mode==='reset'){zoomCanvasAt(area,area.getBoundingClientRect().left+area.clientWidth/2,area.getBoundingClientRect().top+area.clientHeight/2,1/(canvasZoom??1));return;}
+      zoomCanvasAt(area,area.getBoundingClientRect().left+area.clientWidth/2,area.getBoundingClientRect().top+area.clientHeight/2,mode==='in'?1.1:1/1.1);return;}
+    if(button.dataset.runZoom){suspendRunFollow();const mode=button.dataset.runZoom;const area=$('app').querySelector('[data-canvas-mode="run"]');
+      if(mode==='fit'){runCanvasZoom=null;applyRunZoom();canvasOffsets.run={x:0,y:0};fitCanvas('run');return;}
+      const view=area.getBoundingClientRect();
+      zoomCanvasAt(area,view.left+area.clientWidth/2,view.top+area.clientHeight/2,mode==='in'?1.1:1/1.1);return;}
     if(button.dataset.planSelect){editPlanStep(button.dataset.planSelect);return;}
     if(button.dataset.action==='toggle-activity'){activityExpanded=!activityExpanded;render();return;}
   if(button.dataset.action==='close-run-inspector'){closeRunInspector();return;}
@@ -1118,14 +1167,23 @@ function assignCatalogTool(toolId,agentId){const d=structuredClone(draft()),agen
 
 function userApplications(){return applications.filter(a=>!templates.some(t=>t.id===a.id)||a.revision>1);}
 function sidebarApplications(){const own=userApplications();if(showAllApplications)return own;const visible=own.slice(0,3),selected=own.find(a=>a.id===currentId);if(selected&&!visible.includes(selected)){if(visible.length===3)visible[2]=selected;else visible.push(selected);}return visible;}
-$('app').addEventListener('pointerdown',event=>{const area=event.target.closest('.canvas-viewport');if(!area||event.target.closest('button,input,textarea,select,[data-plan-node],[data-canvas-dock]')||event.button!==0)return;if(area.dataset.canvasMode==='run')suspendRunFollow();canvasPan={area,x:event.clientX,y:event.clientY,left:area.scrollLeft,top:area.scrollTop,pointer:event.pointerId};area.setPointerCapture?.(event.pointerId);area.classList.add('panning');});
-$('app').addEventListener('pointermove',event=>{if(!canvasPan||canvasPan.pointer!==event.pointerId)return;canvasPan.area.scrollLeft=canvasPan.left-(event.clientX-canvasPan.x);canvasPan.area.scrollTop=canvasPan.top-(event.clientY-canvasPan.y);});
+$('app').addEventListener('pointerdown',event=>{const area=event.target.closest('.canvas-viewport');if(!area||event.target.closest('button,input,textarea,select,[data-plan-node],[data-canvas-dock]')||event.button!==0)return;if(area.dataset.canvasMode==='run')suspendRunFollow();canvasPan={area,x:event.clientX,y:event.clientY,pointer:event.pointerId};area.setPointerCapture?.(event.pointerId);area.classList.add('panning');});
+$('app').addEventListener('pointermove',event=>{const pan=canvasPan;if(!pan||pan.pointer!==event.pointerId)return;panCanvas(pan.area,event.clientX-pan.x,event.clientY-pan.y);pan.x=event.clientX;pan.y=event.clientY;if(canvasModeOf(pan.area)==='run')suspendRunFollow();});
+// The canvas is not a scrolled box, so the wheel is ours: it moves the canvas,
+// and with ⌘/Ctrl it zooms where the pointer is, as drawing tools do.
+$('app').addEventListener('wheel',event=>{
+  const area=event.target.closest('.canvas-viewport');if(!area)return;
+  event.preventDefault();
+  if(event.ctrlKey||event.metaKey){zoomCanvasAt(area,event.clientX,event.clientY,event.deltaY<0?1.12:1/1.12);if(canvasModeOf(area)==='run')suspendRunFollow();return;}
+  panCanvas(area,-event.deltaX,-event.deltaY);
+  if(canvasModeOf(area)==='run')suspendRunFollow();
+},{passive:false});
 function endCanvasPan(){if(canvasPan){canvasPan.area.classList.remove('panning');canvasPan.area.releasePointerCapture?.(canvasPan.pointer);canvasPan=null;}}
 $('app').addEventListener('pointerup',endCanvasPan);$('app').addEventListener('pointercancel',endCanvasPan);
 $('app').addEventListener('keydown',event=>{
   if(!event.target.matches('.canvas-viewport'))return;
   const delta={ArrowLeft:[-80,0],ArrowRight:[80,0],ArrowUp:[0,-80],ArrowDown:[0,80]}[event.key];
-  if(!delta)return;if(event.target.dataset.canvasMode==='run')suspendRunFollow();event.preventDefault();event.target.scrollLeft+=delta[0];event.target.scrollTop+=delta[1];
+  if(!delta)return;if(event.target.dataset.canvasMode==='run')suspendRunFollow();event.preventDefault();panCanvas(event.target,-delta[0],-delta[1]);
 });
 
 // What the person clarified about their goal. Kept with the application so the

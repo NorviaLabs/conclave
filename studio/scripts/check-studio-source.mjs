@@ -108,6 +108,14 @@ assert.match(source, /updatePlan\(moveCanvasStep\(draft\(\),drag\.id[\s\S]{0,80}
 assert.match(source, /action==='tidy-canvas'\)\{updatePlan\(tidyCanvas\(draft\(\)\)\);scheduleLayoutSave\(\)/, 'so does Tidy layout');
 assert.match(source, /layoutSaveDefinition\(application\.definition,draft\(\)\)/, 'only the arrangement travels, so an unfinished edit is not saved behind the person');
 assert.match(source, /dirty\(\)\?'Unsaved changes':layoutSaved\?'Layout saved'/, 'unsaved content takes precedence over layout success');
+// Autosaving the layout announces nothing: the canvas shows the arrangement, and
+// the status says it is saved. A save that fails is still reported.
+{
+  const layout = source.slice(source.indexOf('async function saveLayout('), source.indexOf('function resetRuns('));
+  assert.ok(layout.length > 100, 'the layout autosave is present');
+  assert.ok(!/notify\('Layout saved/.test(layout), 'and says nothing when it works');
+  assert.match(layout, /catch\(error\)\{notify\(error\.message\);\}/, 'while a failure still says so');
+}
 assert.match(source, /layoutSaved=!!revision&&result\.revision===revision/, 'a save without a content-version advance reports layout success');
 assert.match(source, /if\(currentId===target\)layoutSaved=result\.revision===application\.revision/, 'layout success belongs to the application that was saved');
 assert.match(source, /function resetRuns\(\)\{layoutSaved=false;clearTimeout\(layoutSaveTimer\)/, 'switching applications clears layout success and pending debounce');

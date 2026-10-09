@@ -136,6 +136,110 @@ class ApplicationAPI:
         self.defaults = defaults if defaults is not None else configured_data("defaults")
         self.catalogue = catalogue if catalogue is not None else configured_data("catalogue")
         self.proposal_lock = asyncio.Lock()
+        from .application.step_testing import StepTestStore
+        self.step_tests = StepTestStore(host.paths.root / 'step-tests.sqlite')
+        self.test_tasks = {}
+
+    async def _step_testing(self, method, parts, query, value, actor):
+        import copy
+        from .application.capture import redact
+        from .application.step_testing import authored_fixture, fixture_preview, test_scope, compare
+        from .application.step_execution import execute_test, safe_tools
+        application, section = parts[2], parts[3]
+        saved = self.workspace.get(application)
+        kind = 'fixture' if section == 'fixtures' else 'test'
+        store = self.step_tests
+        if section == 'fixtures' and method == 'POST' and parts[4:] == ['author']:
+            # A step that has never run can still be tested: the person supplies
+            # the request inputs and the output of every step it depends on, and
+            # the fixture records that they did so rather than claiming a run.
+            if not isinstance(value, dict) or not isinstance(value.get('step_id'), str) or set(value) - {'step_id', 'name', 'definition', 'inputs', 'upstream', 'reference', 'reference_recorded', 'task'}:
+                raise ValueError('Choose a step to test')
+            name = value.get('name')
+            if not isinstance(name, str) or not name.strip() or len(name) > 100:
+                raise ValueError('Name the fixture (up to 100 characters)')
+            definition = copy.deepcopy(value.get('definition', saved['definition']))
+            data = authored_fixture(definition, application, saved['revision'], value['step_id'],
+                                    inputs=value.get('inputs'), upstream=value.get('upstream'),
+                                    reference=value.get('reference'), reference_recorded=bool(value.get('reference_recorded')),
+                                    task=value.get('task') or '')
+            data['name'] = name.strip()
+            return 201, store.save(application, actor.name, kind, data)
+        if section == 'fixtures' and method == 'POST' and (len(parts) == 4 or parts[4:] == ['preview']):
+            if not isinstance(value, dict) or set(value) - {'run_id', 'step_id', 'name', 'data'} or not {'run_id', 'step_id'} <= set(value):
+                raise ValueError('Choose a source run and completed step')
+            _, record = await self.host.handle('get', {'run_id': value['run_id']}, principal=actor)
+            if record['request']['application_id'] != application:
+                raise KeyError(application)
+            preview = fixture_preview(record, value['step_id'])
+            if len(parts) == 5:
+                return 200, preview
+            name = value.get('name')
+            if not isinstance(name, str) or not name.strip() or len(name) > 100:
+                raise ValueError('Name the fixture (up to 100 characters)')
+            data = value.get('data', preview)
+            if not isinstance(data, dict) or set(data) != set(preview):
+                raise ValueError('Use the fixture preview envelope')
+            editable = {'inputs', 'input_state', 'patches', 'reference', 'task'}
+            if any(data[key] != preview[key] for key in preview.keys() - editable):
+                raise ValueError('Fixture provenance cannot be edited')
+            data = redact(copy.deepcopy(data))
+            from .application.definition import _dependency_state, validate_request_inputs
+            validate_request_inputs(data['definition'], data['inputs'])
+            if _dependency_state(data['definition'], data['step_id'], data['patches']) != data['input_state']:
+                raise ValueError('Edited prerequisite patches must match the input state')
+            data['name'] = name.strip()
+            return 201, store.save(application, actor.name, kind, data)
+        if len(parts) == 4 and method == 'GET':
+            return 200, {section: store.list(application, actor.name, kind)}
+        if section == 'tests' and len(parts) == 4 and method == 'POST':
+            if not isinstance(value, dict) or not {'fixture_id', 'scope'} <= set(value) or set(value) - {'fixture_id', 'scope', 'definition', 'model', 'mocks'}:
+                raise ValueError('Choose a fixture and test scope')
+            fixture = store.get(application, actor.name, 'fixture', value['fixture_id'])
+            # An authored fixture belongs to the definition it was written
+            # against, so that is the default; a recorded one is tested against
+            # the application's saved version unless the caller says otherwise.
+            definition = copy.deepcopy(value.get('definition', fixture['definition'] if fixture.get('authored') else saved['definition']))
+            if value.get('model'):
+                if not isinstance(value['model'], str):
+                    raise ValueError('Model override must be a model ID')
+                next(step for step in definition['workflow'] if step['id'] == fixture['step_id'])['model'] = value['model']
+            selected, seeds, warnings = test_scope(fixture, definition, value['scope'])
+            if definition['run_budget'].get('cost_usd') is not None:
+                raise ValueError('This provider interface cannot report cost; a finite cost cap cannot be enforced')
+            if self.host.unavailable or self.host.provider is None and self.host.backends is None:
+                raise ValueError('No provider is available for this test')
+            tools = self.host.tools
+            safe_tools(tools, value.get('mocks', {}))
+            record = store.save(application, actor.name, 'test', {
+                'version': 1, 'fixture_id': fixture['id'], 'scope': value['scope'], 'tested_steps': sorted(selected),
+                'seeded_steps': sorted(seeds), 'status': 'pending', 'events': [], 'reviews': [],
+                'request': {'definition': definition, 'task': fixture['task'], 'inputs': fixture['inputs'], 'revision': saved['revision']},
+                'reference': fixture['reference'], 'reference_recorded': bool(fixture.get('reference_recorded')),
+                'source_run': fixture.get('source_run'), 'authored': bool(fixture.get('authored')),
+                'warnings': warnings, 'mocks': value.get('mocks', {}), 'safe_mode': True})
+            task = asyncio.create_task(execute_test(store, application, actor.name, record, fixture, self.host.backends or self.host.provider, tools))
+            self.test_tasks[record['id']] = task
+            task.add_done_callback(lambda finished: self.test_tasks.pop(record['id'], None))
+            return 202, record
+        if len(parts) >= 5:
+            record = store.get(application, actor.name, kind, parts[4])
+            if len(parts) == 5 and method == 'GET':
+                return 200, record
+            if len(parts) == 5 and method == 'DELETE' and kind == 'fixture':
+                store.delete(application, actor.name, kind, parts[4])
+                return 204, None
+            if parts[5:] == ['compare'] and method == 'GET' and kind == 'test':
+                reference = record['reference']
+                if 'other' in query:
+                    other = store.get(application, actor.name, kind, query['other'][0])
+                    if other['fixture_id'] != record['fixture_id']:
+                        raise ValueError('Compare tests of the same fixture')
+                    reference = other.get('output')
+                elif not record.get('reference_recorded'):
+                    return 200, {'kind': 'none', 'equal': None, 'note': 'This fixture recorded no reference output to compare against'}
+                return 200, compare(reference, record.get('output'))
+        return 404, {'error': 'Endpoint not found'}
 
     async def dispatch(self, method, target, value=None, *, principal=None, streaming=False):
         """Answer one request. `principal` is who acted, when the transport
@@ -168,6 +272,11 @@ class ApplicationAPI:
         if parts[:1] != ["api"]:
             return 404, {"error": "Endpoint not found"}
         path = url.path
+        actor = principal or self.host.principal
+        if actor.tenant != self.host.principal.tenant:
+            return 403, {'error': 'Tenant is not authorized'}
+        if len(parts) >= 4 and parts[1] == 'applications' and parts[3] in {'fixtures', 'tests'}:
+            return await self._step_testing(method, parts, query, value, actor)
         if parts[1:2] == ['integrations'] or parts[1:2] == ['connections'] or parts[1:2] == ['hooks']:
             from .integrations.services import integrations
             from .integrations.transport import IntegrationError
