@@ -114,7 +114,7 @@ class RunRepository:
     def cancel_waiting(self, run_id: str) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            changed = connection.execute("UPDATE studio_runs SET status = 'cancelled' WHERE id = ? AND status IN ('pending', 'waiting_for_human')", (run_id,)).rowcount
+            changed = connection.execute("UPDATE studio_runs SET status = 'cancelled' WHERE id = ? AND status IN ('pending', 'waiting_for_human', 'paused')", (run_id,)).rowcount
             if changed != 1:
                 raise ValueError("This run cannot be cancelled while inactive")
             self._insert_event(connection, run_id, {"type": "ApplicationFinished", "status": "cancelled", "reason": "Stopped by the local operator"})
@@ -149,22 +149,40 @@ class RunRepository:
                                                   "stage": review["stage"], "reviewer": reviewer, "submitted_at": timestamp})
         self._notify(run_id)
 
-    def resume(self, run_id: str, provider, tools, *, approver=None, loop=None):
-        """Continue a waiting run using its persisted, explicitly submitted review."""
-        return self.execute(run_id, provider, tools, approver=approver, resume=True, loop=loop)
+    def resume(self, run_id: str, provider, tools, *, approver=None, loop=None, pause_requested=None):
+        """Continue a waiting, paused or budget-stopped run from its checkpoint.
+
+        A run that stopped because a budget ran out finished its steps, so it can
+        be continued from the last one that completed: the work already done is
+        not repeated, and the spend already recorded is not forgotten.
+        """
+        return self.execute(run_id, provider, tools, approver=approver, resume=True, loop=loop,
+                            pause_requested=pause_requested)
 
     def _claim_resume(self, run_id: str):
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT request FROM studio_runs WHERE id = ? AND status = 'waiting_for_human'", (run_id,)).fetchone()
+            row = connection.execute("SELECT request, status FROM studio_runs WHERE id = ? AND status IN ('waiting_for_human', 'paused', 'stopped')", (run_id,)).fetchone()
             if row is None:
-                raise ValueError("Only a waiting run can resume")
+                raise ValueError("Only a waiting, paused or stopped run can resume")
+            # A pause needs no contribution; a review does. Both resume from the
+            # checkpoint their own stop recorded, so completed steps are not redone.
+            paused, stopped = row[1] == "paused", row[1] == "stopped"
             # Submission events follow the waiting event; select that checkpoint
             # by type rather than assuming the latest event is ApplicationFinished.
             events = connection.execute("SELECT payload FROM studio_run_events WHERE run_id = ? ORDER BY sequence DESC", (run_id,)).fetchall()
-            waiting = next((event for (payload,) in events if (event := json.loads(payload)).get("status") == "waiting_for_human" and event.get("type") == "ApplicationFinished"), None)
+            stop_status = "paused" if paused else "stopped" if stopped else "waiting_for_human"
+            waiting = next((event for (payload,) in events if (event := json.loads(payload)).get("status") == stop_status and event.get("type") == "ApplicationFinished"), None)
             if waiting is None or "checkpoint" not in waiting:
-                raise ValueError("This run has no resumable review checkpoint")
+                raise ValueError("This run stopped without a checkpoint to resume from")
+            if stopped:
+                # Nothing to contribute: the stop was a budget, not a review, and
+                # the checkpoint holds every stage that finished.
+                connection.execute("UPDATE studio_runs SET status = 'running' WHERE id = ?", (run_id,))
+                return json.loads(row[0]), waiting["checkpoint"], {}
+            if paused:
+                connection.execute("UPDATE studio_runs SET status = 'running' WHERE id = ?", (run_id,))
+                return json.loads(row[0]), waiting["checkpoint"], {}
             review = connection.execute(
                 "SELECT stage, output FROM studio_run_reviews WHERE run_id = ? AND stage = ? AND status = 'submitted'",
                 (run_id, waiting["stage"]),
@@ -181,8 +199,34 @@ class RunRepository:
                 raise ValueError("Only a pending run can start; interrupted runs require explicit recovery")
         return self.get(run_id)["request"], None, {}
 
+    def sweep_abandoned(self) -> list[str]:
+        """Mark runs nothing is executing as interrupted, and say so.
+
+        Called by a host as it takes over its store. One process owns a run store
+        (the tenant paths say so), and a process that has just started is not
+        running anything: a run left 'running' by a process that is gone would
+        otherwise hide its work behind a status that can never change.
+
+        The stop is recorded without a checkpoint on purpose. A run that was cut
+        off mid-flight may have had an external action in it, and this records
+        that it stopped rather than offering to replay it.
+        """
+
+        with self._connect() as connection:
+            abandoned = [row[0] for row in connection.execute("SELECT id FROM studio_runs WHERE status = 'running'")]
+
+        for run_id in abandoned:
+            self._append(run_id, {"type": "ApplicationFinished", "status": "interrupted",
+                                  "reason": "The host stopped while this run was working"})
+        return abandoned
+
     def _insert_event(self, connection, run_id, event):
         sequence = connection.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM studio_run_events WHERE run_id = ?", (run_id,)).fetchone()[0]
+        # When this happened, on the host's clock. A step that is working is
+        # reported by how long it has been working, which only the record can say:
+        # a page that measured it would restart the clock on every reload, and
+        # would be describing itself rather than the run.
+        event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
         connection.execute("INSERT INTO studio_run_events VALUES (?, ?, ?)", (run_id, sequence, json.dumps(event, allow_nan=False)))
 
     def _notify(self, run_id: str) -> None:
@@ -240,7 +284,7 @@ class RunRepository:
         # finished run, the status it set.
         self._notify(run_id)
 
-    async def execute(self, run_id: str, provider, tools, *, approver=None, human_handler=None, resume=False, loop=None):
+    async def execute(self, run_id: str, provider, tools, *, approver=None, human_handler=None, resume=False, loop=None, pause_requested=None):
         """Start once, recording safe adapter events and a durable waiting review.
 
         A process crash leaves status 'running'; execution refuses to replay it.
@@ -256,6 +300,7 @@ class RunRepository:
                 request["definition"], provider, tools, request["task"],
                 inputs=request["inputs"], approver=approver, human_handler=human_handler,
                 checkpoint=checkpoint, human_inputs=human_inputs, loop=loop,
+                pause_requested=pause_requested,
             ):
                 self._append(run_id, event)
                 finished = event["type"] == "ApplicationFinished"

@@ -53,7 +53,7 @@ export function layoutSaveDefinition(saved,draft){
 }
 
 // Insertion changes only the chosen dependency, never neighbouring list entries.
-export function placeInsertedStep(definition,id,{after=null,before=null,parallel=null}={}){
+export function placeInsertedStep(definition,id,{after=null,before=null,parallel=null,at=null}={}){
   const d=structuredClone(definition);d.connections=structuredClone(planConnections(definition));
   if(!d.workflow.some(step=>step.id===id))throw new Error('Choose an existing step.');
   if(parallel){
@@ -63,7 +63,9 @@ export function placeInsertedStep(definition,id,{after=null,before=null,parallel
     if(after)d.connections.push({from:after,to:id});
     if(before)d.connections.push({from:id,to:before});
   }
-  if(d.canvas){const point=canvasPositions(definition)[after||parallel||before];if(point)d.canvas.positions[id]={x:Math.min(10000,point.x+(parallel?0:410)),y:Math.min(10000,point.y+(parallel?280:0))};}
+  // A step added from the canvas menu lands where the menu was opened.
+  if(at&&d.canvas)d.canvas.positions[id]={x:Math.max(0,Math.min(10000,Math.round(at.x))),y:Math.max(0,Math.min(10000,Math.round(at.y)))};
+  else if(d.canvas){const point=canvasPositions(definition)[after||parallel||before];if(point)d.canvas.positions[id]={x:Math.min(10000,point.x+(parallel?0:410)),y:Math.min(10000,point.y+(parallel?280:0))};}
   return validateDefinition(d);
 }
 export function copyStepMember(definition,id){

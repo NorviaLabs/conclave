@@ -1,3 +1,4 @@
+import {integrationManagerMarkup,connectionAssignmentMarkup} from '/integrations-ui.js';
 import {updateRunDOM} from '/run-dom.js';
 import {templates,toolCatalog,emptyDefinition,validateDefinition,initialState,emptyWorkspaceCatalogue,validateWorkspaceCatalogue,installWorkspaceCatalogue,validateRecordFields,validateRecordValues} from '/definition.js';
 import {advancedMarkup,contractMarkup} from '/advanced.js';
@@ -5,12 +6,13 @@ import {applicationTypes,rolePresets,toolDescriptors,outputTypes,outputPresets,c
 import {planConnections,canvasPositions,planShape,setCanvasMetrics,canvasEdgeCurve,canvasNodeWidth,canvasNodeHeight,validateRequestInputs,backendOptions,backendModels,backendIssue,backendLabel,defaultBackend} from '/definition.js';
 import {catalogueMarkup} from '/catalogue-ui.js';
 import {canvasFitZoom,uiIcon} from '/canvas-ui.js';
-import {preflightIssues,resolvePreflightIssue} from '/definition.js';
+import {menuItem,menuSeparator,menuMarkup,menuTarget,menuFocusTargets} from '/menu-ui.js';
+import {preflightIssues,resolvePreflightIssue,staleRunSteps} from '/definition.js';
 let preflightReviewed=null;
 const preflightVersion=()=>JSON.stringify([currentId,current().revision,current().definition,preflightIssues(current().definition)]);
 import {reorderPlan,duplicatePlanStep,removePlanStep,insertPlanStep,insertMemberStep,attachPlanTool,connectPlanSteps,disconnectPlanSteps,moveCanvasStep,tidyCanvas,layoutSaveDefinition,placeInsertedStep,copyStepMember,planReadiness} from '/plan.js';
 import {workbenchMarkup,executionPlanMarkup,executionDetailMarkup,canvasEdgePaths} from '/workbench-ui.js';
-import {runProgressMarkup} from '/run-canvas.js';
+import {runProgressMarkup,runStepWorking} from '/run-canvas.js';
 import {proposePlanChange,parseImportedDefinition,describeDefinitionChanges} from '/plan-assistant.js';
 import {projectLiveRun,liveRunMarkup,liveFollowMode,liveStreamPath} from '/live.js';
 import {apiUrl,apiHeaders} from '/api.js';
@@ -20,7 +22,9 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;
 const requestInputs={live:{}};
 const requestResources={};
 let workspaceCatalogue={catalogue:emptyWorkspaceCatalogue(),revision:0};
-let runtime={local:false,available:false,tools:[],backends:[]},liveBusy=false,liveError='',liveTimer=null,liveWatch=null;
+let pendingToolApprovals=[];
+let integrationCatalogue=[],integrationConnections=[],integrationEnabled=false,oauthProviders=[];
+let runtime={local:false,available:false,tools:[],backends:[]},liveBusy=false,liveError='',liveTimer=null,liveWatch=null,liveClock=null;
 const liveRuns=new Map(),liveHistory=new Map();
 const steps = ['Purpose','Team','Access','Outputs','Plan','Controls'];
 const accessCatalog=toolDescriptors;
@@ -41,6 +45,14 @@ const agentName=(d,id)=>d.agents.find(a=>a.id===id)?.name||id;
 const outputName=(d,key)=>d.state.find(s=>s.key===key)?.label||key;
 const capabilityName=id=>accessCatalog.find(t=>t.id===id)?.name||id;
 
+async function loadIntegrationConnections(){
+  try{const result=await request('/api/integrations');integrationCatalogue=result.integrations;integrationEnabled=result.connections_enabled;oauthProviders=result.oauth_providers||[];integrationConnections=integrationEnabled?(await request('/api/connections')).connections:[];}catch{integrationCatalogue=[];integrationConnections=[];integrationEnabled=false;}
+}
+async function manageIntegrations(error='',focus=''){
+  await loadIntegrationConnections();$('record-detail').innerHTML=integrationManagerMarkup(integrationCatalogue,integrationConnections,currentId,escape,integrationEnabled,error,oauthProviders);if(!$('record-dialog').open)$('record-dialog').showModal();
+}
+const connectionTools=()=>integrationConnections.filter(c=>c.applications.includes(currentId)).flatMap(c=>c.operations.map(op=>`connection.${c.id}.${op}`));
+const readinessRuntime=()=>({...runtime,tools:[...runtime.tools,...connectionTools()]});
 function notify(message){$('notice').textContent=message;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>$('notice').textContent='',6500);}
 // Where this bundle talks to, and how it authenticates: the page's own host by
 // default, or whatever config.json beside the page says.
@@ -48,7 +60,14 @@ const apiSettingsNow=()=>window.CONCLAVE_API||{base:'',token:'',credentials:'sam
 async function request(path,options={}){
   const settings=apiSettingsNow();
   const response=await fetch(apiUrl(settings,path),{...options,credentials:settings.credentials,headers:apiHeaders(settings,options)}),result=response.status===204?null:await response.json();
-  if(!response.ok)throw new Error(result.error||'The request could not be completed.');return result;
+  if(!response.ok){
+    const error=new Error(result.error||'The request could not be completed.');error.status=response.status;error.login=result.login||'';
+    // A 401 that names a sign-in is the host saying this page is not signed in —
+    // a session that lapsed mid-use reads the same way as a first visit, so it
+    // becomes the same screen rather than a stray message.
+    if(error.login&&response.status===401)showSignIn();
+    throw error;
+  }return result;
 }
 function fitCanvas(mode){
   const area=$('app').querySelector(`[data-canvas-mode="${mode}"]`),flow=area?.querySelector('.canvas-flow');if(!flow)return;
@@ -69,8 +88,45 @@ async function deleteApplication(){
     view='plan';buildStep=0;if(!currentId)createApplication('blank');else render();notify('Application deleted.');
   }catch(error){notify(error.message);}finally{saving=false;render();}
 }
+// Who this page is, as the host reports it. A deployment that authenticates with
+// Google answers /api/me; a local host answers with its own operator and no login.
+let account={principal:null,login:null};
+function signInUrl(next){
+  const settings=apiSettingsNow();
+  return apiUrl(settings,`${(account.login?.start)||'/auth/google/start'}${next?`?next=${encodeURIComponent(next)}`:''}`);
+}
+// Only a deployment with a login shows this: a local host has one operator and
+// nothing to sign out of.
+function accountMarkup(){
+  const principal=account.principal,login=account.login;
+  if(!principal||!login)return '';
+  return `<div class="account"><span class="rail-icon" aria-hidden="true">${uiIcon('person')}</span><span class="rail-label account-name" title="${escape(principal.label)}">${escape(principal.label)}</span><button class="text-button rail-label" data-action="sign-out">Sign out</button></div>`;
+}
+function signInMarkup(message){
+  const settings=apiSettingsNow();
+  return `<main class="loading sign-in"><h1>Sign in to Conclave</h1><p>This deployment admits people with a Google account. Your applications and runs stay in this deployment's own storage.</p>${message?`<p class="validation" role="alert">${escape(message)}</p>`:''}<a class="button primary" href="${escape(signInUrl())}">Sign in with Google</a><p class="field-help">You are signing in to use this Studio. Connecting Google Drive, Docs or Sheets to an application is a separate step, in Connections.</p></main>`;
+}
+function showSignIn(message){
+  const failed=new URL(location.href).searchParams.get('signin')==='failed';
+  $('app').innerHTML=signInMarkup(message||(failed?'That sign-in did not complete. Try again.':''));
+}
+async function readAccount(){
+  try{account=await request('/api/me');}
+  catch(error){account={principal:null,login:error.login?{start:error.login}:null,error:error.message};}
+  return account;
+}
 async function load(){
-  try{const results=await Promise.allSettled([request('/api/applications'),request('/api/members'),request('/api/runtime'),request('/api/catalogue')]);if(results[0].status==='rejected')throw results[0].reason;const result=results[0].value;if(results[1].status==='fulfilled'){memberLibrary=results[1].value.members;libraryError='';}else libraryError='The member library is unavailable. Your application is still editable.';if(results[2].status==='fulfilled'){runtime=results[2].value;registerHostTools(runtime.tool_descriptors);registerHostConnectors(runtime.connectors);toolCatalog.splice(0,toolCatalog.length,...toolDescriptors.map(tool=>tool.id));}if(results[3].status==='fulfilled'){workspaceCatalogue=results[3].value;installWorkspaceCatalogue(workspaceCatalogue.catalogue);}applications=result.applications;for(const item of applications)drafts.set(item.id,structuredClone(item.definition));const route=new URL(location.href);currentId=applications.find(item=>item.id===route.searchParams.get('application'))?.id||userApplications()[0]?.id;if(!currentId)createApplication('investigation');else{view=current().definition.workflow.length?'plan':'setup';buildStep=0;render();if(runtime.local&&route.searchParams.get('run')){try{await openLiveRun(route.searchParams.get('run'));await refreshLiveHistory();}catch(error){view='plan';liveError=error.message;render();notify(error.message);}}}}
+  // Who the page is comes first: without a session a deployment answers 401 and
+  // there is nothing else to fetch.
+  const who=await readAccount();
+  if(!who.principal){
+    showSignIn();
+    return;
+  }
+  if(new URL(location.href).searchParams.has('signin')){
+    const url=new URL(location.href);url.searchParams.delete('signin');history.replaceState(null,'',url);
+  }
+  try{const results=await Promise.allSettled([request('/api/applications'),request('/api/members'),request('/api/runtime'),request('/api/catalogue')]);if(results[0].status==='rejected')throw results[0].reason;const result=results[0].value;if(results[1].status==='fulfilled'){memberLibrary=results[1].value.members;libraryError='';}else libraryError='The member library is unavailable. Your application is still editable.';if(results[2].status==='fulfilled'){runtime=results[2].value;registerHostTools(runtime.tool_descriptors);registerHostConnectors([...(runtime.connectors||[]),...(runtime.integrations||[])]);toolCatalog.splice(0,toolCatalog.length,...toolDescriptors.map(tool=>tool.id));}if(results[3].status==='fulfilled'){workspaceCatalogue=results[3].value;installWorkspaceCatalogue(workspaceCatalogue.catalogue);}applications=result.applications;for(const item of applications)drafts.set(item.id,structuredClone(item.definition));const route=new URL(location.href);currentId=applications.find(item=>item.id===route.searchParams.get('application'))?.id||userApplications()[0]?.id;if(!currentId)createApplication('starter');else{view=current().definition.workflow.length?'plan':'setup';buildStep=0;render();if(runtime.local&&route.searchParams.get('run')){try{await openLiveRun(route.searchParams.get('run'));await refreshLiveHistory();}catch(error){view='plan';liveError=error.message;render();notify(error.message);}}}}
   catch(error){$('app').innerHTML=`<main class="loading"><h1>Applications are unavailable.</h1><p>${escape(error.message)}</p><button class="button" id="retry">Try again</button></main>`;$('retry').addEventListener('click',load);}
 }
 function field(label,path,value,kind='input',options=[]){
@@ -103,10 +159,9 @@ function render(){
   const size=existing?{width:Math.max(480,existing.clientWidth-40),height:Math.max(420,existing.clientHeight-40)}
     :{width:Math.max(760,Math.round(window.innerWidth*0.9)),height:Math.max(520,Math.round(window.innerHeight*0.8))};
   if(!(view==='plan'&&(preview?.live?renderedRunId===preview.runId:renderedPlanId===currentId))){let shape;try{shape=planShape(d);}catch{shape={levels:1,columns:d.workflow.length};}setCanvasMetrics({...size,...shape});}
-  const markup=`<div class="shell ${view==='plan'?(preview?.live?'canvas-first-run':'canvas-first-plan'):''} ${railOpen?'rail-open':''}"><aside class="rail ${railOpen?'open':''}" aria-label="Your applications"><button class="rail-toggle" data-action="toggle-rail" aria-expanded="${railOpen}" aria-label="${railOpen?'Collapse the sidebar':'Expand the sidebar'}" title="${railOpen?'Collapse the sidebar':'Expand the sidebar'}"><span aria-hidden="true">${railOpen?'«':'»'}</span></button><div class="brand"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m23 8-7-4-9 5v14l9 5 7-4M7 9l9 6 7-4M16 15v13"/></svg><span class="rail-label">Conclave<small>STUDIO</small></span></div><button class="button rail-action" data-action="new" ${saving?'disabled':''} aria-label="New application" title="New application"><span class="rail-icon" aria-hidden="true">＋</span><span class="rail-label">New application</span></button><button class="button catalogue-open rail-action" data-action="open-catalogue" aria-label="Templates" title="Templates"><span class="rail-icon" aria-hidden="true">▤</span><span class="rail-label">Templates</span></button><div class="rail-apps"><span class="eyebrow rail-label">YOUR APPLICATIONS</span><nav class="nav">${sidebarApplications().map(a=>`<button data-select="${escape(a.id)}" class="${a.id===currentId?'active':''}" ${a.id===currentId?'aria-current="true"':''} ${saving?'disabled':''} title="${escape(drafts.get(a.id).name)}"><span class="app-mark" aria-hidden="true">${escape(drafts.get(a.id).name.slice(0,1).toUpperCase())}</span><span class="rail-label">${escape(drafts.get(a.id).name)}<span class="nav-meta">${drafts.get(a.id).agents.length} roles${!a.revision?' · draft':''}</span></span></button>`).join('')}</nav>${userApplications().length>3?`<button class="text-button rail-label" data-action="toggle-applications">${showAllApplications?'Show fewer':'Show all '+userApplications().length}</button>`:''}</div><div class="rail-foot"><p class="runtime-label rail-label">${runtime.local?'On this computer':'Hosted'+(runtime.tenant&&runtime.tenant!=='local'?' · '+escape(runtime.tenant):'')}</p><details><summary><span class="rail-icon" aria-hidden="true">⚙</span><span class="rail-label">Workspace settings</span></summary>${runtime.local?'<button class="text-button" data-action="source-settings">Source settings</button>':''}<button class="text-button" data-action="edit-catalogue">Custom catalog</button></details></div></aside>
-    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}</h1>${view==='plan'&&!preview?.live?`<p class="application-goal">${escape(d.description)}</p>`:''}</div><div class="header-actions"><div class="actions">${dirty()?`<button class="button" data-action="save" ${saving?'disabled':''}>${saving?'Saving…':'Save'}</button>`:''}${view==='plan'?'<button class="button" data-action="set-up">Set up</button>':''}${liveHistory.get(currentId)?.length?`<button class="button" data-action="show-history">History</button>`:''}${running?`<button class="button" data-action="cancel-live" ${liveBusy?'disabled':''}>Stop</button>`
-        :`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>${preview?.live?'Run again':'Run'}</button>`}${view==='plan'&&preview?.live&&!running?'<button class="button" data-action="edit-plan">Edit plan</button>':''}${view==='setup'?'<button class="button" data-action="back-to-plan">Back to canvas</button>':''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':layoutSaved?'Layout saved':`Saved · version ${current().revision}`}</span></div></header>
-    <div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():preview?.live?runMarkup():planMarkup(draft())}</div></main></div>`;
+  const markup=`<div class="shell ${view==='plan'?(preview?.live?'canvas-first-run':'canvas-first-plan'):''} ${railOpen?'rail-open':''}"><aside class="rail ${railOpen?'open':''}" aria-label="Your applications"><button class="rail-toggle" data-action="toggle-rail" aria-expanded="${railOpen}" aria-label="${railOpen?'Collapse the sidebar':'Expand the sidebar'}" title="${railOpen?'Collapse the sidebar':'Expand the sidebar'}"><span aria-hidden="true">${railOpen?'«':'»'}</span></button><div class="brand"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m23 8-7-4-9 5v14l9 5 7-4M7 9l9 6 7-4M16 15v13"/></svg><span class="rail-label">Conclave<small>STUDIO</small></span></div><button class="button rail-action" data-action="new" ${saving?'disabled':''} aria-label="New application" title="New application"><span class="rail-icon" aria-hidden="true">＋</span><span class="rail-label">New application</span></button><button class="button catalogue-open rail-action" data-action="open-catalogue" aria-label="Templates" title="Templates"><span class="rail-icon" aria-hidden="true">▤</span><span class="rail-label">Templates</span></button><div class="rail-apps"><span class="eyebrow rail-label">YOUR APPLICATIONS</span><nav class="nav">${sidebarApplications().map(a=>`<button data-select="${escape(a.id)}" class="${a.id===currentId?'active':''}" ${a.id===currentId?'aria-current="true"':''} ${saving?'disabled':''} title="${escape(drafts.get(a.id).name)}"><span class="app-mark" aria-hidden="true">${escape(drafts.get(a.id).name.slice(0,1).toUpperCase())}</span><span class="rail-label">${escape(drafts.get(a.id).name)}<span class="nav-meta">${drafts.get(a.id).agents.length} roles${!a.revision?' · draft':''}</span></span></button>`).join('')}</nav>${userApplications().length>3?`<button class="text-button rail-label" data-action="toggle-applications">${showAllApplications?'Show fewer':'Show all '+userApplications().length}</button>`:''}</div><div class="rail-foot">${accountMarkup()}<p class="runtime-label rail-label">${runtime.local?'On this computer':'Hosted'+(runtime.tenant&&runtime.tenant!=='local'?' · '+escape(runtime.tenant):'')}</p><details><summary><span class="rail-icon" aria-hidden="true">⚙</span><span class="rail-label">Workspace settings</span></summary>${runtime.local?'<button class="text-button" data-action="source-settings">Source settings</button>':''}<button class="text-button" data-action="edit-catalogue">Custom catalog</button></details></div></aside>
+    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}</h1>${view==='plan'&&!preview?.live?`<p class="application-goal">${escape(d.description)}</p>`:''}</div><div class="header-actions"><div class="actions">${dirty()?`<button class="button" data-action="save" ${saving?'disabled':''}>${saving?'Saving…':'Save'}</button>`:''}${liveHistory.get(currentId)?.length?`<button class="button icon-only" data-action="show-history" title="Run history" aria-label="Run history">${uiIcon('clock')}</button>`:''}${view==='setup'?`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>Run</button>`:''}${view==='setup'?`<button class="button icon-only" data-action="back-to-plan" title="Back to the canvas" aria-label="Back to the canvas">${uiIcon('fit')}</button>`:''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':layoutSaved?'Layout saved':`Saved · version ${current().revision}`}</span></div></header>
+    <div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():preview?.live?runMarkup():planMarkup(draft())}</div></main></div><div id="app-menu" class="canvas-menu-host" hidden></div>`;
   const stableRun=view==='plan'&&(preview?.live?renderedRunId===preview.runId&&$('app').querySelector('[data-run-canvas]'):renderedPlanId===currentId&&$('app').querySelector('[data-canvas-drop]'));
   if(stableRun)updateRunDOM($('app'),markup);else $('app').innerHTML=markup;
   renderedPlanId=!preview?.live&&view==='plan'?currentId:null;
@@ -115,22 +170,30 @@ function render(){
   $('main-panel').classList.toggle('run-workspace',!!preview?.live&&view!=='setup');
   sizeRunCanvas();sizePlanCanvas();
   if(!stableRun)for(const scroll of scrolls){const element=$('app').querySelector(scroll.selector);if(element){element.scrollTop=scroll.top;element.scrollLeft=scroll.left;}}
+  applyDockOffset();
+  syncMenu();
   followActiveNode();
   if(!stableRun&&key){const attribute=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase()),next=$('app').querySelector(`[data-${attribute}="${CSS.escape(val)}"]${index!==undefined?`[data-index="${CSS.escape(index)}"]`:''}`);next?.focus({preventScroll:true});if(next&&typeof start==='number'&&['INPUT','TEXTAREA'].includes(next.tagName)&&next.type!=='number')try{next.setSelectionRange(start,end);}catch{}}
 }
 function buildMarkup(){
-  const d=draft(),nav=`<nav class="setup-nav calm-setup" aria-label="Application setup"><button class="setup-step ${buildStep===0&&!advanced?'active':''}" data-step="0">Goal</button><details class="setup-more" data-disclosure="setup-more" ${buildStep!==0||advanced?'open':''}><summary>Settings</summary><div class="settings-menu">${[[1,'Team'],[2,'Connections'],[3,'Results'],[5,'Limits and approvals']].map(([i,label])=>`<button data-step="${i}" class="${buildStep===i&&!advanced?'active':''}">${label}</button>`).join('')}<button data-action="toggle-advanced" aria-expanded="${advanced}">Runtime and definition</button></div></details></nav>${validation()}`;
+  const d=draft(),nav=`<nav class="setup-nav calm-setup" aria-label="Application setup"><button class="setup-step ${buildStep===0&&!advanced?'active':''}" data-step="0">Goal</button><details class="setup-more" data-disclosure="setup-more" ${buildStep!==0||advanced?'open':''}><summary>Settings</summary><div class="settings-menu">${[[1,'Team'],[2,'Connections'],[3,'Results'],[5,'Limits and approvals']].map(([i,label])=>`<button data-step="${i}" class="${buildStep===i&&!advanced?'active':''}">${label}</button>`).join('')}<button data-action="toggle-advanced" aria-expanded="${advanced}" title="Runtime and definition" aria-label="Runtime and definition">${uiIcon('sliders')}</button></div></details></nav>${validation()}`;
   if(advanced)return `${nav}<div class="step-heading"><div><span class="eyebrow">ADVANCED SETTINGS</span><h2>Definitions and runtime integration</h2><p>Detailed control over assignments, state and execution limits.</p></div></div>${advancedMarkup(d,{field,validation,escape,saving})}<details class="advanced-contract"><summary>Runtime integration, exports and definition</summary>${contractMarkup(d,{validation,escape,runtime})}</details>`;
   return `${nav}<div class="build-layout"><div class="build-content">${[purposeMarkup,teamMarkup,accessMarkup,outputsMarkup,null,controlsMarkup][buildStep](d)}</div></div>`;
 }
-function purposeMarkup(d){return `<div class="step-heading"><h2>What should it do?</h2></div><section class="panel purpose-panel">${field('Name','name',d.name)}${field('Goal','description',d.description,'textarea')}<details class="quiet-details" data-disclosure="goal-details"><summary>Expected result</summary>${field('Include in the final result',`workflow.${d.workflow.length-1}.task`,d.workflow.at(-1).task,'textarea')}</details></section><details class="quiet-details" data-disclosure="request-form"><summary>Request form · ${(d.inputs||[]).length} fields</summary>${inputDesignerMarkup(d)}</details>${d.review_checks?`<details class="quiet-details" data-disclosure="review-checks"><summary>Review checklist</summary><ul>${d.review_checks.map(c=>`<li>${escape(c)}</li>`).join('')}</ul></details>`:''}`;}
+// What the person clarified, editable where the goal is: an answer can change as
+// they learn more, and a question they do not want can be removed.
+function requirementsMarkup(d){
+  const items=d.requirements||[];if(!items.length)return '';
+  return `<details class="quiet-details" data-disclosure="requirements" open><summary>Clarified requirements · ${items.length}</summary>${items.map((item,index)=>`<div class="field"><label for="requirement-${index}">${escape(item.question)}</label><textarea id="requirement-${index}" data-requirement-answer="${index}" rows="2" placeholder="Answer, or leave it blank">${escape(item.answer)}</textarea><button type="button" class="text-button" data-remove-requirement="${index}">Remove this question</button></div>`).join('')}<p class="field-help">Your answers are given to the team when the application runs. A question left blank stays open.</p></details>`;
+}
+function purposeMarkup(d){return `<div class="step-heading"><h2>What should it do?</h2></div><section class="panel purpose-panel">${field('Name','name',d.name)}${field('Goal','description',d.description,'textarea')}${requirementsMarkup(d)}<details class="quiet-details" data-disclosure="goal-details"><summary>Expected result</summary>${field('Include in the final result',`workflow.${d.workflow.length-1}.task`,d.workflow.at(-1).task,'textarea')}</details></section><details class="quiet-details" data-disclosure="request-form"><summary>Request form · ${(d.inputs||[]).length} fields</summary>${inputDesignerMarkup(d)}</details>${d.review_checks?`<details class="quiet-details" data-disclosure="review-checks"><summary>Review checklist</summary><ul>${d.review_checks.map(c=>`<li>${escape(c)}</li>`).join('')}</ul></details>`:''}`;}
 
-function teamMarkup(d){return `<div class="step-heading"><div><span class="eyebrow">02 · TEAM</span><h2>Who does the work?</h2></div><button class="button" data-action="add-role">Add member</button></div><div class="role-grid">${d.agents.map((a,i)=>{const work=d.workflow.filter(w=>w.agent===a.id),outputs=[...new Set(work.map(w=>outputName(d,w.output)))];return `<details class="panel role-card quiet-row" data-disclosure="team-${escape(a.id)}"><summary><span class="role-symbol small">${escape(a.name.slice(0,1))}</span><strong>${escape(a.name)}</strong><span class="field-help">${a.kind==='human'?'Person':'AI'} · ${work.length} steps</span></summary><div class="row-editor"><div class="panel-top"><span class="role-symbol" aria-hidden="true">${escape(a.name.trim().slice(0,1).toUpperCase()||String(i+1))}</span><span class="kind-tag ${a.kind==='human'?'human':'ai'}">${a.kind==='human'?'Human':'AI'}</span><button class="icon-button" data-action="remove-role" data-index="${i}" aria-label="Remove ${escape(a.name)}" ${d.agents.length<2?'disabled':''}>×</button></div>${field('Member name',`agents.${i}.name`,a.name)}${field('Member type',`agents.${i}.kind`,a.kind||'ai','select',[['ai','AI member'],['human','Human member']])}${field('Responsibility',`agents.${i}.instructions`,a.instructions,'textarea')}<fieldset class="role-backend"><legend>Runs on</legend>${backendMarkup({path:`agents.${i}`,provider:a.provider,model:a.model,human:a.kind==='human'})||`<p class="field-help">A person completes this member’s steps; nothing runs them.</p>`}</fieldset><div class="role-deliverables"><span class="field-label">Prepares</span>${outputs.length?outputs.map(name=>`<span class="chip">${escape(name)}</span>`).join(''):'<span class="field-help">No steps yet.</span>'}</div></div></details>`;}).join('')}</div><details class="quiet-details"><summary>Team assignments</summary><section class="collaboration"><div class="section-head"><h3>How the team works together</h3><button class="text-button" data-open-plan>Edit visual plan</button></div><ol class="collaboration-list">${d.workflow.map(w=>`<li><strong>${escape(agentName(d,w.agent))}</strong><span>${escape(w.name)}</span><small>${escape(outputName(d,w.output))}</small></li>`).join('')}</ol></section></details>`;}
+function teamMarkup(d){return `<div class="step-heading"><div><span class="eyebrow">02 · TEAM</span><h2>Who does the work?</h2></div><button class="button" data-action="add-role">Add member</button></div><div class="role-grid">${d.agents.map((a,i)=>{const work=d.workflow.filter(w=>w.agent===a.id),outputs=[...new Set(work.map(w=>outputName(d,w.output)))];return `<details class="panel role-card quiet-row" data-disclosure="team-${escape(a.id)}"><summary><span class="role-symbol small">${escape(a.name.slice(0,1))}</span><strong>${escape(a.name)}</strong><span class="field-help">${a.kind==='human'?'Person':'AI'} · ${work.length} steps</span></summary><div class="row-editor"><div class="panel-top"><span class="role-symbol" aria-hidden="true">${escape(a.name.trim().slice(0,1).toUpperCase()||String(i+1))}</span><span class="kind-tag ${a.kind==='human'?'human':'ai'}">${a.kind==='human'?'Human':'AI'}</span><button class="icon-button" data-action="remove-role" data-index="${i}" title="Remove this member" aria-label="Remove ${escape(a.name)}" ${d.agents.length<2?'disabled':''}>×</button></div>${field('Member name',`agents.${i}.name`,a.name)}${field('Member type',`agents.${i}.kind`,a.kind||'ai','select',[['ai','AI member'],['human','Human member']])}${field('Responsibility',`agents.${i}.instructions`,a.instructions,'textarea')}<fieldset class="role-backend"><legend>Runs on</legend>${backendMarkup({path:`agents.${i}`,provider:a.provider,model:a.model,human:a.kind==='human'})||`<p class="field-help">A person completes this member’s steps; nothing runs them.</p>`}</fieldset><div class="role-deliverables"><span class="field-label">Prepares</span>${outputs.length?outputs.map(name=>`<span class="chip">${escape(name)}</span>`).join(''):'<span class="field-help">No steps yet.</span>'}</div></div></details>`;}).join('')}</div><details class="quiet-details"><summary>Team assignments</summary><section class="collaboration"><div class="section-head"><h3>How the team works together</h3><button class="text-button" data-open-plan>Edit visual plan</button></div><ol class="collaboration-list">${d.workflow.map(w=>`<li><strong>${escape(agentName(d,w.agent))}</strong><span>${escape(w.name)}</span><small>${escape(outputName(d,w.output))}</small></li>`).join('')}</ol></section></details>`;}
 function accessMarkup(d){return `<div class="step-heading"><h2>Connections</h2><button class="button" data-action="open-catalogue" data-pane="connectors">Add connection</button></div>${connectorSetupMarkup(d)}<details class="quiet-details" data-disclosure="team-tools"><summary>Tools for each team member</summary>${d.agents.filter(a=>a.kind!=='human').map(a=>{const i=d.agents.indexOf(a);return `<details class="panel quiet-row" data-disclosure="tools-${escape(a.id)}"><summary><strong>${escape(a.name)}</strong><span>${a.tools.length} tools</span></summary><div class="row-editor">${[...new Set(accessCatalog.map(t=>t.category))].map(category=>`<details class="tool-group"><summary>${escape(category)}</summary><div class="access-options">${accessCatalog.filter(t=>t.category===category).map(tool=>`<label class="access-option"><input type="checkbox" data-tool="${tool.id}" data-index="${i}" ${a.tools.includes(tool.id)?'checked':''}><span><strong>${escape(tool.name)}</strong><small>${escape(tool.description)}</small></span></label>`).join('')}</div></details>`).join('')}</div></details>`;}).join('')}<button class="text-button" data-action="open-catalogue" data-pane="tools">Browse tools</button></details>`;}
 
 function outputKind(state){return outputTypes.find(type=>type.id===(state.kind||(state.type==='text'?'document':'findings')))||outputTypes[1];}
 function outputLayouts(type){return type==='text'?[['prose','Written report']]:[['cards','Cards'],['table','Table'],['board','Status board']];}
-function outputsMarkup(d){return `<div class="step-heading"><div><span class="eyebrow">04 · OUTPUTS</span><h2>What should people see?</h2></div><button class="button" data-action="add-output">Add output</button></div><div class="output-grid">${d.views.map((v,i)=>{const state=d.state.find(s=>s.key===v.collection),stageIndex=d.workflow.findIndex(w=>w.output===state.key),kind=outputKind(state);return `<details class="panel output-card quiet-row" data-disclosure="result-${escape(v.id)}"><summary><strong>${escape(v.title)}</strong><span class="field-help">${escape(kind.name)}</span></summary><div class="row-editor"><div class="panel-top"><span class="output-symbol" aria-hidden="true">${state.type==='text'?'¶':'▦'}</span><span class="kind-tag">${escape(kind.name)}</span><button class="icon-button" data-action="remove-output" data-index="${i}" aria-label="Remove ${escape(v.title)}" ${d.views.length<2?'disabled':''}>×</button></div>${field('Output name',`views.${i}.title`,v.title)}<div class="field"><label for="output-kind-${i}">Output type</label><select id="output-kind-${i}" data-output-kind="${i}">${outputTypes.map(k=>`<option value="${k.id}" ${kind.id===k.id?'selected':''}>${k.name}</option>`).join('')}</select></div><div class="field"><label for="output-format-${i}">Presentation</label><select id="output-format-${i}" data-format="${i}">${outputLayouts(state.type).map(([key,label])=>`<option value="${key}" ${v.layout===key?'selected':''}>${label}</option>`).join('')}</select></div>${stageIndex>=0?field('Prepared by',`workflow.${stageIndex}.agent`,d.workflow[stageIndex].agent,'select',d.agents.map(a=>[a.id,a.name+(a.kind==='human'?' · Human':'')])):'<p class="field-help">No step writes to this yet.</p>'}<p class="field-help">${escape(kind.description)}</p>${kind.id==='artifact'?'<p class="tool-hint">Shows links to files once file access is connected.</p>':''}</div></details>`;}).join('')}</div>`;}
+function outputsMarkup(d){return `<div class="step-heading"><div><span class="eyebrow">04 · OUTPUTS</span><h2>What should people see?</h2></div><button class="button" data-action="add-output">Add output</button></div><div class="output-grid">${d.views.map((v,i)=>{const state=d.state.find(s=>s.key===v.collection),stageIndex=d.workflow.findIndex(w=>w.output===state.key),kind=outputKind(state);return `<details class="panel output-card quiet-row" data-disclosure="result-${escape(v.id)}"><summary><strong>${escape(v.title)}</strong><span class="field-help">${escape(kind.name)}</span></summary><div class="row-editor"><div class="panel-top"><span class="output-symbol" aria-hidden="true">${state.type==='text'?'¶':'▦'}</span><span class="kind-tag">${escape(kind.name)}</span><button class="icon-button" data-action="remove-output" data-index="${i}" title="Remove this output" aria-label="Remove ${escape(v.title)}" ${d.views.length<2?'disabled':''}>×</button></div>${field('Output name',`views.${i}.title`,v.title)}<div class="field"><label for="output-kind-${i}">Output type</label><select id="output-kind-${i}" data-output-kind="${i}">${outputTypes.map(k=>`<option value="${k.id}" ${kind.id===k.id?'selected':''}>${k.name}</option>`).join('')}</select></div><div class="field"><label for="output-format-${i}">Presentation</label><select id="output-format-${i}" data-format="${i}">${outputLayouts(state.type).map(([key,label])=>`<option value="${key}" ${v.layout===key?'selected':''}>${label}</option>`).join('')}</select></div>${stageIndex>=0?field('Prepared by',`workflow.${stageIndex}.agent`,d.workflow[stageIndex].agent,'select',d.agents.map(a=>[a.id,a.name+(a.kind==='human'?' · Human':'')])):'<p class="field-help">No step writes to this yet.</p>'}<p class="field-help">${escape(kind.description)}</p>${kind.id==='artifact'?'<p class="tool-hint">Shows links to files once file access is connected.</p>':''}</div></details>`;}).join('')}</div>`;}
 // The canvas shows the whole plan: one scale, computed from the board and the
 // box it is drawn in, recomputed on resize and in full screen.
 // Fit to the box, but never so small that the steps stop being readable.
@@ -156,6 +219,29 @@ function sizeRunCanvas(){
   applyRunZoom();
 }
 function suspendRunFollow(){followActive=false;const button=$('app').querySelector('[data-action="follow-active"]');if(button){button.setAttribute('aria-pressed','false');button.textContent='Follow active step off';}}
+// Centre the canvas on a rectangle in screen coordinates: a step, or the middle
+// of the two steps a connection joins.
+function centreRect(box,area){
+  if(!box||!area)return;
+  const view=area.getBoundingClientRect();
+  area.scrollLeft+=(box.left+box.right-view.left-view.right)/2;
+  area.scrollTop+=(box.top+box.bottom-view.top-view.bottom)/2;
+}
+function stepsArea(...ids){
+  for(const id of ids){const node=$('app').querySelector(`[data-plan-node="${CSS.escape(id)}"]`);if(node)return {node,area:node.closest('.canvas-viewport')};}
+  return {};
+}
+function centrePlanStep(id){
+  const {node,area}=stepsArea(id);if(node)centreRect(node.getBoundingClientRect(),area);
+}
+function centreEdge(from,to){
+  const {area}=stepsArea(from,to);if(!area)return;
+  const ends=[from,to].map(id=>$('app').querySelector(`[data-plan-node="${CSS.escape(id)}"]`)).filter(Boolean).map(node=>node.getBoundingClientRect());
+  if(ends.length<1)return;
+  const left=Math.min(...ends.map(box=>box.left)),right=Math.max(...ends.map(box=>box.right));
+  const top=Math.min(...ends.map(box=>box.top)),bottom=Math.max(...ends.map(box=>box.bottom));
+  centreRect({left,right,top,bottom},area);
+}
 function focusRunNode(id){
   const node=$('app').querySelector(`[data-run-node="${CSS.escape(id)}"]`),area=node?.closest('.canvas-viewport');if(!area)return;
   const box=node.getBoundingClientRect(),view=area.getBoundingClientRect();
@@ -174,6 +260,241 @@ function sizePlanCanvas(){
 }
 window.addEventListener('resize',sizePlanCanvas);
 window.addEventListener('resize',sizeRunCanvas);
+
+// The canvas action bar floats over the graph, so it can be moved out of the way
+// of whatever is underneath it. The position is kept per application for this
+// session, clamped to the canvas, and re-applied after every render because the
+// bar is rebuilt with the canvas.
+const dockOffsets=new Map();
+let dockDrag=null;
+function placeDock(dock,offset){
+  dock.style.left=`${offset.left}px`;dock.style.top=`${offset.top}px`;
+  dock.style.right='auto';dock.style.bottom='auto';dock.style.transform='none';
+}
+function clampDock(dock,left,top){
+  const box=dock.offsetParent?.getBoundingClientRect();
+  const width=dock.offsetWidth,height=dock.offsetHeight;
+  const limitX=(box?box.width:window.innerWidth)-width-8,limitY=(box?box.height:window.innerHeight)-height-8;
+  return {left:Math.round(Math.max(8,Math.min(limitX,left))),top:Math.round(Math.max(8,Math.min(limitY,top)))};
+}
+function applyDockOffset(){
+  const dock=$('app').querySelector('[data-canvas-dock]'),offset=dock&&dockOffsets.get(currentId);
+  if(!dock)return;
+  if(offset)placeDock(dock,clampDock(dock,offset.left,offset.top));
+}
+// Pressing the bar's own surface drags it; its buttons keep their meaning.
+$('app').addEventListener('pointerdown',event=>{
+  const dock=event.target.closest?.('[data-canvas-dock]');
+  if(!dock||event.button!==0||event.target.closest('button,input,select,textarea,a'))return;
+  const box=dock.getBoundingClientRect(),panel=dock.offsetParent?.getBoundingClientRect();
+  if(!panel)return;
+  dockDrag={pointer:event.pointerId,dock,x:event.clientX,y:event.clientY,left:box.left-panel.left,top:box.top-panel.top,moved:false};
+  dock.setPointerCapture?.(event.pointerId);event.preventDefault?.();
+});
+$('app').addEventListener('pointermove',event=>{
+  const drag=dockDrag;if(!drag||drag.pointer!==event.pointerId)return;
+  const next=clampDock(drag.dock,drag.left+(event.clientX-drag.x),drag.top+(event.clientY-drag.y));
+  if(!drag.moved&&next.left===drag.left&&next.top===drag.top)return;
+  drag.moved=true;drag.next=next;drag.dock.classList.add('dragging');placeDock(drag.dock,next);event.preventDefault?.();
+});
+function finishDockDrag(commit){
+  const drag=dockDrag;if(!drag)return;dockDrag=null;
+  drag.dock.releasePointerCapture?.(drag.pointer);drag.dock.classList.remove('dragging');
+  if(commit&&drag.moved)dockOffsets.set(currentId,drag.next);
+}
+$('app').addEventListener('pointerup',event=>{if(dockDrag?.pointer===event.pointerId)finishDockDrag(true);});
+$('app').addEventListener('pointercancel',event=>{if(dockDrag?.pointer===event.pointerId)finishDockDrag(false);});
+// Double-clicking the bar puts it back where it started.
+$('app').addEventListener('dblclick',event=>{
+  const dock=event.target.closest?.('[data-canvas-dock]');
+  if(!dock||event.target.closest('button,input,select,textarea,a')||!dockOffsets.has(currentId))return;
+  dockOffsets.delete(currentId);render();
+});
+
+// The canvas context menu: the actions that belong to the step, connection or
+// background that was pressed. It is a shortcut, never the only route — every
+// item carries the same hook as the control it stands for, and a menu item the
+// run cannot act on is disabled rather than missing.
+let menu=null,menuFocusPending=false,menuReturnFocus=null,menuPoint=null;
+function planNodeMenu(id,label){
+  const d=draft(),index=d.workflow.findIndex(step=>step.id===id),step=d.workflow[index];
+  if(!step)return null;
+  const parents=planConnections(d).filter(edge=>edge.to===id);
+  return {label:`Step actions: ${label}`,items:[
+    menuItem('Edit step',{ 'data-plan-select':id }),
+    menuItem('Advanced limits',{ 'data-menu-panel':'run-limits' }),
+    menuSeparator(),
+    menuItem('Add step after',{ 'data-add-after':id }),
+    menuItem('Add parallel branch',{ 'data-add-parallel':id }),
+    menuItem('Move earlier',{ 'data-plan-move':id,'data-direction':'earlier' },{disabled:index===0,why:'This is already the first step'}),
+    menuItem('Move later',{ 'data-plan-move':id,'data-direction':'later' },{disabled:index===d.workflow.length-1,why:'This is already the last step'}),
+    menuItem('Duplicate step',{ 'data-plan-duplicate':id }),
+    menuSeparator(),
+    menuItem('New member for this step',{ 'data-action':'new-step-member','data-menu-reveal':'panel' }),
+    menuItem('Edit the shared member',{ 'data-action':'edit-shared-member','data-menu-reveal':'panel' }),
+    menuItem('Make a copy for this step',{ 'data-action':'isolate-member','data-menu-reveal':'panel' }),
+    menuItem('Edit output structure in setup',{ 'data-action':'set-up' }),
+    menuSeparator(),
+    menuItem('Connect to another step',{ 'data-canvas-port':id }),
+    menuItem('Remove what this step depends on',{ 'data-menu-disconnect-all':id },{disabled:!parents.length,why:'This step depends on nothing'}),
+    menuItem('Centre in view',{ 'data-menu-centre':id }),
+    menuSeparator(),
+    menuItem('Remove step',{ 'data-plan-remove':id },{destructive:true,disabled:d.workflow.length<2,why:'An application needs at least one step'})
+  ]};
+}
+function planEdgeMenu(id,from,to,name){
+  return {label:`Connection actions: ${name(from)} to ${name(to)}`,items:[
+    menuItem('Insert a step between',{ 'data-insert-from':from,'data-insert-to':to }),
+    menuItem('Add a parallel branch from here',{ 'data-add-parallel':to }),
+    menuItem('Reverse direction',{ 'data-menu-reverse':id }),
+    menuSeparator(),
+    menuItem(`Show ${name(from)}`,{ 'data-menu-show-step':from }),
+    menuItem(`Show ${name(to)}`,{ 'data-menu-show-step':to }),
+    menuItem('Centre this connection in view',{ 'data-menu-centre-edge':id }),
+    menuSeparator(),
+    menuItem('Change where this connection ends',{ 'data-menu-reconnect':from }),
+    menuItem('Remove this connection',{ 'data-canvas-disconnect':from,'data-canvas-disconnect-to':to },{destructive:true})
+  ]};
+}
+function planCanvasMenu(){
+  return {label:'Canvas actions',items:[
+    menuItem('Add a step here',{ 'data-menu-add-step':'at' }),
+    menuSeparator(),
+    menuItem('Suggest a change',{ 'data-action':'suggest-plan-change' }),
+    menuItem('Arrange',{ 'data-action':'tidy-canvas' }),
+    menuSeparator(),
+    menuItem('Fit to view',{ 'data-canvas-zoom':'fit' }),
+    menuItem('Reset to 100%',{ 'data-canvas-zoom':'reset' }),
+    menuItem('Full screen',{ 'data-action':'canvas-fullscreen' })
+  ]};
+}
+function runCanvasMenu(){
+  return {label:'Canvas actions',items:[
+    menuItem(followActive?'Stop following the active step':'Follow the active step',{ 'data-action':'follow-active' }),
+    menuItem(activityExpanded?'Hide the activity stream':'Show the activity stream',{ 'data-action':'toggle-activity' }),
+    menuSeparator(),
+    menuItem('Run information',{ 'data-action':'view-run-info' }),
+    menuItem('Fit to view',{ 'data-run-zoom':'fit' }),
+    menuItem('Reset to 100%',{ 'data-run-zoom':'reset' })
+  ]};
+}
+function runNodeMenu(id,label){
+  const step=preview?.definition.workflow.find(item=>item.id===id);
+  if(!step)return null;
+  const produced=preview.state?.[step.output];
+  const stale=staleRunSteps(preview.definition,draft()).has(id);
+  return {label:`Step actions: ${label}`,items:[
+    menuItem('Step details',{ 'data-run-step':id }),
+    menuItem('Show this step in activity',{ 'data-menu-step-activity':id },{disabled:!preview.events?.length,why:'This run has recorded no activity yet'}),
+    menuItem('Copy this step\'s output',{ 'data-menu-copy-output':id },{disabled:produced===undefined||produced==='',why:'This step has not produced anything yet'}),
+    ...(stale?[menuSeparator(),menuItem('This result came from an earlier version of the plan',{},{disabled:true,why:'Edit the plan, then run it again'})]:[])
+  ]};
+}
+// Labels are plain here: menuMarkup escapes them once, where they are rendered.
+function menuSpec(target){
+  if(target.kind==='plan-node')return planNodeMenu(target.id,planStepName(target.id));
+  if(target.kind==='plan-edge')return planEdgeMenu(target.id,target.from,target.to,planStepName);
+  if(target.kind==='plan-canvas')return planCanvasMenu();
+  if(target.kind==='run-canvas')return runCanvasMenu();
+  if(target.kind==='run-node')return runNodeMenu(target.id,runStepName(target.id));
+  return null;
+}
+function planStepName(id){return draft().workflow.find(step=>step.id===id)?.name||id;}
+function runStepName(id){return preview?.definition.workflow.find(step=>step.id===id)?.name||id;}
+function openMenu(target,point){
+  const spec=menuSpec({...target,point});
+  if(!spec||!spec.items.length)return;
+  // The panel's commands read the selected step, so the pressed one becomes it —
+  // and an open panel follows, rather than describing a step the menu is not on.
+  if(target.kind==='plan-node'&&selectedStepId!==target.id){selectedStepId=target.id;if(showPlanInspector)render();}
+  menuPoint=point;
+  menu={kind:target.kind,id:target.id,from:target.from,to:target.to,point,items:spec.items,label:spec.label};
+  menuFocusPending=true;
+  menuReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
+  syncMenu();
+}
+function closeMenu({restoreFocus=true}={}){
+  const host=$('app-menu');
+  if(!menu&&!(host&&host.firstChild))return;
+  menu=null;menuFocusPending=false;
+  if(host){host.hidden=true;host.innerHTML='';}
+  if(restoreFocus)menuReturnFocus?.focus?.({preventScroll:true});
+  menuReturnFocus=null;
+}
+// The menu is redrawn from state, so an update that lands while it is open (a
+// run reporting progress) does not close it or move it under the pointer.
+function syncMenu(){
+  const host=$('app-menu');
+  if(!host)return;
+  if(!menu){host.hidden=true;host.innerHTML='';return;}
+  host.hidden=false;
+  host.innerHTML=menuMarkup({label:menu.label,items:menu.items,point:menu.point,escape});
+  const element=host.firstElementChild,box=element.getBoundingClientRect();
+  element.style.left=`${Math.max(8,Math.min(window.innerWidth-box.width-8,menu.point.x))}px`;
+  element.style.top=`${Math.max(8,Math.min(window.innerHeight-box.height-8,menu.point.y))}px`;
+  if(menuFocusPending){menuFocusPending=false;menuFocusTargets(element)[0]?.focus({preventScroll:true});}
+}
+
+// Right-click on the canvas opens the menu for what was pressed. The native menu
+// stays available everywhere else, including inside the settings fields.
+$('app').addEventListener('contextmenu',event=>{
+  const target=menuTarget(event.target);
+  if(!target)return;
+  event.preventDefault();
+  // Canvas items place things, so the point is remembered in canvas coordinates.
+  const point=canvasDropPoint(event.clientX,event.clientY)||{x:0,y:0};
+  openMenu({...target}, {x:event.clientX,y:event.clientY,canvas:point});
+});
+// A touch device has no right button: press and hold does the same thing.
+let longPress=null;
+function cancelLongPress(){clearTimeout(longPress?.timer);longPress=null;}
+$('app').addEventListener('pointerdown',event=>{
+  if(event.pointerType==='mouse')return;
+  const target=menuTarget(event.target);
+  if(!target)return;
+  longPress={pointer:event.pointerId,x:event.clientX,y:event.clientY,target:{...target}};
+  longPress.timer=setTimeout(()=>{
+    if(!longPress)return;
+    skipPlanClickUntil=Date.now()+600;
+    openMenu(longPress.target,{x:longPress.x,y:longPress.y});
+    longPress=null;
+  },500);
+});
+$('app').addEventListener('pointermove',event=>{
+  if(!longPress||longPress.pointer!==event.pointerId)return;
+  if(Math.hypot(event.clientX-longPress.x,event.clientY-longPress.y)>6)cancelLongPress();
+});
+$('app').addEventListener('pointerup',cancelLongPress);
+$('app').addEventListener('pointercancel',cancelLongPress);
+// Shift+F10 and the Menu key open the same menu for whatever has focus.
+$('app').addEventListener('keydown',event=>{
+  if(event.key==='ContextMenu'||event.shiftKey&&event.key==='F10'){
+    const element=document.activeElement?.closest?.('[data-plan-node],[data-run-node],[data-canvas-edge],[data-canvas-mode]');
+    const target=element?menuTarget(element):null;
+    if(!target)return;
+    event.preventDefault();
+    const box=element.getBoundingClientRect();
+    openMenu(target,{x:box.left+12,y:box.top+12});
+    return;
+  }
+  const host=$('app-menu');
+  if(!menu||!host?.contains(event.target))return;
+  const items=menuFocusTargets(host.firstElementChild||document.body);
+  const index=items.indexOf(document.activeElement);
+  if(event.key==='Escape'){event.preventDefault();closeMenu();return;}
+  if(event.key==='Tab'){closeMenu({restoreFocus:false});return;}
+  const step=event.key==='ArrowDown'?1:event.key==='ArrowUp'?-1:event.key==='Home'?-items.length:event.key==='End'?items.length:0;
+  if(!step)return;
+  event.preventDefault();
+  const next=Math.max(0,Math.min(items.length-1,(index<0?(step>0?-1:items.length):index)+step));
+  items[next]?.focus({preventScroll:true});
+});
+// A press anywhere else closes it, before the press can do anything else.
+$('app').addEventListener('pointerdown',event=>{
+  if(menu&&!event.target.closest('[data-canvas-menu]')&&event.button===0)closeMenu({restoreFocus:false});
+},true);
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&menu&&!$('app-menu')?.contains(event.target))closeMenu();});
+
 function canvasFullscreen(){
   const plan=$('app').querySelector('.plan-workbench');if(!plan)return;
   if(document.fullscreenElement)document.exitFullscreen?.();else plan.requestFullscreen?.();
@@ -181,7 +502,7 @@ function canvasFullscreen(){
 document.addEventListener('fullscreenchange',()=>{sizePlanCanvas();const button=$('app').querySelector('[data-action="canvas-fullscreen"]');if(button){const expanded=!!document.fullscreenElement,label=expanded?'Exit full screen':'Full screen';button.setAttribute('aria-pressed',String(expanded));button.setAttribute('aria-label',label);button.title=label;button.innerHTML=uiIcon(expanded?'collapse':'expand');}});
 function planMarkup(d){
   if(!d.workflow.some(step=>step.id===selectedStepId))selectedStepId=d.workflow[0].id;
-  const command=commandState();return workbenchMarkup(d,{escape,field,agentName,outputName,capabilityName,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,issues:planReadiness(d,runtime),runtime,selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,backends:runtime.backends||[]});
+  const command=commandState();return workbenchMarkup(d,{escape,field,agentName,outputName,capabilityName,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,provider:runtime.provider||'',issues:planReadiness(d,readinessRuntime()),runtime:readinessRuntime(),connectionSettings:memberIndex=>connectionAssignmentMarkup(d.agents[memberIndex],memberIndex,integrationCatalogue,integrationConnections,currentId,escape),selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,controls:runControllerMarkup(),toolsDisabled:runInFlight(),backends:runtime.backends||[]});
 }
 
 function runMarkup(){
@@ -190,10 +511,22 @@ function runMarkup(){
 }
 function stopLivePolling(){clearTimeout(liveTimer);liveTimer=null;}
 function stopLiveWatch(){liveWatch?.controller.abort();liveWatch=null;}
-function stopFollowingLiveRun(){stopLivePolling();stopLiveWatch();}
+// A step can work for minutes on one model call without recording an event, so
+// the view is redrawn on a timer as well: how long a step has been working is
+// something the page can only keep saying, not be told.
+function stopLiveClock(){clearInterval(liveClock);liveClock=null;}
+function followLiveClock(){
+  const working=preview?.live&&['pending','running'].includes(preview.mode)
+    &&(preview.definition?.workflow||[]).some(step=>runStepWorking(preview,step.id));
+  if(!working||view!=='plan'){stopLiveClock();return;}
+  if(liveClock)return;
+  liveClock=setInterval(()=>{if(view!=='plan'||!preview?.live){stopLiveClock();return;}render();},1000);
+}
+function stopFollowingLiveRun(){stopLivePolling();stopLiveWatch();stopLiveClock();}
 // A host that can push is told once; a host that cannot is asked on a timer.
 // Both end up calling selectLiveRecord with the same record.
 function followLiveRun(){
+  followLiveClock();
   const active=preview?.live&&['pending','running','waiting_human'].includes(preview.mode);
   if(view!=='plan'||!active){stopLivePolling();stopLiveWatch();return;}
   if(liveFollowMode(runtime)!=='push'){stopLiveWatch();return pollLiveRun();}
@@ -248,6 +581,7 @@ function selectLiveRecord(record){
   if(old?.review?.id!==run.review?.id)humanDraft={decision:'',body:''};
   if(old?.runId!==run.runId){selectedRunStepId=null;activityExpanded=false;activityFilter='';followActive=true;lastFollowedStep=null;runCanvasZoom=renderedPlanId===currentId?canvasZoom:null;}
   preview=run;liveError='';
+  if(run.mode==='running'){request(`/api/runs/${run.runId}/tool-approvals`).then(result=>{if(preview?.runId!==run.runId)return;const changed=JSON.stringify(pendingToolApprovals)!==JSON.stringify(result.approvals);pendingToolApprovals=result.approvals;if(changed)render();}).catch(()=>{});}else pendingToolApprovals=[];
   const url=new URL(location.href);url.searchParams.set('application',currentId);url.searchParams.set('run',run.runId);history.replaceState(null,'',url);
   render();followLiveRun();
 }
@@ -284,6 +618,9 @@ async function liveAction(action){
       const inputs=validateRequestInputs(d,requestInputs.live[currentId]||{});
       const source=requestResources[currentId]||'';
       record=await request('/api/runs',{method:'POST',body:JSON.stringify({version:1,application_id:currentId,revision:current().revision,task,inputs,...(source?{resources:{source}}:{})})});
+    }else if(action==='pause-live'){
+      record=await request(`/api/runs/${runId}/pause`,{method:'POST',body:'{}'});
+      notify('Pausing after the current step.');
     }else if(action==='cancel-live'){
       record=await request(`/api/runs/${runId}/cancel`,{method:'POST',body:'{}'});
     }else if(action==='submit-live-review'){
@@ -302,13 +639,32 @@ async function liveAction(action){
   }catch(error){liveError=error.message;notify(error.message);}
   finally{liveBusy=false;render();if($('run-dialog').open)$('run-configuration').innerHTML=studioLiveMarkup(true);pollLiveRun();}
 }
+  // Everything a person does to a run, in the canvas's own floating action bar:
+// start, pause, stop, and the one thing the run is waiting for. Icons carry
+// hovertext; the action that needs a decision keeps its words.
+const runInFlight=()=>!!preview?.live&&['pending','running','waiting_human','paused'].includes(preview.mode);
+function runControllerMarkup(){
+  // Icons only, one per thing a person can do to the run. What the run is waiting
+  // for (Review input, View results) stays in words in the status line above the
+  // canvas, so no action is offered twice and none is wordless-only.
+  const busy=liveBusy?'disabled':'',run=()=>`<button type="button" class="canvas-action primary" data-action="run" ${busy} title="${preview?.live?'Run again':'Run this application'}" aria-label="${preview?.live?'Run again':'Run this application'}">${uiIcon('play')}</button>`;
+  const stop=()=>`<button type="button" class="canvas-action stop" data-action="cancel-live" ${busy} title="Stop this run" aria-label="Stop this run">${uiIcon('stop')}</button>`;
+  if(!preview?.live||['completed','stopped','failed','cancelled','interrupted'].includes(preview.mode))return run();
+  if(preview.mode==='paused'||(preview.mode==='stopped'&&preview.resumable))return `<button type="button" class="canvas-action primary" data-action="resume-live" ${busy||!runtime.available?'disabled':''} title="Continue from the next step" aria-label="Continue from the next step">${uiIcon('play')}</button>${stop()}`;
+  // Waiting for a person is not running: there is nothing to pause, and Run
+  // comes back once the review is submitted.
+  if(preview.mode==='waiting_human')return stop();
+  return `<button type="button" class="canvas-action" data-action="pause-live" ${busy} title="Pause after the current step" aria-label="Pause after the current step">${uiIcon('pause')}</button>${stop()}`;
+}
+
 function studioLiveMarkup(requestOnly=false){
   const saved=current().definition,d=preview?.live?preview.definition:saved,state=preview?.live?preview.state:initialState(d);
   const requestForm=`<div class="field"><label for="live-request">What do you need the team to do?</label><textarea id="live-request" data-request="live" rows="2" maxlength="20000" required>${escape(requests.live)}</textarea></div><details class="quiet-details" data-disclosure="live-context" open><summary>Context and sources · ${(saved.inputs||[]).length} fields</summary>${generatedRequestMarkup(saved,'live')}</details>`;
   const visible=d.views.filter(view=>Array.isArray(state[view.collection])?state[view.collection].length:!!state[view.collection]);
   const outputs=visible.length?`<details class="run-results" data-disclosure="live-results"><summary>Results · ${visible.length}</summary>${visible.map(view=>`<details class="quiet-details" data-disclosure="live-output-${escape(view.id)}"><summary>${escape(view.title)}</summary>${viewMarkup(view,state,d)}</details>`).join('')}</details>`:'<div class="empty">Results will appear as the team completes its work.</div>';
-  const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,activityExpanded,activityFilter,followActive,detail:selectedRunStepId?executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'',escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
-  return `${dirty()&&requestOnly?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${liveRunMarkup(saved,preview?.live?preview:null,{escape,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime,busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion()})}`;
+const approvalPanel=pendingToolApprovals.length?`<section class="tool-approval-panel" role="region" aria-label="External action approval"><h3>Review external action</h3><p>Approval applies to this call only. Check the destination and content before proceeding.</p>${pendingToolApprovals.map(item=>`<article><strong>${escape(item.agent)} · ${escape(item.tool)}</strong><pre class="code">${escape(JSON.stringify(item.arguments,null,2))}</pre><button class="button primary" data-tool-approval="${escape(item.id)}" data-approved="true">Approve this action</button><button class="button remove" data-tool-approval="${escape(item.id)}" data-approved="false">Reject</button></article>`).join('')}</section>`:'';
+  const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{controls:runControllerMarkup(),toolsDisabled:runInFlight(),provider:runtime.provider||'',list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,activityExpanded,activityFilter,followActive,detail:selectedRunStepId?executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'',escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
+  return `${dirty()&&requestOnly?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${approvalPanel}${liveRunMarkup(saved,preview?.live?preview:null,{escape,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime:readinessRuntime(),busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion()})}`;
 }
 function recordFieldForm(collection){return (collection.fields||[]).map(f=>{const value=humanDraft.fields?.[f.key]??'',attrs=`id="human-field-${escape(f.key)}" data-human-field="${escape(f.key)}"`;return `<div class="field"><label for="human-field-${escape(f.key)}">${escape(f.label)}${f.required?' · required':''}</label>${['enum','boolean'].includes(f.type)?`<select ${attrs}><option value="">Choose…</option>${(f.type==='boolean'?['true','false']:f.options).map(option=>`<option value="${escape(option)}" ${String(value)===option?'selected':''}>${escape(option)}</option>`).join('')}</select>`:`<input ${attrs} type="${f.type==='number'?'number':f.type==='date'?'date':'text'}" ${f.type==='number'?'step="any"':''} value="${escape(value)}">`}</div>`;}).join('');}
 function humanRecordValues(collection){const values={};for(const f of collection.fields||[]){const value=humanDraft.fields?.[f.key];if(value===undefined||value==='')continue;values[f.key]=f.type==='number'?Number(value):f.type==='boolean'?value==='true':value;}return validateRecordValues(values,collection.fields||[]);}
@@ -498,10 +854,17 @@ function inspectRecord(collection,index,follow=false,history=null){
 }
 function dialogField(label,key,value,kind='input',options=[]){const id='dialog-'+key;return `<div class="field"><label for="${id}">${escape(label)}</label>${kind==='textarea'?`<textarea id="${id}" data-dialog-field="${key}" rows="3" maxlength="${['importText','catalogueText','sourcesText'].includes(key)?200000:key==='purpose'?2000:4000}">${escape(value)}</textarea>`:kind==='select'?`<select id="${id}" data-dialog-field="${key}">${options.map(([val,text])=>`<option value="${escape(val)}" ${val===value?'selected':''}>${escape(text)}</option>`).join('')}</select>`:`<input id="${id}" data-dialog-field="${key}" value="${escape(value)}" maxlength="100">`}</div>`;}
 let catalogueAudience='all';
-function openCatalogue(section='applications'){
-  catalogueTab=section;$('catalogue-content').innerHTML=catalogueMarkup(catalogueTab,escape,catalogueAudience);if(!$('catalogue-dialog').open)$('catalogue-dialog').showModal();
+function drawCatalogue(){
+  // Everything the catalogue says about connections comes from this host.
+  $('catalogue-content').innerHTML=catalogueMarkup(catalogueTab,escape,catalogueAudience,
+    {integrations:integrationCatalogue,connections:integrationConnections,enabled:integrationEnabled,application:currentId});
 }
-function openEditor(kind,index=null,templateId='investigation'){
+async function openCatalogue(section='applications'){
+  catalogueTab=section;
+  if(!integrationCatalogue.length)await loadIntegrationConnections();
+  drawCatalogue();if(!$('catalogue-dialog').open)$('catalogue-dialog').showModal();
+}
+function openEditor(kind,index=null,templateId='starter'){
   const d=draft();if(kind==='goal'){dialogState={kind,goal:''};}
   else if(kind==='workspace-catalogue'){dialogState={kind,catalogueText:JSON.stringify(workspaceCatalogue.catalogue,null,2)};}
   else if(kind==='import'){dialogState={kind,importText:'',parsed:null,filename:''};}
@@ -512,7 +875,8 @@ function openEditor(kind,index=null,templateId='investigation'){
   else if(kind==='remove-role')dialogState={kind,index,reassign:d.agents.find(a=>a.id!==d.agents[index].id)?.id||''};else if(kind==='remove-output')dialogState={kind,index};renderEditor();$('editor-dialog').showModal();
 }
 function changeDialogField(key,value){
-  const s=dialogState;if(!s)return;s[key]=value;if(key==='importText'){s.parsed=null;const submit=$('editor-content').querySelector('button[type=submit]');if(submit)submit.disabled=true;return;}
+  const s=dialogState;if(!s)return;s[key]=value;
+  if(key==='importText'){s.parsed=null;const submit=$('editor-content').querySelector('button[type=submit]');if(submit)submit.disabled=true;return;}
   if(key==='template'){
     const next=templates.find(t=>t.id===value)?.definition||emptyDefinition();s.name=next.name;s.purpose=next.description;s.result=next.workflow.at(-1).task;s.roles=[];s.tools={};s.toolAgent=next.agents.find(a=>a.kind!=='human')?.id||'';renderEditor();
   }else if(key==='preset'){
@@ -523,7 +887,9 @@ function changeDialogField(key,value){
 function renderEditor(){
   const editorDisclosures=[...$('editor-content').querySelectorAll('details[data-editor-disclosure]')].map(el=>({key:el.dataset.editorDisclosure,open:el.open}));
   const s=dialogState,d=draft();let body,title,submit;
-  if(s.kind==='goal'){title='What do you want to achieve?';submit='Suggest a team';body=`${dialogField('Your goal','goal',s.goal,'textarea')}<button type="button" class="text-button" data-manual-goal>Use manual starter suggestions</button><p class="field-help">Example: Compare three suppliers and recommend one.</p><p class="field-help">${runtime.available?'AI generates a proposal for you to review.':'Choose a manual starter; AI is unavailable on this host.'}</p>`;}
+  if(s.proposing){title='Choosing your team';submit='Proposing…';body=proposalProgressMarkup(s);}
+  else if(s.kind==='goal-questions'){title='A few things worth clarifying';submit=s.asking?'Asking…':'Continue';body=goalQuestionsMarkup(s);}
+  else if(s.kind==='goal'){title='What do you want to achieve?';submit='Suggest a team';body=`${dialogField('Your goal','goal',s.goal,'textarea')}${goalRefineMarkup(s)}<button type="button" class="text-button" data-manual-goal>Use manual starter suggestions</button><p class="field-help">Example: Compare three suppliers and recommend one.</p><p class="field-help">${runtime.available?'AI generates a proposal for you to review.':'Choose a manual starter; AI is unavailable on this host.'}</p>`;}
   else if(s.kind==='new'&&s.goalBased){title='Review your suggested application';submit='Create and open canvas';body=goalReviewMarkup(s);}
   else if(s.kind==='proposed-new'){title='Review proposed application';submit='Create this draft';body=`<p>${escape(s.summary)}</p><p>${escape(s.definition.name)} · ${s.definition.agents.length} members · ${s.definition.workflow.length} steps</p><details><summary>Proposed definition</summary><pre class="code">${escape(JSON.stringify(s.definition,null,2))}</pre></details><p>No application has been saved or run. Apply this proposal to create an editable draft.</p>`;}
   else if(s.kind==='source-settings'){title='Source settings';submit='Save sources';body=`<p>Authorize document folders or repositories on this host. Only agents with file or Git tools use them. Paths are local to the backend computer.</p>${dialogField('Authorized sources (JSON)','sourcesText',s.sourcesText,'textarea')}<p>Example: {"documents":{"name":"Documents","path":"/absolute/folder","applications":["${escape(currentId)}"]}}</p>${dialogField('Default source ID for this application (optional)','source',s.source)}`;}
@@ -538,12 +904,13 @@ function renderEditor(){
   $('editor-content').innerHTML=`<span class="eyebrow">${s.kind==='new'?'NEW APPLICATION':'APPLICATION SETUP'}</span><h2 id="editor-title">${escape(title)}</h2>${body}<div id="editor-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="button" data-dialog-cancel>Cancel</button><button type="submit" ${s.kind==='import'&&!s.parsed?'disabled':''} class="button ${s.kind.startsWith('remove')?'danger':'primary'}">${submit}</button></div>`;
   for(const item of editorDisclosures){const element=$('editor-content').querySelector(`[data-editor-disclosure="${CSS.escape(item.key)}"]`);if(element)element.open=item.open;}
 }
-async function submitEditor(){const s=dialogState;if(s.kind==='source-settings'){const sources=JSON.parse(s.sourcesText);if(s.source&&!sources[s.source])throw new Error('Choose an authorized source ID.');await request('/api/settings/sources',{method:'PUT',body:JSON.stringify({sources})});if(s.source)draft().resources={source:s.source};else delete draft().resources;markDirty();await saveApplication();runtime=await request('/api/runtime');registerHostTools(runtime.tool_descriptors||[]);dialogState=null;$('editor-dialog').close();render();notify('Source settings saved.');return;}if(s.kind==='workspace-catalogue'){const catalogue=validateWorkspaceCatalogue(JSON.parse(s.catalogueText));workspaceCatalogue=await request('/api/catalogue',{method:'PUT',body:JSON.stringify({catalogue,revision:workspaceCatalogue.revision})});installWorkspaceCatalogue(catalogue);$('editor-dialog').close();dialogState=null;render();notify('Custom catalog saved.');return;}if(s.kind==='goal'){await suggestGoalSetup(s.goal);return;}if(s.kind==='proposed-new'){createImportedApplication(s.definition);$('editor-dialog').close();dialogState=null;return;}if(s.kind==='new'&&s.goalBased){const d=composeGoalDefinition(s);createImportedApplication(d);buildStep=4;render();$('editor-dialog').close();dialogState=null;notify('Application created. Review its steps on the canvas, then save it.');return;}if(s.kind==='import'){if(!s.parsed)throw new Error('Validate and review the definition first.');createImportedApplication(s.parsed);}else if(s.kind==='new'){if(!s.name.trim()||!s.purpose.trim()||!s.result.trim())throw new Error('Give the application a name, purpose and expected result.');createApplication(s.template,{name:s.name,purpose:s.purpose,result:s.result,roles:s.roles,tools:s.tools});}else if(s.kind==='assign-tool')assignCatalogTool(s.tool,s.agent);else if(s.kind==='add-role')addRole({...s,kind:s.memberKind});else if(s.kind==='add-output')addOutput({...s,kind:s.outputKind});else if(s.kind==='remove-role')removeRole(s.index,s.reassign);else if(s.kind==='remove-output')removeOutput(s.index);$('editor-dialog').close();dialogState=null;}
+async function submitEditor(){const s=dialogState;if(s.kind==='source-settings'){const sources=JSON.parse(s.sourcesText);if(s.source&&!sources[s.source])throw new Error('Choose an authorized source ID.');await request('/api/settings/sources',{method:'PUT',body:JSON.stringify({sources})});if(s.source)draft().resources={source:s.source};else delete draft().resources;markDirty();await saveApplication();runtime=await request('/api/runtime');registerHostTools(runtime.tool_descriptors||[]);dialogState=null;$('editor-dialog').close();render();notify('Source settings saved.');return;}if(s.kind==='workspace-catalogue'){const catalogue=validateWorkspaceCatalogue(JSON.parse(s.catalogueText));workspaceCatalogue=await request('/api/catalogue',{method:'PUT',body:JSON.stringify({catalogue,revision:workspaceCatalogue.revision})});installWorkspaceCatalogue(catalogue);$('editor-dialog').close();dialogState=null;render();notify('Custom catalog saved.');return;}if(s.kind==='goal'){await askGoalQuestions(s);return;}if(s.kind==='goal-questions'){await continueGoalQuestions(s);return;}if(s.kind==='proposed-new'){createImportedApplication(s.definition);$('editor-dialog').close();dialogState=null;return;}if(s.kind==='new'&&s.goalBased){const d=composeGoalDefinition(s);createImportedApplication(d);buildStep=4;render();$('editor-dialog').close();dialogState=null;notify('Application created. Review its steps on the canvas, then save it.');return;}if(s.kind==='import'){if(!s.parsed)throw new Error('Validate and review the definition first.');createImportedApplication(s.parsed);}else if(s.kind==='new'){if(!s.name.trim()||!s.purpose.trim()||!s.result.trim())throw new Error('Give the application a name, purpose and expected result.');createApplication(s.template,{name:s.name,purpose:s.purpose,result:s.result,roles:s.roles,tools:s.tools});}else if(s.kind==='assign-tool')assignCatalogTool(s.tool,s.agent);else if(s.kind==='add-role')addRole({...s,kind:s.memberKind});else if(s.kind==='add-output')addOutput({...s,kind:s.outputKind});else if(s.kind==='remove-role')removeRole(s.index,s.reassign);else if(s.kind==='remove-output')removeOutput(s.index);$('editor-dialog').close();dialogState=null;}
 function updatePlan(next,focusId=null){const before=draft();if(!next.canvas&&before?.workflow.some(step=>next.workflow.some(item=>item.id===step.id))){let positions;try{positions=canvasPositions(before);}catch{positions={};}next.canvas={positions:{...canvasPositions(next),...Object.fromEntries(Object.entries(positions).filter(([id])=>next.workflow.some(step=>step.id===id)))}};}drafts.set(currentId,next);if(focusId)selectedStepId=focusId;markDirty();render();if(focusId&&!showPlanInspector){const handle=$('app').querySelector(`[data-plan-node="${CSS.escape(focusId)}"] .step-summary`);handle?.focus({preventScroll:true});handle?.scrollIntoView?.({block:'nearest',inline:'nearest'});}}
 // Opening a step's settings. Both ways in land here: the step's own button (a
 // click, or Enter on it) and a double-click anywhere on the card.
 function editPlanStep(id){
   showPlanInspector=true;showPlanResources=false;showPlanAssistant=false;showPlanReadiness=false;selectedStepId=id;render();
+  if(!integrationCatalogue.length)loadIntegrationConnections().then(()=>{if(showPlanInspector&&selectedStepId===id)render();});
   const inspector=$('app').querySelector('.workbench-inspector');
   if(inspector){inspector.scrollTop=0;inspector.querySelector('input[data-path]')?.focus({preventScroll:true});}
 }
@@ -564,7 +931,7 @@ function finishCanvasDrop(drag,clientX,clientY){
 }
 function dragAutoScroll(clientY){const canvas=$('app').querySelector('.plan-canvas');if(canvas&&canvas.scrollHeight>canvas.clientHeight){const rect=canvas.getBoundingClientRect();if(clientY<rect.top+60)canvas.scrollTop-=16;else if(clientY>rect.bottom-60)canvas.scrollTop+=16;}else if(clientY<80)window.scrollBy(0,-14);else if(clientY>window.innerHeight-80)window.scrollBy(0,14);}
 let skipPlanClickUntil=0;
-$('app').addEventListener('input',event=>{if(event.target.dataset.path)updateField(event.target.dataset.path,event.target.value);if(event.target.dataset.requestField){const mode=event.target.dataset.inputMode;requestInputs[mode][currentId]??={};requestInputs[mode][currentId][event.target.dataset.requestField]=event.target.value;}if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;if(event.target.dataset.humanInput)humanDraft[event.target.dataset.humanInput]=event.target.value;if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.hasAttribute('data-assistant-input'))commandState().text=event.target.value;});
+$('app').addEventListener('input',event=>{if(event.target.dataset.path)updateField(event.target.dataset.path,event.target.value);if(event.target.dataset.requestField){const mode=event.target.dataset.inputMode;requestInputs[mode][currentId]??={};requestInputs[mode][currentId][event.target.dataset.requestField]=event.target.value;}if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;if(event.target.dataset.humanInput)humanDraft[event.target.dataset.humanInput]=event.target.value;if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.hasAttribute('data-assistant-input'))commandState().text=event.target.value;if(event.target.dataset.requirementAnswer!==undefined){const d=draft();if(d.requirements?.[event.target.dataset.requirementAnswer]){d.requirements[event.target.dataset.requirementAnswer].answer=event.target.value;markDirty();}}});
 $('run-form').addEventListener('input',event=>{
   if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;
   if(event.target.dataset.requestField){requestInputs.live[currentId]??={};requestInputs.live[currentId][event.target.dataset.requestField]=event.target.value;}
@@ -597,9 +964,33 @@ $('run-form').addEventListener('submit',async event=>{
 $('close-run').addEventListener('click',()=>$('run-dialog').close());
 $('app').addEventListener('change',event=>{try{if(event.target.hasAttribute('data-activity-filter')){activityFilter=event.target.value;render();return;}if(event.target.hasAttribute('data-source-resource')){requestResources[currentId]=event.target.value;render();return;}if(event.target.dataset.stepParent){const {stepParent:from,stepChild:to}=event.target.dataset;updatePlan(event.target.checked?connectPlanSteps(draft(),from,to):disconnectPlanSteps(draft(),from,to),to);return;}if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.dataset.tool){const role=draft().agents[Number(event.target.dataset.index)],tool=event.target.dataset.tool;if(role.kind==='human')throw new Error('Human members do not use agent tools.');if(event.target.checked&&!role.tools.includes(tool))role.tools.push(tool);else if(!event.target.checked)role.tools=role.tools.filter(t=>t!==tool);markDirty();render();}if(event.target.dataset.format!==undefined)setOutputFormat(Number(event.target.dataset.format),event.target.value);if(event.target.dataset.outputKind!==undefined)setOutputKind(Number(event.target.dataset.outputKind),event.target.value);}catch(error){if(event.target.dataset.stepParent)render();notify(error.message);}});
 $('app').addEventListener('click',async event=>{
-  const button=event.target.closest('button');if(!button||button.disabled||saving||Date.now()<skipPlanClickUntil)return;if(button.hasAttribute('data-apply-schema')){try{const index=Number(button.dataset.applySchema),fields=JSON.parse($('schema-'+index).value);validateRecordFields(fields);draft().state[index].fields=fields;markDirty();render();notify('Record fields applied to the draft.');}catch(error){notify(error.message);}return;}
-  try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.step!==undefined){buildStep=Number(button.dataset.step);advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.downloadOutput){downloadResult(button.dataset.downloadOutput);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
+  const button=event.target.closest('button');if(!button||button.disabled||saving||Date.now()<skipPlanClickUntil)return;
+  // A menu item closes its menu, then does exactly what the control it stands for does.
+  if(button.closest('[data-canvas-menu]'))closeMenu({restoreFocus:false});
+  // A command that acts inside the step panel opens it, so its result is visible.
+  if(button.dataset.menuReveal==='panel'&&!showPlanInspector){showPlanInspector=true;render();}if(button.hasAttribute('data-apply-schema')){try{const index=Number(button.dataset.applySchema),fields=JSON.parse($('schema-'+index).value);validateRecordFields(fields);draft().state[index].fields=fields;markDirty();render();notify('Record fields applied to the draft.');}catch(error){notify(error.message);}return;}
+  try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.removeRequirement!==undefined){const d=draft();d.requirements?.splice(Number(button.dataset.removeRequirement),1);if(d.requirements&&!d.requirements.length)delete d.requirements;markDirty();render();return;}if(button.dataset.step!==undefined){buildStep=Number(button.dataset.step);advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.downloadOutput){downloadResult(button.dataset.downloadOutput);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
     if(button.dataset.connectTarget){if(!connectSource)throw new Error('Choose a step to connect from.');updatePlan(connectPlanSteps(draft(),connectSource,button.dataset.connectTarget),button.dataset.connectTarget);connectSource=null;render();return;}if(button.dataset.disconnectFrom){updatePlan(disconnectPlanSteps(draft(),button.dataset.disconnectFrom,button.dataset.disconnectTo));return;}if(button.dataset.resourcePane){resourcePane=button.dataset.resourcePane;render();return;}
+    if(button.dataset.menuReverse){const [from,to]=button.dataset.menuReverse.split('|');updatePlan(connectPlanSteps(disconnectPlanSteps(draft(),from,to),to,from));selectedEdge=null;notify('Connection reversed.');return;}
+    if(button.dataset.menuAddStep&&menuPoint){openStepPicker({at:menuPoint.canvas||null});return;}
+    if(button.dataset.menuPanel){const key=button.dataset.menuPanel;editPlanStep(selectedStepId);
+      const section=$('app').querySelector(`[data-disclosure="${CSS.escape(key)}"]`);if(section){section.open=true;section.scrollIntoView?.({block:'nearest'});}
+      return;}
+    if(button.dataset.menuDisconnectAll){const id=button.dataset.menuDisconnectAll,parents=planConnections(draft()).filter(edge=>edge.to===id);
+      if(!parents.length)throw new Error('This step depends on nothing.');
+      updatePlan(parents.reduce((next,edge)=>disconnectPlanSteps(next,edge.from,edge.to),draft()),id);return;}
+    if(button.dataset.menuCentre){centrePlanStep(button.dataset.menuCentre);return;}
+    if(button.dataset.menuShowStep){const id=button.dataset.menuShowStep;selectedStepId=id;if(showPlanInspector)render();centrePlanStep(id);return;}
+    if(button.dataset.menuCentreEdge){const[from,to]=button.dataset.menuCentreEdge.split('|');centreEdge(from,to);return;}
+    if(button.dataset.menuReconnect){connectSource=button.dataset.menuReconnect;selectedEdge=null;render();notify('Choose the step this connection should end at.');return;}
+    if(button.dataset.canvasEdgeMenu){const[from,to]=button.dataset.canvasEdgeMenu.split('|'),box=button.getBoundingClientRect();
+      openMenu({kind:'plan-edge',id:`${from}|${to}`,from,to},{x:box.left,y:box.bottom+6,canvas:canvasDropPoint(box.left,box.bottom)||{x:0,y:0}});return;}
+    if(button.dataset.menuStepActivity){activityExpanded=true;activityFilter=button.dataset.menuStepActivity;render();return;}
+    if(button.dataset.menuCopyOutput){const step=preview?.definition.workflow.find(item=>item.id===button.dataset.menuCopyOutput),value=preview?.state?.[step?.output];
+      const text=typeof value==='string'?value:JSON.stringify(value,null,2);
+      if(navigator.clipboard?.writeText)navigator.clipboard.writeText(text).then(()=>notify('Step output copied.')).catch(()=>notify('This browser refused the clipboard.'));
+      else notify('This browser cannot copy to the clipboard.');
+      render();return;}
     if(button.dataset.canvasPort){connectSource=button.dataset.canvasPort;selectedEdge=null;render();return;}
     if(button.dataset.canvasDisconnect){const from=button.dataset.canvasDisconnect,to=button.dataset.canvasDisconnectTo;selectedEdge=null;updatePlan(disconnectPlanSteps(draft(),from,to));notify('Connection removed.');return;}
     if(button.dataset.canvasZoom){const mode=button.dataset.canvasZoom;if(mode==='fit'){fitCanvas('plan');return;}canvasZoom=mode==='reset'?null:Math.max(.4,Math.min(1.6,(canvasZoom??1)+(mode==='in'?.1:-.1)));applyCanvasZoom();return;}
@@ -625,14 +1016,19 @@ $('app').addEventListener('click',async event=>{
     if(action==='close-plan-resources'){showPlanResources=false;planInsertion=null;render();return;}
     if(action==='new-step-member'){createStepMember();return;}
     if(action==='edit-shared-member'){const member=draft().workflow.find(step=>step.id===selectedStepId)?.agent;const details=$('app').querySelector(`[data-disclosure="member-${CSS.escape(member)}-responsibility"]`);if(details){details.open=true;details.querySelector('input')?.focus({preventScroll:true});}return;}
+    if(action==='manage-integrations'){await manageIntegrations();return;}
     if(action==='toggle-rail'){railOpen=!railOpen;render();return;}
     if(action==='show-history'){renderHistory();return;}
     if(action==='run'){openRunConfiguration();return;}
-    if(action==='edit-plan'){preview=null;render();return;}
+    // The plan tools are in the same bar as the run controller. Using one while a
+    // finished run is open leaves the run first: the canvas shows that run's
+    // snapshot, so editing underneath it would change something not on screen.
+    if(['toggle-plan-resources','suggest-plan-change','tidy-canvas'].includes(action)&&preview?.live)preview=null;
     if(action==='back-to-plan'){showView('plan');return;}
+    if(action==='sign-out'){try{await request(account.login.logout,{method:'POST',body:'{}'});}finally{location.reload();}return;}
     if(action==='set-up'){showView('setup');return;}
 
-    if(['start-live','cancel-live','submit-live-review','resume-live'].includes(action)){await liveAction(action);return;}if(action==='source-settings'){const result=await request('/api/settings/sources');dialogState={kind:'source-settings',sourcesText:JSON.stringify(result.sources,null,2),source:draft().resources?.source||''};renderEditor();$('editor-dialog').showModal();return;}if(action==='edit-catalogue'){openEditor('workspace-catalogue');return;}if(action==='cancel-connect'){connectSource=null;render();}else if(action==='canvas-fullscreen'){canvasFullscreen();}else if(action==='tidy-canvas'){updatePlan(tidyCanvas(draft()));scheduleLayoutSave();}else if(action==='toggle-applications'){showAllApplications=!showAllApplications;render();}else if(action==='add-input'){const d=draft();d.inputs??=[];if(d.inputs.length>=12)throw new Error('Use at most 12 fields.');let n=1;while(d.inputs.some(f=>f.id==='field_'+n))n++;d.inputs.push({id:'field_'+n,label:'New field',type:'text',required:false});markDirty();render();}else if(action==='remove-input'){draft().inputs.splice(index,1);markDirty();render();}else if(action==='new')openEditor('goal');else if(action==='import')openEditor('import');else if(action==='save-member')await saveCurrentMember();else if(action==='reload-members')await reloadMembers();else if(action==='isolate-member')isolateSelectedMember();else if(action==='propose-plan')proposeCommand();else if(action==='apply-proposal')applyPlanProposal();else if(action==='discard-proposal'){commandState().proposal=null;commandState().error='';render();}else if(action==='open-catalogue')openCatalogue(button.dataset.pane);else if(action==='toggle-plan-resources'){if(showPlanResources){showPlanResources=false;render();}else openStepPicker();}else if(action==='close-plan-inspector'){showPlanInspector=false;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId)}"]`)?.focus({preventScroll:true});}else if(['add-role','add-output','remove-role','remove-output'].includes(action))openEditor(action,index);else if(action==='delete-application')await deleteApplication();else if(action==='save')await saveApplication();else if(action==='export')exportDefinition();else if(action==='toggle-advanced'){advanced=!advanced;render();}else if(action)mutate(action,index);
+    if(['start-live','cancel-live','pause-live','submit-live-review','resume-live'].includes(action)){await liveAction(action);return;}if(action==='source-settings'){const result=await request('/api/settings/sources');dialogState={kind:'source-settings',sourcesText:JSON.stringify(result.sources,null,2),source:draft().resources?.source||''};renderEditor();$('editor-dialog').showModal();return;}if(action==='edit-catalogue'){openEditor('workspace-catalogue');return;}if(action==='cancel-connect'){connectSource=null;render();}else if(action==='canvas-fullscreen'){canvasFullscreen();}else if(action==='tidy-canvas'){updatePlan(tidyCanvas(draft()));scheduleLayoutSave();}else if(action==='toggle-applications'){showAllApplications=!showAllApplications;render();}else if(action==='add-input'){const d=draft();d.inputs??=[];if(d.inputs.length>=12)throw new Error('Use at most 12 fields.');let n=1;while(d.inputs.some(f=>f.id==='field_'+n))n++;d.inputs.push({id:'field_'+n,label:'New field',type:'text',required:false});markDirty();render();}else if(action==='remove-input'){draft().inputs.splice(index,1);markDirty();render();}else if(action==='new')openEditor('goal');else if(action==='import')openEditor('import');else if(action==='save-member')await saveCurrentMember();else if(action==='reload-members')await reloadMembers();else if(action==='isolate-member')isolateSelectedMember();else if(action==='propose-plan')proposeCommand();else if(action==='apply-proposal')applyPlanProposal();else if(action==='discard-proposal'){commandState().proposal=null;commandState().error='';render();}else if(action==='open-catalogue')openCatalogue(button.dataset.pane||'applications');else if(action==='toggle-plan-resources'){if(showPlanResources){showPlanResources=false;render();}else openStepPicker();}else if(action==='close-plan-inspector'){showPlanInspector=false;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId)}"]`)?.focus({preventScroll:true});}else if(['add-role','add-output','remove-role','remove-output'].includes(action))openEditor(action,index);else if(action==='delete-application')await deleteApplication();else if(action==='save')await saveApplication();else if(action==='export')exportDefinition();else if(action==='toggle-advanced'){advanced=!advanced;render();}else if(action)mutate(action,index);
   }catch(error){notify(error.message);}
 });
 $('app').addEventListener('click',event=>{
@@ -664,10 +1060,16 @@ $('app').addEventListener('pointerup',event=>{
   if(moved){skipPlanClickUntil=Date.now()+400;try{const target=document.elementFromPoint(event.clientX,event.clientY);if(dragState?.type==='tool'){if(!target)throw new Error('Drop a tool on an AI step.');finishToolDrop(target);}else if(target?.closest('[data-canvas-drop]')&&finishCanvasDrop(dragState,event.clientX,event.clientY))clearPlanDrag();else clearPlanDrag();}catch(error){clearPlanDrag();notify(error.message);}}else clearPlanDrag();
 });
 $('app').addEventListener('pointercancel',clearPlanDrag);
-$('editor-form').addEventListener('input',event=>{if(event.target.dataset.dialogField&&event.target.tagName!=='SELECT')changeDialogField(event.target.dataset.dialogField,event.target.value);});
+$('editor-form').addEventListener('input',event=>{if(event.target.dataset.dialogField&&event.target.tagName!=='SELECT')changeDialogField(event.target.dataset.dialogField,event.target.value);
+  // The editor dialog is a sibling of #app, so what is typed into it arrives here
+  // and nowhere else. An answer belongs to the question it was typed under.
+  if(event.target.dataset.goalAnswer!==undefined&&dialogState?.requirements?.[event.target.dataset.goalAnswer])dialogState.requirements[event.target.dataset.goalAnswer].answer=event.target.value;});
 $('editor-form').addEventListener('change',event=>{if(dialogState?.goalBased&&event.target.dataset.goalRole){const id=event.target.dataset.goalRole;dialogState.roles=event.target.checked?[...new Set([...dialogState.roles,id])]:dialogState.roles.filter(r=>r!==id);if(!event.target.checked)delete dialogState.tools[id];renderEditor();return;}if(dialogState?.goalBased&&event.target.dataset.goalTool){const id=event.target.dataset.goalTool,target=dialogState.toolAgent,list=dialogState.tools[target]||[];dialogState.tools[target]=event.target.checked?[...new Set([...list,id])]:list.filter(t=>t!==id);return;}if(dialogState?.goalBased&&event.target.dataset.goalOutput){const id=event.target.dataset.goalOutput;dialogState.outputs=event.target.checked?[...new Set([...dialogState.outputs,id])]:dialogState.outputs.filter(o=>o!==id);return;}if(dialogState?.kind==='new'&&event.target.dataset.creationRole){const id=event.target.dataset.creationRole;dialogState.roles=event.target.checked?[...new Set([...dialogState.roles,id])]:dialogState.roles.filter(r=>r!==id);if(!event.target.checked)delete dialogState.tools['catalog_'+id];renderEditor();}if(dialogState?.kind==='new'&&event.target.dataset.creationTool){const target=dialogState.toolAgent,id=event.target.dataset.creationTool;const list=dialogState.tools[target]||[];dialogState.tools[target]=event.target.checked?[...new Set([...list,id])]:list.filter(t=>t!==id);}if(event.target.dataset.dialogField&&event.target.tagName==='SELECT')changeDialogField(event.target.dataset.dialogField,event.target.value);});
-$('editor-form').addEventListener('click',async event=>{const button=event.target.closest('button');if(button?.hasAttribute('data-manual-goal')){try{suggestManualGoalSetup(dialogState.goal);}catch(error){$('editor-error').textContent=error.message;}return;}if(button?.hasAttribute('data-suggest-from-purpose')){try{const name=dialogState.name;await suggestGoalSetup(dialogState.purpose);if(dialogState.kind==='new')dialogState.name=name;renderEditor();}catch(error){$('editor-error').textContent=error.message;}return;}if(button?.hasAttribute('data-rethink-goal')){dialogState={kind:'goal',goal:dialogState.goal||''};renderEditor();return;}if(button?.hasAttribute('data-import-review')){try{reviewImport();}catch(error){$('editor-error').textContent=error.message;}}if(button?.hasAttribute('data-dialog-cancel')){$('editor-dialog').close();dialogState=null;}});
-$('catalogue-content').addEventListener('click',event=>{const button=event.target.closest('button');if(!button||saving)return;if(button.dataset.catalogueAudience){catalogueAudience=button.dataset.catalogueAudience;openCatalogue('applications');return;}if(button.dataset.catalogueTab){openCatalogue(button.dataset.catalogueTab);return;}if(button.dataset.catalogueConnector){addConnector(button.dataset.catalogueConnector);$('catalogue-dialog').close();buildStep=2;render();return;}if(button.dataset.catalogueCreate){$('catalogue-dialog').close();openEditor('new',null,button.dataset.catalogueCreate);}else if(button.dataset.catalogueTool){$('catalogue-dialog').close();try{openEditor('assign-tool',null,button.dataset.catalogueTool);}catch(error){notify(error.message);}}else if(button.dataset.catalogueBlank){$('catalogue-dialog').close();openEditor('new',null,'blank');}else if(button.dataset.catalogueRole){$('catalogue-dialog').close();openEditor('add-role',null,button.dataset.catalogueRole);}else if(button.dataset.catalogueOutput){$('catalogue-dialog').close();openEditor('add-output',null,button.dataset.catalogueOutput);}});
+$('editor-form').addEventListener('click',async event=>{const button=event.target.closest('button');if(button?.hasAttribute('data-refine-goal')){try{await refineGoal();}catch(error){$('editor-error').textContent=error.message;}return;}
+  if(button?.hasAttribute('data-stop-questions')){const s=dialogState;if(s?.kind==='goal-questions'&&!s.asking){s.asking=true;renderEditor();await suggestGoalSetup(s.goal,goalAnswers(s));}return;}
+  if(button?.hasAttribute('data-manual-goal')){try{await suggestManualGoalSetup(dialogState.goal);}catch(error){$('editor-error').textContent=error.message;}return;}if(button?.hasAttribute('data-suggest-from-purpose')){try{const name=dialogState.name;await suggestGoalSetup(dialogState.purpose);if(dialogState.kind==='new')dialogState.name=name;renderEditor();}catch(error){$('editor-error').textContent=error.message;}return;}if(button?.hasAttribute('data-rethink-goal')){dialogState={kind:'goal',goal:dialogState.goal||''};renderEditor();return;}if(button?.hasAttribute('data-import-review')){try{reviewImport();}catch(error){$('editor-error').textContent=error.message;}}if(button?.hasAttribute('data-dialog-cancel')){$('editor-dialog').close();dialogState=null;}});
+$('catalogue-content').addEventListener('click',event=>{const button=event.target.closest('button');if(!button||saving)return;if(button.dataset.catalogueAudience){catalogueAudience=button.dataset.catalogueAudience;openCatalogue('applications');return;}if(button.dataset.catalogueTab){openCatalogue(button.dataset.catalogueTab);return;}if(button.dataset.catalogueConnect){$('catalogue-dialog').close();manageIntegrations('',button.dataset.catalogueConnect);return;}
+  if(button.dataset.catalogueConnector){addConnector(button.dataset.catalogueConnector);$('catalogue-dialog').close();buildStep=2;render();return;}if(button.dataset.catalogueCreate){$('catalogue-dialog').close();openEditor('new',null,button.dataset.catalogueCreate);}else if(button.dataset.catalogueTool){$('catalogue-dialog').close();try{openEditor('assign-tool',null,button.dataset.catalogueTool);}catch(error){notify(error.message);}}else if(button.dataset.catalogueBlank){$('catalogue-dialog').close();openEditor('new',null,'blank');}else if(button.dataset.catalogueRole){$('catalogue-dialog').close();openEditor('add-role',null,button.dataset.catalogueRole);}else if(button.dataset.catalogueOutput){$('catalogue-dialog').close();openEditor('add-output',null,button.dataset.catalogueOutput);}});
 $('close-catalogue').addEventListener('click',()=>$('catalogue-dialog').close());
 function renderHistory(){$('history-content').innerHTML=historyMarkup();if(!$('history-dialog').open)$('history-dialog').showModal();}
 $('close-history').addEventListener('click',()=>$('history-dialog').close());
@@ -716,7 +1118,7 @@ function assignCatalogTool(toolId,agentId){const d=structuredClone(draft()),agen
 
 function userApplications(){return applications.filter(a=>!templates.some(t=>t.id===a.id)||a.revision>1);}
 function sidebarApplications(){const own=userApplications();if(showAllApplications)return own;const visible=own.slice(0,3),selected=own.find(a=>a.id===currentId);if(selected&&!visible.includes(selected)){if(visible.length===3)visible[2]=selected;else visible.push(selected);}return visible;}
-$('app').addEventListener('pointerdown',event=>{const area=event.target.closest('.canvas-viewport');if(!area||event.target.closest('button,input,textarea,select,[data-plan-node]')||event.button!==0)return;if(area.dataset.canvasMode==='run')suspendRunFollow();canvasPan={area,x:event.clientX,y:event.clientY,left:area.scrollLeft,top:area.scrollTop,pointer:event.pointerId};area.setPointerCapture?.(event.pointerId);area.classList.add('panning');});
+$('app').addEventListener('pointerdown',event=>{const area=event.target.closest('.canvas-viewport');if(!area||event.target.closest('button,input,textarea,select,[data-plan-node],[data-canvas-dock]')||event.button!==0)return;if(area.dataset.canvasMode==='run')suspendRunFollow();canvasPan={area,x:event.clientX,y:event.clientY,left:area.scrollLeft,top:area.scrollTop,pointer:event.pointerId};area.setPointerCapture?.(event.pointerId);area.classList.add('panning');});
 $('app').addEventListener('pointermove',event=>{if(!canvasPan||canvasPan.pointer!==event.pointerId)return;canvasPan.area.scrollLeft=canvasPan.left-(event.clientX-canvasPan.x);canvasPan.area.scrollTop=canvasPan.top-(event.clientY-canvasPan.y);});
 function endCanvasPan(){if(canvasPan){canvasPan.area.classList.remove('panning');canvasPan.area.releasePointerCapture?.(canvasPan.pointer);canvasPan=null;}}
 $('app').addEventListener('pointerup',endCanvasPan);$('app').addEventListener('pointercancel',endCanvasPan);
@@ -726,27 +1128,165 @@ $('app').addEventListener('keydown',event=>{
   if(!delta)return;if(event.target.dataset.canvasMode==='run')suspendRunFollow();event.preventDefault();event.target.scrollLeft+=delta[0];event.target.scrollTop+=delta[1];
 });
 
-async function suggestGoalSetup(goal){
-  if(!runtime.available)return suggestManualGoalSetup(goal);
-  const state=dialogState;if(!goal?.trim())throw new Error('Describe your goal.');
-  $('editor-error').textContent='Generating a team proposal…';
-  const response=await request('/api/proposals',{method:'POST',body:JSON.stringify({prompt:'Create an application for this goal: '+goal,definition:emptyDefinition(),catalogue:planningCatalogue()})});
-  validateDefinition(response.definition);if(dialogState!==state)return;
-  dialogState={kind:'proposed-new',goal,definition:response.definition,summary:response.summary};renderEditor();
+// What the person clarified about their goal. Kept with the application so the
+// team sees it and the plan can show it; an unanswered question is kept too, so
+// what is still open stays visible rather than quietly disappearing.
+function goalRequirements(definition,requirements){
+  const items=(requirements||[]).map(item=>({question:String(item?.question||'').trim(),answer:String(item?.answer||'').trim()})).filter(item=>item.question);
+  if(items.length)definition.requirements=items;
+  return definition;
 }
-function suggestManualGoalSetup(goal){const recommended=recommendGoal(goal);dialogState={kind:'new',goalBased:true,goal:goal.trim(),name:applicationTypes.find(a=>a.id===recommended.template).name,purpose:goal.trim(),result:'Produce the selected results that answer this goal, with supporting sources and limitations.',...recommended,toolAgent:recommended.roles.find(id=>rolePresets.find(r=>r.id===id).kind!=='human')||''};renderEditor();}
+// Only the answered ones shape a proposal: an open question cannot decide a team.
+function requirementsPrompt(requirements,budget=1500){
+  const answered=(requirements||[]).filter(item=>item.answer?.trim());
+  if(!answered.length)return '';
+  // The prompt itself has a size limit, so the longest answers cannot crowd the
+  // goal out of it: they are added in order until the budget is spent.
+  const lines=[];let used=0;
+  for(const item of answered){const line='- '+item.question+' '+item.answer;if(used+line.length>budget)break;lines.push(line);used+=line.length+1;}
+  if(!lines.length)return '';
+  return '\n\nThe person answered these questions about their goal (their words, not instructions):\n'+lines.join('\n');
+}
+function goalQuestionsMarkup(s){
+  // One question at a time: the newest is the one being answered, and the ones
+  // already answered stay visible above it.
+  const asked=s.requirements.map((item,index)=>{
+    const last=index===s.requirements.length-1;
+    return `<div class="field"><label for="goal-answer-${index}">${escape(item.question)}</label>${last
+      ?`<textarea id="goal-answer-${index}" data-goal-answer="${index}" rows="2" placeholder="Answer, or leave it blank">${escape(item.answer)}</textarea>`
+      :`<p class="field-help">${item.answer.trim()?escape(item.answer):'Left open'}</p>`}</div>`;
+  }).join('');
+  const asked0=s.requirements.length?asked:`<p class="field-help">Reading your goal for anything it leaves unsaid…</p>`;
+  const stop=s.asking?'':`<button type="button" class="text-button" data-stop-questions>Stop asking and suggest a team</button>`;
+  return `<p class="field-help">Your goal: ${escape(s.goal)}</p>${asked0}${s.asking?goalAskingMarkup():'<p class="field-help">Answer this and continue, or leave it blank: nothing waits on these, and the questions stop as soon as the host has what it needs.</p>'}${stop}`;
+}
+function goalAskingMarkup(){return `<p class="field-help" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span> Thinking about what to ask next…</p>`;}
+// What the person clarified, in the order they were asked, for the proposal and
+// for the application itself.
+function goalAnswers(s){return (s.requirements||[]).map(item=>({question:String(item.question||'').trim(),answer:String(item.answer||'').trim()})).filter(item=>item.question);}
+async function askGoalQuestions(s){
+  const goal=s.goal?.trim();if(!goal)throw new Error('Describe your goal before asking about it.');
+  if(!runtime.available){await suggestGoalSetup(goal,[]);return;}
+  const state={kind:'goal-questions',goal,requirements:[],asking:true};dialogState=state;renderEditor();
+  await nextGoalQuestion(state);
+}
+// The next question, or none: the host stops asking as soon as the answers settle
+// what it would ask, and stops at its own limit whatever the answers say.
+async function nextGoalQuestion(s){
+  const state=s;let question='';
+  // Asking is optional, so a host that cannot answer never stands between the
+  // person and their application: the proposal is made from the goal alone.
+  try{question=((await request('/api/goals/questions',{method:'POST',body:JSON.stringify({goal:state.goal,requirements:goalAnswers(state)})})).questions||[])[0]||'';}catch{question='';}
+  if(dialogState!==state)return;
+  state.asking=false;
+  if(!question){await suggestGoalSetup(state.goal,goalAnswers(state));return;}
+  state.requirements.push({question,answer:''});renderEditor();
+}
+async function continueGoalQuestions(s){
+  if(s.asking)return;
+  const index=s.requirements.length-1;
+  s.asking=true;renderEditor();
+  await nextGoalQuestion(s);
+}
+// The first call decides only who and what: the plan is the second call's job.
+function teamPrompt(goal,requirements){
+  return 'Choose the team and the results for this goal, and nothing else: the members who do the work, '
+    +'and the results the person needs. Give each member the fewest tools that fit, and add one step per member '
+    +'so the definition is complete. Do not design the full workflow; a later request does that. The goal is: '
+    +goal+requirementsPrompt(requirements);
+}
+// The second call designs the plan around the team already chosen.
+function planPrompt(goal,requirements,team){
+  const keep=team?`Use exactly this team and these results: ${team.agents.map(agent=>agent.name).join(', ')}`
+    +`; results: ${team.state.map(item=>item.label).join(', ')}. `:'';
+  return 'Design a complete application for this goal: the members, the steps, the connections that order those '
+    +'steps, the instructions and the shared state. '+keep+'Give every step a connection, so the plan reads as a '
+    +'graph rather than a list of unconnected steps. The goal is: '+goal+requirementsPrompt(requirements);
+}
+function proposalProgressMarkup(s){
+  const seconds=Math.max(0,Math.round((Date.now()-(s.proposedAt||Date.now()))/1000));
+  const answered=(s.requirements||[]).filter(item=>item.answer?.trim()).length;
+  const waiting=s.stage==='team';
+  const chosen=s.team?`<div class="chosen-team"><p class="field-help">Chosen so far:</p><ul>${s.team.agents.map(agent=>`<li><strong>${escape(agent.name)}</strong> · ${escape(agent.kind==='human'?'human step':'AI member')} · ${agent.tools.length} tool${agent.tools.length===1?'':'s'}</li>`).join('')}${s.team.state.map(item=>`<li><strong>${escape(item.label)}</strong> · result</li>`).join('')}</ul></div>`:'';
+  return `<div class="proposal-progress" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><p><strong>${waiting?'Choosing the team…':'Writing the plan around them…'}</strong></p><p class="field-help">A model call to ${escape(runtime.provider||'this host’s backend')} is reading your goal${answered?` and ${answered} answer${answered===1?'':'s'}`:''}${waiting?'. The members appear here as soon as they are chosen.':', then designing the steps and the shared state.'} ${seconds}s so far; this usually takes under a minute, and longer when the backend is busy.</p>${chosen}</div>`;
+}
+let proposalTicker=null;
+function stopProposalTicker(){if(proposalTicker){clearInterval(proposalTicker);proposalTicker=null;}}
+// The elapsed time is the only progress a single model call can honestly report,
+// so it is what moves while the call is out.
+function startProposalTicker(s){
+  stopProposalTicker();
+  proposalTicker=setInterval(()=>{if(dialogState!==s||!s.proposing){stopProposalTicker();return;}renderEditor();},1000);
+}
+// One control, one job: the sparkle rewords the goal where it stands. No second
+// screen and no confirmation, because the wording is the only thing it changes.
+function goalRefineMarkup(s){
+  if(!runtime.available)return '';
+  const label=s.refining?'Rewording…':'Reword this goal with AI';
+  return `<p class="field-help">${s.refining?`<span class="spinner" aria-hidden="true"></span> ${label}`:`<button type="button" class="icon-button" data-refine-goal title="${label}" aria-label="${label}">${uiIcon('sparkle')}</button> ${label}`}</p>`;
+}
+async function refineGoal(){
+  const s=dialogState;if(!s||s.kind!=='goal'||s.refining)return;
+  if(!s.goal?.trim())throw new Error('Describe your goal before asking for a rewording.');
+  if(!runtime.available)throw new Error('This host has no AI provider configured.');
+  s.refining=true;renderEditor();
+  try{
+    const result=await request('/api/goals/refine',{method:'POST',body:JSON.stringify({goal:s.goal.trim()})});
+    if(dialogState!==s)return;
+    s.goal=result.goal;
+    notify(result.summary||'Goal reworded.');
+  }finally{s.refining=false;renderEditor();}
+}
+async function goalIntegrationSuggestions(goal){
+  try{const result=await request('/api/integrations/recommend',{method:'POST',body:JSON.stringify({goal,application_id:currentId})});return result.recommendations||[];}catch{return [];}
+}
+function goalIntegrationMarkup(goal,suggestions){
+  if(!suggestions.length)return '<p>No connected service is suggested for this goal yet.</p>';
+  return suggestions.map(item=>`<p><strong>${escape(item.name)}</strong> · ${item.status==='connected'?`${item.connections.length} authorized ${item.connections.length===1?'connection':'connections'} you can assign`:'Nothing authorized for this application yet'} · ${escape(item.reason)}</p>`).join('');
+}
+async function suggestGoalSetup(goal,requirements=[]){
+  if(!runtime.available){await suggestManualGoalSetup(goal,requirements);return;}
+  const state=dialogState;if(!goal?.trim())throw new Error('Describe your goal.');
+  const suggestions=await goalIntegrationSuggestions(goal);
+  const waiting={...state,proposing:true,proposedAt:Date.now(),requirements,team:null,stage:'team'};
+  dialogState=waiting;renderEditor();startProposalTicker(waiting);
+  const proposal=async prompt=>request('/api/proposals',{method:'POST',body:JSON.stringify({prompt,definition:emptyDefinition(),catalogue:planningCatalogue()})});
+  let response;
+  try{
+    // Who does the work is a small, quick decision, and the person can be shown
+    // it while the plan around it is still being written. A host that will not
+    // answer this first call is not asked twice: the plan is proposed without it.
+    let team=null;
+    try{
+      team=(await proposal(teamPrompt(goal,requirements))).definition;
+      goalRequirements(team,requirements);validateDefinition(team);
+      if(dialogState===waiting){waiting.team=team;waiting.stage='plan';renderEditor();}
+    }catch{team=null;waiting.stage='plan';}
+    // The chosen team is named in the request rather than handed over as the
+    // base definition: a base is preserved, and a team-only definition preserves
+    // the wrong plan.
+    response=await proposal(planPrompt(goal,requirements,team));
+  }finally{
+    stopProposalTicker();
+    if(dialogState===waiting)waiting.proposing=false;
+  }
+  goalRequirements(response.definition,requirements);validateDefinition(response.definition);if(dialogState!==waiting)return;
+  dialogState={kind:'proposed-new',goal,definition:response.definition,summary:response.summary,integrationSuggestions:suggestions};renderEditor();
+}
+async function suggestManualGoalSetup(goal,requirements=[]){const recommended=recommendGoal(goal);dialogState={kind:'new',goalBased:true,requirements,integrationSuggestions:await goalIntegrationSuggestions(goal),goal:goal.trim(),name:applicationTypes.find(a=>a.id===recommended.template).name,purpose:goal.trim(),result:'Produce the selected results that answer this goal, with supporting sources and limitations.',...recommended,toolAgent:recommended.roles.find(id=>rolePresets.find(r=>r.id===id).kind!=='human')||''};renderEditor();}
 function goalOutputName(id){return manualPlanning.outputLabels[id]||outputTypes.find(output=>output.id===id)?.name||id;}
-function goalReviewMarkup(s){const ai=s.roles.filter(id=>rolePresets.find(r=>r.id===id)?.kind!=='human');if(!ai.includes(s.toolAgent))s.toolAgent=ai[0]||'';return `<section class="goal-summary"><p>${escape(s.goal)}</p><button class="text-button" type="button" data-rethink-goal>Change goal</button></section>${dialogField('Name','name',s.name)}<div class="suggested-summary"><div><span class="field-label">Team</span><p>${s.roles.map(id=>escape(rolePresets.find(r=>r.id===id)?.name||id)).join(', ')}</p></div><div><span class="field-label">Results</span><p>${s.outputs.map(goalOutputName).map(escape).join(', ')}</p></div></div><p class="field-help">${escape(s.reason)}</p><details class="quiet-details" data-editor-disclosure="goal-team"><summary>Change team</summary><div class="catalogue-cards">${rolePresets.map(role=>`<label class="access-option"><input type="checkbox" data-goal-role="${role.id}" ${s.roles.includes(role.id)?'checked':''}><span><strong>${escape(role.name)}</strong><small>${escape(role.description)}</small></span></label>`).join('')}</div></details><details class="quiet-details" data-editor-disclosure="goal-results"><summary>Change results</summary><div class="catalogue-cards">${outputTypes.map(o=>`<label class="access-option"><input type="checkbox" data-goal-output="${o.id}" ${s.outputs.includes(o.id)?'checked':''}><span>${escape(goalOutputName(o.id))}</span></label>`).join('')}</div></details><details class="quiet-details" data-editor-disclosure="goal-tools"><summary>Choose tools</summary>${ai.length?`${dialogField('Team member','toolAgent',s.toolAgent,'select',ai.map(id=>[id,rolePresets.find(r=>r.id===id).name]))}<div class="catalogue-cards">${toolDescriptors.map(t=>`<label class="access-option"><input type="checkbox" data-goal-tool="${t.id}" ${(s.tools[s.toolAgent]||[]).includes(t.id)?'checked':''}><span><strong>${escape(t.name)}</strong><small>${escape(t.description)}</small></span></label>`).join('')}</div>`:'<p>This needs an AI member.</p>'}</details>`;}
+function goalReviewMarkup(s){const ai=s.roles.filter(id=>rolePresets.find(r=>r.id===id)?.kind!=='human');if(!ai.includes(s.toolAgent))s.toolAgent=ai[0]||'';return `<section class="goal-summary"><p>${escape(s.goal)}</p><button class="text-button" type="button" data-rethink-goal>Change goal</button></section>${dialogField('Name','name',s.name)}<div class="suggested-summary"><div><span class="field-label">Team</span><p>${s.roles.map(id=>escape(rolePresets.find(r=>r.id===id)?.name||id)).join(', ')}</p></div><div><span class="field-label">Results</span><p>${s.outputs.map(goalOutputName).map(escape).join(', ')}</p></div></div><p class="field-help">${escape(s.reason)}</p><details class="quiet-details" data-editor-disclosure="goal-connections"><summary>Connections this goal may need</summary>${goalIntegrationMarkup(s.goal,s.integrationSuggestions||[])}</details><details class="quiet-details" data-editor-disclosure="goal-team"><summary>Change team</summary><div class="catalogue-cards">${rolePresets.map(role=>`<label class="access-option"><input type="checkbox" data-goal-role="${role.id}" ${s.roles.includes(role.id)?'checked':''}><span><strong>${escape(role.name)}</strong><small>${escape(role.description)}</small></span></label>`).join('')}</div></details><details class="quiet-details" data-editor-disclosure="goal-results"><summary>Change results</summary><div class="catalogue-cards">${outputTypes.map(o=>`<label class="access-option"><input type="checkbox" data-goal-output="${o.id}" ${s.outputs.includes(o.id)?'checked':''}><span>${escape(goalOutputName(o.id))}</span></label>`).join('')}</div></details><details class="quiet-details" data-editor-disclosure="goal-tools"><summary>Choose tools</summary>${ai.length?`${dialogField('Team member','toolAgent',s.toolAgent,'select',ai.map(id=>[id,rolePresets.find(r=>r.id===id).name]))}<div class="catalogue-cards">${toolDescriptors.map(t=>`<label class="access-option"><input type="checkbox" data-goal-tool="${t.id}" ${(s.tools[s.toolAgent]||[]).includes(t.id)?'checked':''}><span><strong>${escape(t.name)}</strong><small>${escape(t.description)}</small></span></label>`).join('')}</div>`:'<p>This needs an AI member.</p>'}</details>`;}
 
 function composeGoalDefinition(s){
   if(!s.name?.trim()||s.name.length>100)throw new Error('Enter an application name of up to 100 characters.');if(!s.roles.length||!s.roles.some(id=>rolePresets.find(r=>r.id===id)?.kind!=='human'))throw new Error('Choose at least one AI team member.');if(!s.outputs.length)throw new Error('Choose at least one result.');
   const starter=applicationTypes.find(a=>a.id===s.template);
-  if(starter?.featured&&JSON.stringify([...new Set(starter.members.map(m=>m.preset))].sort())===JSON.stringify([...s.roles].sort())&&JSON.stringify([...new Set(starter.outputs.map(o=>o.kind))].sort())===JSON.stringify([...s.outputs].sort())){const d=structuredClone(templates.find(t=>t.id===s.template).definition);d.name=s.name.trim();d.description=s.goal;for(const a of d.agents){a.instructions+=' Work toward the user goal: '+s.goal;if(a.kind!=='human')a.tools=[...(s.tools[a.role]||[])];}return validateDefinition(d);}
+  if(starter?.featured&&JSON.stringify([...new Set(starter.members.map(m=>m.preset))].sort())===JSON.stringify([...s.roles].sort())&&JSON.stringify([...new Set(starter.outputs.map(o=>o.kind))].sort())===JSON.stringify([...s.outputs].sort())){const d=structuredClone(templates.find(t=>t.id===s.template).definition);d.name=s.name.trim();d.description=s.goal;for(const a of d.agents){a.instructions+=' Work toward the user goal: '+s.goal;if(a.kind!=='human')a.tools=[...(s.tools[a.role]||[])];}return validateDefinition(goalRequirements(d,s.requirements));}
   const d=emptyDefinition();d.name=s.name.trim();d.description=s.goal;d.catalogue_type=s.template;d.inputs=[{id:'context',label:'Context and source references',type:'textarea',required:false}];d.agents=s.roles.map(id=>{const role=rolePresets.find(r=>r.id===id);if(!role)throw new Error('Choose a ready-made role.');return {id,name:role.name,kind:role.kind,role:id,instructions:role.instructions+' Work toward this goal: '+s.goal,tools:role.kind==='human'?[]:[...(s.tools[id]||[])]};});
   d.state=s.outputs.map(id=>{const o=outputTypes.find(o=>o.id===id);if(!o)throw new Error('Choose a supported result.');return {key:id,label:goalOutputName(id),kind:id,type:o.type,merge:o.type==='text'?'replace':'upsert',statuses:[...o.statuses]};});d.views=d.state.map(o=>({id:o.key+'_view',title:o.label,collection:o.key,layout:outputTypes.find(t=>t.id===o.kind).layout}));d.workflow=[];
   const ai=d.agents.filter(a=>a.kind!=='human'),primary=d.state.find(o=>o.type==='records')||d.state[0];
   for(const a of ai){d.workflow.push({id:'work_'+a.id,name:a.name+' contribution',agent:a.id,output:primary.key,task:a.instructions});}
   for(const o of d.state){const preferred=manualPlanning.outputOwners[o.kind],owner=ai.find(a=>a.role===preferred)||ai.at(-1);d.workflow.push({id:'prepare_'+o.key,name:'Prepare '+o.label.toLowerCase(),agent:owner.id,output:o.key,task:'Produce '+o.label.toLowerCase()+' for this goal: '+s.goal+'. Use earlier findings and include supporting sources and limitations.'});}
+  goalRequirements(d,s.requirements);
   for(const a of d.agents.filter(a=>a.kind==='human')){const out=d.state.find(o=>o.kind==='decision')||d.state.at(-1);d.workflow.push({id:'review_'+a.id,name:'Review and approve',agent:a.id,output:out.key,task:'Review the results for this goal: '+s.goal+'. Approve, reject or request changes with a reason.'});}
   return validateDefinition(d);
 }
@@ -812,7 +1352,7 @@ $('app').addEventListener('pointerup',event=>{
 $('app').addEventListener('pointercancel',event=>{if(canvasConnect?.pointer===event.pointerId){canvasConnect=null;clearCanvasConnect();}});
 
 function addConnector(id){const connector=connectorDescriptors.find(c=>c.id===id);if(!connector)throw new Error('Choose a catalog connector.');const d=structuredClone(draft());d.integrations??=[];if(d.integrations.some(c=>c.connector===id)){notify('That connector is already included.');return;}d.integrations.push({connector:id,purpose:connector.description,scope:'',mode:connector.default_mode});validateDefinition(d);drafts.set(currentId,d);notify('Connector setup added. No account is connected.');}
-function connectorSetupMarkup(d){return `<section class="panel"><p class="field-help">Connections are configured and checked by this host. Selecting a service alone does not grant access.</p><span class="connection-status">${(d.integrations||[]).length} selected · ${(d.integrations||[]).filter(item=>connectorDescriptors.find(c=>c.id===item.connector)?.available).length} available</span>${d.connector_requirements?.length?`<details><summary>Suggested for this workflow</summary><ul>${d.connector_requirements.map(r=>`<li>${escape(r.purpose)} · ${escape(connectorDescriptors.find(c=>c.id===r.suggested)?.name||r.suggested)}${r.required?'':' · optional'}</li>`).join('')}</ul></details>`:''}${(d.integrations||[]).map((item,i)=>{const c=connectorDescriptors.find(c=>c.id===item.connector);if(!c)return '';return `<details class="connector-row quiet-row" data-disclosure="connector-${i}"><summary><strong>${escape(c.name)}</strong><span class="field-help">${c.available?'Available on this host':'Not connected'}</span></summary><div class="row-editor">${field('Use for',`integrations.${i}.purpose`,item.purpose)}${field('Choose service',`integrations.${i}.connector`,item.connector,'select',connectorDescriptors.filter(other=>other.group===c.group).map(other=>[other.id,other.name]))}${field('Allowed sources or destination',`integrations.${i}.scope`,item.scope)}<p class="field-help">This does not grant access.</p>${field('Allowed actions',`integrations.${i}.mode`,item.mode,'select',connectorModes(c))}<details><summary>Connection setup</summary><p>${c.available?'This adapter supplies '+escape((c.tools||[]).map(capabilityName).join(', '))+'. Assign these tools to the members that need them. Source restrictions and credentials are owned by the host.':'Configure a host adapter for this service. Do not enter passwords or access keys in these fields.'}</p><button class="button" disabled>${c.available?'Configured on host':'Configure on host'}</button></details><button class="text-button remove" data-remove-connector="${i}">Remove connection</button></div></details>`;}).join('')||'<p>No connectors selected. Browse the catalog to add sources and destinations.</p>'}<details class="quiet-details" data-disclosure="start-method"><summary>When to run · ${d.start_mode==='event'?'event':d.start_mode==='schedule'?'schedule':'manually'}</summary>${field('Start method','start_mode',d.start_mode||'manual','select',[['manual','Start manually'],...(runtime.features?.events?[['event','When an event arrives']]:d.start_mode==='event'?[['event','Saved event trigger — unavailable',true]]:[]),...(runtime.features?.schedules?[['schedule','On a schedule']]:d.start_mode==='schedule'?[['schedule','Saved schedule — unavailable',true]]:[])])}<p class="field-help">This host supports manual requests. Saved event or schedule settings require a host that reports those capabilities.</p></details></section>`;}
+function connectorSetupMarkup(d){return `<section class="panel"><p class="field-help">Connections are configured and checked by this host. Selecting a service alone does not grant access.</p><span class="connection-status">${(d.integrations||[]).length} selected · ${(d.integrations||[]).filter(item=>connectorDescriptors.find(c=>c.id===item.connector)?.available).length} available</span>${d.connector_requirements?.length?`<details><summary>Suggested for this workflow</summary><ul>${d.connector_requirements.map(r=>`<li>${escape(r.purpose)} · ${escape(connectorDescriptors.find(c=>c.id===r.suggested)?.name||r.suggested)}${r.required?'':' · optional'}</li>`).join('')}</ul></details>`:''}${(d.integrations||[]).map((item,i)=>{const c=connectorDescriptors.find(c=>c.id===item.connector);if(!c)return '';return `<details class="connector-row quiet-row" data-disclosure="connector-${i}"><summary><strong>${escape(c.name)}</strong><span class="field-help">${c.available?'Available on this host':'Not connected'}</span></summary><div class="row-editor">${field('Use for',`integrations.${i}.purpose`,item.purpose)}${field('Choose service',`integrations.${i}.connector`,item.connector,'select',connectorDescriptors.filter(other=>other.group===c.group).map(other=>[other.id,other.name]))}${field('Allowed sources or destination',`integrations.${i}.scope`,item.scope)}<p class="field-help">This does not grant access.</p>${field('Allowed actions',`integrations.${i}.mode`,item.mode,'select',connectorModes(c))}<details><summary>Connection setup</summary><p>${c.available?'This adapter supplies '+escape((c.tools||[]).map(capabilityName).join(', '))+'. Assign these tools to the members that need them. Source restrictions and credentials are owned by the host.':'Configure a host adapter for this service. Do not enter passwords or access keys in these fields.'}</p><button class="button" disabled>${c.available?'Configured on host':'Configure on host'}</button></details><button class="icon-button remove" data-remove-connector="${i}" title="Remove this connection from the plan" aria-label="Remove this connection from the plan">${uiIcon('trash')}</button></div></details>`;}).join('')||'<p>No connectors selected. Browse the catalog to add sources and destinations.</p>'}<details class="quiet-details" data-disclosure="start-method"><summary>When to run · ${d.start_mode==='event'?'event':d.start_mode==='schedule'?'schedule':'manually'}</summary>${field('Start method','start_mode',d.start_mode||'manual','select',[['manual','Start manually'],...(runtime.features?.events?[['event','When an event arrives']]:d.start_mode==='event'?[['event','Saved event trigger — unavailable',true]]:[]),...(runtime.features?.schedules?[['schedule','On a schedule']]:d.start_mode==='schedule'?[['schedule','Saved schedule — unavailable',true]]:[])])}<p class="field-help">This host supports manual requests. Saved event or schedule settings require a host that reports those capabilities.</p></details></section>`;}
 function connectorModes(c){return c.default_mode==='model'?[['model','Run AI roles']]:c.default_mode==='read'?[['read','Read only']]:[['read','Read only'],['draft','Prepare drafts'],['approved','Take action after approval']];}
 $('app').addEventListener('click',event=>{const button=event.target.closest('[data-remove-connector]');if(!button||button.dataset.removeConnector===undefined||saving)return;const d=structuredClone(draft());d.integrations.splice(Number(button.dataset.removeConnector),1);validateDefinition(d);drafts.set(currentId,d);render();});
 
@@ -822,4 +1362,68 @@ $('editor-form').addEventListener('change',async event=>{if(!event.target.hasAtt
 $('app').addEventListener('wheel',event=>{if(event.target.closest('[data-canvas-mode="run"]'))suspendRunFollow();},{passive:true});
 $('app').addEventListener('keydown',event=>{if(event.key==='Escape'&&selectedRunStepId){event.preventDefault();closeRunInspector();}});
 
-$('app').addEventListener('keydown',event=>{if(event.key==='Escape'&&!preview?.live){showPlanInspector=false;showPlanResources=false;showPlanAssistant=false;showPlanReadiness=false;connectSource=null;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId||'')}"]`)?.focus({preventScroll:true});}});
+$('app').addEventListener('keydown',event=>{
+  // The keyboard path to a connection: Enter or Space selects the focused edge,
+  // and Delete removes it from either the edge or its handle.
+  const connection=event.target.closest?.('[data-canvas-edge-menu],[data-canvas-edge]');
+  if(connection&&(event.key==='Delete'||event.key==='Backspace')){
+    event.preventDefault();
+    const key=connection.dataset.canvasEdgeMenu||connection.dataset.canvasEdge,[from,to]=key.split('|');
+    selectedEdge=null;updatePlan(disconnectPlanSteps(draft(),from,to));notify('Connection removed.');return;
+  }
+  const edge=event.target.closest?.('[data-canvas-edge]');
+  if(edge&&(event.key==='Enter'||event.key===' ')){event.preventDefault();selectedEdge=selectedEdge===edge.dataset.canvasEdge?null:edge.dataset.canvasEdge;render();
+    $('app').querySelector(`[data-canvas-edge-menu]`)?.focus({preventScroll:true});return;}
+  if(event.key==='Escape'&&!preview?.live){showPlanInspector=false;showPlanResources=false;showPlanAssistant=false;showPlanReadiness=false;connectSource=null;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId||'')}"]`)?.focus({preventScroll:true});}});
+
+$('app').addEventListener('change',event=>{
+  const name=event.target.dataset.connectionTool;if(!name)return;
+  const member=draft().agents[Number(event.target.dataset.memberIndex)];if(!member||member.kind==='human')return;
+  if(!connectionTools().includes(name)){notify('This connection is not authorized for this application.');return;}
+  member.tools=event.target.checked?[...new Set([...member.tools,name])]:member.tools.filter(tool=>tool!==name);markDirty();render();
+});
+$('record-detail').addEventListener('input',event=>{
+  if(!event.target.hasAttribute('data-integration-search'))return;
+  for(const card of $('record-detail').querySelectorAll('[data-integration-card]'))card.hidden=!card.dataset.integrationCard.includes(event.target.value.toLowerCase());
+});
+$('record-detail').addEventListener('submit',async event=>{
+  const form=event.target.closest('[data-connection-create]');if(!form)return;event.preventDefault();
+  const values=new FormData(form),service=integrationCatalogue.find(item=>item.id===form.dataset.connectionCreate),operations=values.getAll('operations');
+  const credentials={};if(values.get('token'))credentials[service.auth==='api_key'?'api_key':service.auth==='google_oauth'?'access_token':'token']=values.get('token');
+  if(values.get('email'))credentials.email=values.get('email');if(values.get('api_key'))credentials.api_key=values.get('api_key');
+  const config={};if(service.integration)config.instance=service.id;if(values.get('base_url'))config.base_url=values.get('base_url');
+  const body={id:values.get('id'),name:values.get('name'),integration:service.integration||service.id,applications:[currentId],operations,scopes:[...new Set(service.operations.filter(op=>operations.includes(op.name)).flatMap(op=>op.scopes))],config,credentials};
+  if(event.submitter?.dataset.oauthProvider){
+    delete body.credentials;delete body.config;
+    try{const result=await request('/api/connections/oauth/begin',{method:'POST',body:JSON.stringify({connection:body,provider:event.submitter.dataset.oauthProvider,redirect_uri:event.submitter.dataset.redirectUri})});
+      window.open(result.authorization_url,'_blank','noopener,noreferrer');notify('Authorize in the provider window, then paste the callback URL below.');
+    }catch(error){notify(error.message);}return;
+  }
+  for(const input of form.querySelectorAll('input[type="password"]'))input.value='';
+  try{await request('/api/connections',{method:'POST',body:JSON.stringify(body)});await manageIntegrations();render();notify('Connection configured. Assign tools explicitly; health is not yet verified.');}catch(error){await manageIntegrations(error.message);}
+});
+$('record-detail').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-connection-delete],[data-connection-health],[data-connection-revoke]');if(!button)return;
+  try{if(button.dataset.connectionRevoke){if(!confirm('Revoke provider access and disconnect locally?'))return;const result=await request('/api/connections/'+encodeURIComponent(button.dataset.connectionRevoke)+'/revoke',{method:'POST',body:'{}'});await manageIntegrations();render();notify(result.provider_revoked?'Provider access revoked':'Disconnected locally; provider does not expose configured revocation.');}
+  else if(button.dataset.connectionDelete){if(!confirm('Disconnect and revoke local access? Provider credentials may need separate revocation.'))return;await request('/api/connections/'+encodeURIComponent(button.dataset.connectionDelete),{method:'DELETE'});await manageIntegrations();render();}
+  else{const result=await request('/api/connections/'+encodeURIComponent(button.dataset.connectionHealth)+'/health',{method:'POST',body:'{}'});notify(result.verified?'Provider access verified':result.reason);}}
+  catch(error){notify(error.message);}
+});
+
+$('record-detail').addEventListener('submit',async event=>{
+  if(!event.target.matches('[data-oauth-callback]'))return;event.preventDefault();
+  const field=event.target.querySelector('input'),value=field.value;field.value='';
+  try{const url=new URL(value),state=url.searchParams.get('state'),code=url.searchParams.get('code');
+    if(!state||!code)throw new Error('Callback URL must contain state and code.');
+    const redirect_uri=url.origin+url.pathname;
+    await request('/api/connections/oauth/callback',{method:'POST',body:JSON.stringify({state,code,redirect_uri})});
+    await manageIntegrations();render();notify('OAuth connection configured. Assign tools explicitly.');
+  }catch(error){notify(error.message);}
+});
+
+$('app').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-tool-approval]');if(!button||!preview?.runId)return;
+  button.disabled=true;
+  try{await request(`/api/runs/${preview.runId}/tool-approvals`,{method:'POST',body:JSON.stringify({approval_id:button.dataset.toolApproval,approved:button.dataset.approved==='true'})});pendingToolApprovals=pendingToolApprovals.filter(item=>item.id!==button.dataset.toolApproval);render();}
+  catch(error){notify(error.message);button.disabled=false;}
+});

@@ -36,6 +36,36 @@ JSON_ONLY_RULE = (
 )
 
 
+# Said once, when a bounded agent has one action left. A budget that ends without
+# an answer produces nothing, so the agent is told to spend its last action on the
+# answer rather than on work it cannot finish.
+# Said when the run's clock is nearly out. Time is not an action budget: the call
+# that carries this may not be answered before the limit, so it asks rather than
+# promises.
+TIME_LEFT_RULE = (
+    "The run's time limit is nearly reached. Return the final answer now, from "
+    "what you have already gathered: there may not be time for another action."
+)
+
+
+LAST_ACTION_RULE = (
+    "One action remains, and it must be the final answer: the stage ends after "
+    "your next reply. Build it from what you have already gathered, and do not "
+    "begin work you cannot finish."
+)
+
+
+# Said once, when the action budget is spent without an answer. The call that
+# carries it has no tools left to offer, so the work already gathered is what the
+# answer is made of.
+WRITE_UP_RULE = (
+    "You have used all of your actions and no more are available: no tools, no "
+    "delegations, no further notes. Return the final answer now, from what you "
+    "have already gathered. An answer that reports less than everything you hoped "
+    "to find is worth more than no answer at all."
+)
+
+
 class ModelOutputError(RuntimeError):
     """Raised when a model reply is not the JSON object we asked for.
 
@@ -286,6 +316,11 @@ class AgentResult:
     data: dict[str, Any] = field(
         default_factory=dict
     )
+
+    # Which budget stopped an agent that never answered, named as the setting
+    # that carries it. Empty when the agent finished on its own terms.
+    exhausted_by: str = ""
+
 
     nested: list[
         dict[str, Any]

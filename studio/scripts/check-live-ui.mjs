@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {emptyDefinition,initialState,preflightIssues,resolvePreflightIssue,validateRecordValues} from '../shared/definition.js';
-const source=(await readFile(new URL('../web/live.js',import.meta.url),'utf8')).replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href));
+const source=(await readFile(new URL('../web/live.js',import.meta.url),'utf8'))
+  .replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href))
+  .replace("'/canvas-ui.js'",JSON.stringify(new URL('../web/canvas-ui.js',import.meta.url).href));
 const {projectLiveRun,liveRunMarkup}=await import('data:text/javascript,'+encodeURIComponent(source));
 const d=emptyDefinition();d.state[0].merge='append';
 const conflicting=emptyDefinition();
@@ -155,3 +157,17 @@ assert.ok(!liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',
 const unprofiled=liveRunMarkup(d,null,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:{available:false,tools:[],reason:'No model backend is configured for this host.'}});
 assert.match(unprofiled,/LOCAL RUN/);assert.match(unprofiled,/No AI provider was found on this computer/);
 console.log('PASS: the page renders from the reported host profile instead of assuming a local machine.');
+
+// A run stopped by a budget can be continued, and the page says so: the resume
+// control is offered for a stopped run the host reports as resumable, and the
+// checkpoint itself never reaches the page.
+{
+  const {readFile} = await import('node:fs/promises');
+  const stopped = projectLiveRun({...run, status: 'stopped', resumable: true});
+  assert.equal(stopped.mode, 'stopped');
+  assert.equal(stopped.resumable, true, 'the projection carries it');
+  assert.equal(projectLiveRun({...run, status: 'stopped'}).resumable, false, 'and defaults to no');
+  const source = await readFile(new URL('../web/studio.js', import.meta.url), 'utf8');
+  assert.match(source, /preview\.mode==='paused'\|\|\(preview\.mode==='stopped'&&preview\.resumable\)/, 'the resume control is offered for a resumable stop');
+  assert.ok(!/checkpoint/.test(stopped.events.map(event => JSON.stringify(event)).join('')), 'no checkpoint reaches the page');
+}

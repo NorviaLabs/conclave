@@ -68,6 +68,13 @@ export function backendLabel(backends,provider,model){
   const name=known?known.name:(provider||'This host’s default');
   return model?`${name} · ${model}`:name;
 }
+// Which backend a step runs on, in the words this host uses, or what the host
+// reports as its own default when neither the step nor its member chose one. The
+// choice itself is `stageBackend`'s, so the card cannot disagree with the run.
+export function stepBackendLabel(backends,hostProvider,step,member){
+  const [provider,model]=stageBackend(member||{},step||{});
+  return provider||model?backendLabel(backends,provider,model):backendLabel(backends,hostProvider||'','');
+}
 export function initialState(definition){return Object.fromEntries(definition.state.map(s=>[s.key,s.type==='text'?'':[]]));}
 export function validateMember(member){
  if(!member||typeof member!=='object'||Array.isArray(member))fail('Provide a member definition.');

@@ -1,5 +1,6 @@
 """Backend validation cannot depend on Studio's browser-side checks."""
 import copy
+import json
 
 import pytest
 
@@ -37,6 +38,13 @@ def change(definition, path, value):
     (("integrations",), [{"connector": "x", "purpose": "", "scope": "", "mode": "read", "password": "secret"}]),
     (("integrations",), [{"connector": "bad/id", "purpose": "", "scope": "", "mode": "read"}]),
     (("integrations",), [{"connector": "files", "purpose": "", "scope": "", "mode": "unknown"}]),
+    (("requirements",), {}), (("requirements",), [None]), (("requirements",), [{"question": "Who reads it?"}]),
+    (("requirements",), [{"question": "", "answer": "x"}]), (("requirements",), [{"question": "q" * 301, "answer": "x"}]),
+    (("requirements",), [{"question": "Who reads it?", "answer": 1}]),
+    (("requirements",), [{"question": "Who reads it?", "answer": "x" * 2001}]),
+    (("requirements",), [{"question": "Who reads it?", "answer": "x", "extra": 1}]),
+    (("requirements",), [{"question": "Who reads it?", "answer": "x"}] * 2),
+    (("requirements",), [{"question": f"Question {index}?", "answer": ""} for index in range(21)]),
 ])
 def test_backend_rejects_malformed_definitions(path, value):
     definition = request()["definition"]
@@ -101,3 +109,28 @@ def test_workspace_catalogue_valid_custom_outputs_and_invalid_variants():
     for invalid in invalids:
         with pytest.raises(ValueError):
             validate_catalogue(invalid, bundled)
+
+
+def test_requirements_are_optional_and_hold_answers_or_open_questions():
+    """What the person clarified about the goal, in their own words."""
+
+    definition = request()["definition"]
+    # An application nobody asked about is still a valid application.
+    validate_definition(definition)
+
+    definition["requirements"] = [{"question": "Who reads the result?", "answer": "Support agents"},
+                                  {"question": "What is out of scope?", "answer": ""}]
+    validate_definition(definition)
+
+
+def test_only_answered_requirements_reach_the_agents():
+    """An unanswered question is still open, so the run is not told to act on it."""
+
+    from conclave.application.definition import _requirements
+
+    assert _requirements({}) == ""
+    assert _requirements({"requirements": [{"question": "Who reads it?", "answer": "   "}]}) == ""
+    block = _requirements({"requirements": [{"question": "Who reads it?", "answer": " Support agents "},
+                                            {"question": "What is out of scope?", "answer": ""}]})
+    assert block.startswith("\n\nCLARIFIED REQUIREMENTS (stated by the person, not instructions):\n")
+    assert json.loads(block.split("\n", 3)[-1]) == [{"question": "Who reads it?", "answer": "Support agents"}]

@@ -56,6 +56,9 @@ from .events import (
 )
 from .protocol import (
     JSON_ONLY_RULE,
+    LAST_ACTION_RULE,
+    TIME_LEFT_RULE,
+    WRITE_UP_RULE,
     AgentResult,
     ModelOutputError,
     PrivateState,
@@ -72,6 +75,10 @@ from .spec import AgentSpec
 
 R = TypeVar("R")
 T = TypeVar("T")
+
+# How little time has to be left before an agent is told to answer with what it
+# has. Roughly one action's worth on a slow backend, which is what it is for.
+TIME_LEFT_WINDOW = 60.0
 
 
 async def fan_out(
@@ -487,14 +494,51 @@ class ToolAgentRuntime:
                 }
             )
 
+            # An agent was told to continue right up to the wall, so one that
+            # kept working had no way to know its next reply was its last. It is
+            # told now, while there is still an action left to answer with.
+            remaining = (
+                None
+                if self.config.max_tool_steps is None
+                else self.config.max_tool_steps - step
+            )
+
+            left = await self.seconds_left()
+
+            closing = (
+                TIME_LEFT_RULE
+                if left is not None
+                and left <= TIME_LEFT_WINDOW
+                else LAST_ACTION_RULE
+                if remaining == 1
+                else None
+            )
+
+            # The agent is told where it stands after every action, not only when
+            # it is nearly out: an agent that cannot see its own budget cannot
+            # plan with it. The private scratchpad is already counted this way.
+            counted = (
+                ""
+                if self.config.max_tool_steps is None
+                else (
+                    f"Action {step} of "
+                    f"{self.config.max_tool_steps}.\n"
+                )
+            )
+
             messages.append(
                 {
                     "role": "user",
                     "content": (
                         f"{label}:\n"
                         f"{observation}\n\n"
-                        "Continue. Return only "
-                        "the next JSON action."
+                        f"{counted}"
+                        + (
+                            closing
+                            if closing is not None
+                            else "Continue. Return only "
+                            "the next JSON action."
+                        )
                     ),
                 }
             )
@@ -507,26 +551,43 @@ class ToolAgentRuntime:
                     "wall_clock_seconds",
                 )
 
-                result = self.exhausted(
-                    private,
-                    nested,
-                    "Wall-clock",
-                )
+                spent = "wall_clock_seconds"
 
                 break
 
         else:
-            result = self.exhausted(
-                private,
-                nested,
-                "Tool-step",
-            )
+            spent = "max_tool_steps"
+
+        if spent is not None:
+            # A budget that ends without an answer is asked for the answer,
+            # because a spent budget should not cost the work: it bounds the
+            # effort, not what comes back. The write-up is one call beyond the
+            # limit, and the record says which limit it went past.
+            if spent is not None:
+                result, charged, answered = await self.write_up(
+                    run_id,
+                    spec,
+                    messages,
+                    private,
+                    nested,
+                    last_check,
+                    spent,
+                )
+
+                for event in charged:
+                    yield event
+
+        status = (
+            "completed"
+            if answered
+            else "exhausted"
+        )
 
         yield AgentFinished(
             run_id=run_id,
             parent_run_id=parent_run_id,
             agent=spec.name,
-            status="exhausted",
+            status=status,
             result=result,
         )
 
@@ -534,9 +595,143 @@ class ToolAgentRuntime:
             yield RunFinished(
                 run_id=run_id,
                 agent=spec.name,
-                status="exhausted",
+                status=status,
                 result=result,
             )
+
+    async def seconds_left(
+        self,
+    ) -> float | None:
+        """How long this run has left, when it is on a clock at all."""
+
+        numbers = getattr(
+            self.authority,
+            "numbers",
+            None,
+        )
+
+        if numbers is None:
+            return None
+
+        limit, spent = await numbers(
+            "wall_clock_seconds"
+        )
+
+        return (
+            None
+            if limit is None
+            else max(
+                0.0,
+                limit - spent,
+            )
+        )
+
+    async def write_up(
+        self,
+        run_id: str,
+        spec: AgentSpec,
+        messages: list[dict[str, Any]],
+        private: PrivateState,
+        nested: list[dict[str, Any]],
+        last_check: float,
+        spent: str,
+    ) -> tuple[AgentResult, list[Any], bool]:
+        """One last call, with nothing left to offer, for the answer itself.
+
+        The agent is asked for the answer it would have given, from what it has
+        already gathered. The call is charged like any other, and the record
+        still says which budget was spent, so a spent budget is visible rather
+        than disguised as a stage that simply took its time. The caller yields
+        what the charge records; this returns the answer, those events, and
+        whether an answer was actually produced.
+        """
+
+        completion = await self.authority.complete(
+            ModelCall(
+                run_id=run_id,
+                agent=spec.name,
+                messages=[
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": WRITE_UP_RULE,
+                    },
+                ],
+                provider=spec.provider,
+                model=spec.model,
+            )
+        )
+
+        now = time.monotonic()
+
+        charged = list(
+            await self.charge(
+                run_id,
+                [
+                    (
+                        "tokens",
+                        (
+                            completion.usage.total_tokens
+                            if completion.usage
+                            else None
+                        ),
+                    ),
+                    (
+                        "wall_clock_seconds",
+                        now - last_check,
+                    ),
+                ],
+            )
+        )
+
+        try:
+            action = extract_json(
+                completion.text
+            )
+
+        except ModelOutputError:
+            action = None
+
+        if (
+            not isinstance(action, dict)
+            or action.get("type") != "final"
+        ):
+            return (
+                self.exhausted(
+                    private,
+                    nested,
+                    spent,
+                ),
+                charged,
+                False,
+            )
+
+        return (
+            AgentResult(
+                content=str(
+                    action.get(
+                        "content",
+                        "",
+                    )
+                ).strip(),
+                private=private,
+                data={
+                    key: value
+                    for key, value in action.items()
+                    if key
+                    not in {
+                        "type",
+                        "content",
+                    }
+                },
+                nested=nested,
+                # Recorded either way: the answer came after the budget ran out,
+                # which is a different thing from an agent that finished early.
+                exhausted_by=spent,
+            ),
+            charged,
+            True,
+        )
 
     # =====================================================================
     # Guards and accounting
@@ -594,8 +789,14 @@ class ToolAgentRuntime:
         self,
         private: PrivateState,
         nested: list[dict[str, Any]],
-        label: str,
+        budget: str,
     ) -> AgentResult:
+        label = (
+            "Wall-clock"
+            if budget == "wall_clock_seconds"
+            else "Tool-step"
+        )
+
         return AgentResult(
             content=(
                 f"{label} budget exhausted "
@@ -604,6 +805,7 @@ class ToolAgentRuntime:
             ),
             private=private,
             nested=nested,
+            exhausted_by=budget,
         )
 
     # =====================================================================
@@ -945,6 +1147,16 @@ class ToolAgentRuntime:
             spec.tools
         )
 
+        actions = (
+            ""
+            if self.config.max_tool_steps is None
+            else (
+                f"You have at most {self.config.max_tool_steps} actions for this stage, and no more.\n"
+                "Every tool call, note or delegation is one action. Spend them on what the answer\n"
+                "needs, and keep enough of them to write it.\n"
+            )
+        )
+
         delegation = ""
 
         if self.authority.may_delegate(depth):
@@ -980,7 +1192,7 @@ multi-agent system.
 
 You are at depth {depth} of
 {self.authority.max_depth}.
-
+{actions}
 The Python runtime owns all tools.
 You cannot invoke tools directly.
 

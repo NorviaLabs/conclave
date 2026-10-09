@@ -89,7 +89,7 @@
 .workbench-plan .canvas-viewport{touch-action:none}
 .goal-summary{background:var(--rail);border:1px solid var(--line);padding:18px;border-radius:8px;margin-bottom:20px}.goal-summary p{white-space:pre-wrap}.goal-section-title{margin-top:24px}.goal-summary+.field{margin-bottom:24px}
 .graph-canvas .canvas-flow{position:relative;margin:0;padding:0;max-width:none}.graph-canvas .plan-node{position:absolute;width:var(--node-width,350px);height:var(--node-height,220px);margin:0;box-sizing:border-box;overflow:auto}.graph-canvas .canvas-edges{position:absolute;top:0;left:0;pointer-events:none;color:var(--mint);overflow:visible}.graph-canvas .plan-move-actions{display:none}.graph-canvas .step-summary>strong{font-size:16px}.graph-canvas .step-instructions{-webkit-line-clamp:1}.graph-canvas .step-connections{display:flex;gap:12px;align-items:center;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.step-connections small{font-size:12px;color:var(--dim);margin-left:auto}.connection-prompt{font-size:14px;padding:12px 18px;background:var(--panel);color:var(--mint);display:flex;gap:16px}.graph-canvas .plan-node .step-tool-chips{display:none}
-.graph-canvas .plan-node{display:flex;flex-direction:column;overflow:visible}.graph-canvas .plan-node-head{flex-shrink:0}.graph-canvas .step-summary{flex:1;min-height:0;overflow:auto}.graph-canvas .step-connections{flex-shrink:0}.graph-canvas .plan-number{display:none}
+.graph-canvas .plan-node{display:flex;flex-direction:column;overflow:visible}.graph-canvas .plan-node-head{flex-shrink:0;flex-wrap:wrap;row-gap:2px}.graph-canvas .step-summary{flex:1;min-height:0;overflow:auto}.graph-canvas .step-connections{flex-shrink:0}.graph-canvas .plan-number{display:none}
 .connector-row{padding:1.25rem 0;border-top:1px solid var(--border,#dce0e6)}.connector-row .kind-tag{margin-bottom:1rem}
 /* Focused workspace: details appear where they are needed. */
 [hidden]{display:none!important}.application-header{padding:24px 30px 12px;align-items:center}.application-header h1{font-size:26px}.application-header .eyebrow{display:none}.main{padding:24px 30px 40px}.rail{gap:20px}.nav .nav-meta{font-family:var(--sans);font-size:12px}.save-state{font-family:var(--sans)}
@@ -113,10 +113,13 @@
 .graph-canvas .canvas-flow.canvas-drop-over{outline:1px dashed var(--mint);outline-offset:6px;border-radius:8px}
 .graph-canvas .canvas-edge .edge-line{fill:none;stroke:currentColor;stroke-width:2}
 .graph-canvas .canvas-edge .edge-hit{fill:none;stroke:transparent;stroke-width:22;pointer-events:stroke;cursor:pointer}
+.graph-canvas .canvas-edge:focus-visible{outline:none}
+.graph-canvas .canvas-edge:focus-visible .edge-line{stroke:var(--mint);stroke-width:2.5}
 .graph-canvas .canvas-edge.selected .edge-line{stroke:var(--mint);stroke-width:3}
 .graph-canvas .edge-preview{fill:none;stroke:var(--mint);stroke-width:2;stroke-dasharray:6 5}
-.canvas-edge-remove{position:absolute;width:24px;height:24px;margin:-12px 0 0 -12px;padding:0;border:1.5px solid var(--mint);border-radius:50%;background:var(--bg);color:var(--mint);font-size:15px;line-height:1;cursor:pointer;z-index:3}
-.canvas-edge-remove:hover,.canvas-edge-remove:focus-visible{background:var(--mint);color:var(--bg)}
+.canvas-edge-handle{position:absolute;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin:-13px 0 0 -13px;padding:0;border:1.5px solid var(--mint);border-radius:50%;background:var(--bg);color:var(--mint);cursor:pointer;z-index:4}
+.canvas-edge-handle:hover,.canvas-edge-handle:focus-visible{background:var(--mint);color:var(--bg);outline:2px solid var(--mint);outline-offset:2px}
+.canvas-edge-handle .ui-icon{width:16px;height:16px}
 .graph-canvas .canvas-edge .edge-label{fill:var(--muted);font:11px var(--mono);text-anchor:middle}
 /* In the run canvas the line is quieter: the label on it carries the meaning. */
 .graph-canvas .canvas-edge.run-edge .edge-line{stroke:#4b6b56}
@@ -131,7 +134,7 @@
 @media(max-width:1200px){.run-workbench-layout{grid-template-columns:minmax(0,1fr)}}
 .graph-canvas .run-node .step-summary{display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;cursor:pointer}
 .graph-canvas .run-node .step-summary[aria-pressed="true"]{color:var(--text)}
-.run-node-status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:12px;color:var(--muted)}
+.run-node-status{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px;margin-left:auto;font-size:12px;color:var(--muted);text-align:right}
 .run-node-status i{width:9px;height:9px;border-radius:50%;border:1px solid var(--line);background:var(--panel2)}
 .run-node-status[data-status="ready"] i{border-color:var(--mint)}
 .run-node-status[data-status="working"] i{background:var(--mint);border-color:var(--mint)}
@@ -144,7 +147,7 @@
 .graph-canvas .run-node .run-handed{color:var(--mint)}
 /* What runs a step: a quiet chip, because it is a fact about the step rather
    than a control on the canvas. */
-.step-backend{font:11px var(--mono);color:var(--dim);margin-top:2px}
+.step-backend{display:block;font:11px var(--mono);color:var(--dim);margin-top:2px;overflow-wrap:anywhere}
 .role-backend{border:0;margin:10px 0 0;padding:0}
 .role-backend legend{font:11px var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.06em;padding:0 0 6px}
 .run-subagent{position:absolute;width:210px;padding:10px 12px;border:1px dashed var(--amber);border-radius:8px;background:var(--panel);font-size:13px}
@@ -213,16 +216,14 @@
 .graph-canvas .run-node[data-status].selected{outline:2px solid var(--text);outline-offset:4px}
 .run-node[data-status] .run-node-status{color:var(--run-color,var(--muted));font-weight:600}
 .run-node[data-status] .run-node-status i{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border:1px solid currentColor;background:transparent;font:700 12px/1 var(--sans);flex-shrink:0}
-.run-node[data-status="working"] .run-node-status i{border:2px solid currentColor;border-right-color:transparent;animation:run-working-spin .8s linear infinite}
 .run-node[data-status="complete"] .run-node-status i::after{content:'✓'}
 .run-node[data-status="failed"] .run-node-status i::after{content:'×'}
 .run-node[data-status="needs-input"] .run-node-status i::after{content:'!'}
 .run-node[data-status].stale .run-node-status i{animation:none;border:1px solid currentColor}
 .run-node[data-status].stale .run-node-status i::after{content:'!'}
-@keyframes run-working-spin{to{transform:rotate(360deg)}}
 @keyframes run-working-glow{0%,100%{box-shadow:0 0 0 2px #365fc018}50%{box-shadow:0 0 0 7px #365fc033}}
 .step-output.produced{color:var(--mint)}
-@media (prefers-reduced-motion:reduce){.run-node[data-status="working"],.run-node[data-status="working"] .run-node-status i{animation:none}}
+@media (prefers-reduced-motion:reduce){.run-node[data-status="working"]{animation:none}}
 /* The rail is navigation, not a view: slim by default, opened on approach. */
 /* Collapsed means icons: a label is hidden, never clipped in half. */
 .rail{position:relative;padding:14px 8px}
@@ -334,7 +335,7 @@
 .canvas-first-plan .workbench-plan{width:100%;overflow:visible;border-radius:12px;background:var(--panel)}
 .canvas-first-plan .workbench-plan .canvas-heading{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;font-size:13px}
 .canvas-first-plan .workbench-plan .canvas-viewport{min-height:260px;border-radius:12px 12px 0 0}
-.canvas-first-plan .canvas-dock{left:0;right:0;bottom:-56px;transform:none;border:1px solid var(--line);border-radius:0 0 12px 12px;min-height:56px;justify-content:center;box-shadow:none;background:var(--panel)}
+.canvas-first-plan .canvas-dock{bottom:16px;border-radius:10px;min-height:0;box-shadow:0 6px 22px #252a3426;background:var(--panel)}
 .canvas-first-plan .canvas-dock button{white-space:nowrap}
 .canvas-first-plan .canvas-view{left:auto;right:16px;bottom:16px}
 .canvas-first-plan .workbench-resources,.canvas-first-plan .workbench-inspector,.plan-assistant-panel,.plan-readiness-panel{position:absolute;right:12px;top:48px;bottom:12px;width:min(420px,calc(100% - 24px));max-height:none;overflow:auto;overscroll-behavior:contain;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px #252a3420;z-index:8;padding:18px}
@@ -342,7 +343,7 @@
 .canvas-first-plan .workbench-inspector[hidden],.canvas-first-plan .workbench-resources[hidden]{display:none}
 .plan-assistant-panel .plan-assistant{padding:0;border:0;margin:12px 0}
 .plan-assistant-panel>button,.plan-readiness-panel>button{display:block;margin-left:auto}
-.canvas-first-plan .plan-node .step-backend,.canvas-first-plan .plan-node .step-tool-chips{display:none}
+.canvas-first-plan .plan-node .step-tool-chips{display:none}
 .canvas-first-plan .plan-node .step-summary strong{font-size:18px}
 .canvas-first-plan .plan-node .step-summary{gap:12px}
 .canvas-first-plan .plan-node .step-member{order:1}
@@ -355,7 +356,6 @@
 .step-validation{font-size:13px;line-height:1.5;padding-left:18px;color:var(--amber)}
 .shared-member-note{line-height:1.5;font-size:13px;padding:10px;background:var(--panel2);border-radius:8px}
 .inspector-context-actions{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
-.canvas-edge-insert{position:absolute;z-index:3;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text)}
 .plan-readiness-panel li{margin-bottom:16px;line-height:1.5}
 .plan-readiness-panel p{font-size:13px}
 .plan-assistant-panel pre,.plan-readiness-panel pre,.workbench-inspector pre{white-space:pre-wrap;overflow-wrap:anywhere}
@@ -381,3 +381,97 @@
 .plan-node:has(.node-proposed){outline:2px dashed var(--mint);outline-offset:3px}
 .plan-workbench:fullscreen{height:100dvh;background:var(--bg);padding:12px}
 .plan-workbench:fullscreen .canvas-viewport{height:calc(100dvh - 120px)!important}
+
+.integration-manager{max-width:760px;max-height:75dvh;overflow:auto;padding:10px}
+.integration-manager label{display:block;margin:12px 0;font-size:14px}
+.integration-manager input:not([type=checkbox]){display:block;width:100%;margin-top:5px;padding:9px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--text)}
+.integration-catalogue details{padding:12px;border-bottom:1px solid var(--line)}
+.integration-catalogue details[hidden]{display:none}
+.integration-catalogue summary{cursor:pointer;font-weight:600}
+.integration-manager p{font-size:13px;line-height:1.5;color:var(--muted)}
+.integration-manager fieldset{border:1px solid var(--line);border-radius:8px}
+.integration-manager article{padding:12px 0;border-bottom:1px solid var(--line)}
+.tool-approval-panel{position:fixed;right:16px;bottom:80px;z-index:25;width:min(460px,calc(100vw - 32px));max-height:65dvh;overflow:auto;padding:18px;background:var(--panel);border:2px solid var(--amber);border-radius:14px;box-shadow:0 12px 40px #252a3440}
+.tool-approval-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto}
+.goal-refinement{margin:12px 0;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.goal-refinement h3{margin:0 0 6px;font-size:15px}
+.goal-refinement .row-actions{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
+
+/* Icon-only controls keep a word-free face, a real hit area, and their name in
+   the hovertext. A label a person cannot see still has to be reachable. */
+.button.icon-only,.text-button.icon-only,.icon-button{display:inline-flex;align-items:center;justify-content:center;gap:0;min-width:36px;min-height:36px;padding:0}
+.text-button.icon-only{min-width:32px;min-height:32px}
+.canvas-action .ui-icon,.canvas-view .ui-icon{width:17px;height:17px}
+.activity-latest .ui-icon{width:15px;height:15px;margin-left:4px}
+.inspector-close .ui-icon{width:17px;height:17px}
+
+/* The canvas is the page, so it takes the whole height the page has left: the
+   shell fills the window, and every wrapper between it and the viewport passes
+   the space down. No fixed height to go stale, no dead band under the graph. */
+.canvas-first-plan .shell{height:100dvh;min-height:0}
+.canvas-first-plan .workspace{display:flex;flex-direction:column;min-height:0}
+.canvas-first-plan .main{flex:1;min-height:0;display:flex;flex-direction:column}
+.canvas-first-plan .plan-workbench.calm-workbench{display:flex;flex-direction:column;flex:1;height:auto;min-height:0}
+.canvas-first-plan .workbench-plan{flex:1;min-height:0}
+.canvas-first-plan .workbench-plan .canvas-viewport{flex:1;height:100%}
+
+/* The run controller is the canvas action bar, floating over the graph: start,
+   pause, stop and the one thing the run is waiting for, in one place. */
+.run-controller{position:absolute;left:50%;bottom:calc(var(--activity-height,48px) + 18px);transform:translateX(-50%);z-index:5;gap:4px;padding:6px;box-shadow:0 6px 22px #252a3426}
+.run-controller .canvas-action{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:42px;min-height:40px;padding:0 12px;font-weight:600}
+.run-controller .canvas-action.primary{background:var(--mint);color:#fff}
+.run-controller .canvas-action.primary:hover,.run-controller .canvas-action.primary:focus-visible{background:var(--mint);color:#fff;filter:brightness(1.08)}
+.run-controller .canvas-action.stop{color:var(--red)}
+.run-controller .canvas-action.stop:hover,.run-controller .canvas-action.stop:focus-visible{background:#f6e6e4;color:var(--red)}
+.run-controller .canvas-action[disabled]{opacity:.45;cursor:not-allowed}
+.run-controller .ui-icon{width:19px;height:19px}
+.canvas-dock-separator{width:1px;height:22px;margin:0 4px;background:var(--line)}
+/* A control that cannot act yet stays in place, greyed, with the reason in its
+   hovertext: the bar never changes shape under a person's hands. */
+.canvas-dock{cursor:grab;touch-action:none}
+.canvas-dock.dragging{cursor:grabbing;z-index:7;box-shadow:0 10px 30px #252a3433}
+.canvas-dock .ui-icon{width:18px;height:18px}
+.canvas-dock-grip{display:inline-flex;align-items:center;justify-content:center;width:14px;color:var(--dim);cursor:grab}
+.canvas-dock-grip .ui-icon{width:16px;height:16px}
+.canvas-dock-group{display:inline-flex;align-items:center;gap:4px}
+.canvas-dock .canvas-action[disabled]{opacity:.4;cursor:not-allowed}
+.canvas-dock .canvas-action[disabled]:hover{background:transparent;color:inherit}
+@media (max-width:720px){.run-controller{bottom:calc(var(--activity-height,48px) + 12px);padding:4px}.run-controller .canvas-action{min-width:38px;min-height:36px;padding:0 9px}}
+
+/* The canvas context menu: a floating list of what belongs to the step,
+   connection or background that was pressed. */
+.canvas-menu-host{position:fixed;inset:0;z-index:40;pointer-events:none}
+.canvas-menu{position:fixed;min-width:210px;max-width:300px;padding:6px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:0 14px 40px #252a3433,0 2px 6px #252a341a;pointer-events:auto}
+.canvas-menu-item{display:flex;width:100%;padding:9px 12px;border:0;border-radius:7px;background:transparent;color:var(--text);font-size:14px;text-align:left}
+.canvas-menu-item:hover,.canvas-menu-item:focus-visible{background:var(--panel2);color:var(--mint);outline:none}
+.canvas-menu-item[disabled]{color:var(--dim);opacity:.55;cursor:not-allowed}
+.canvas-menu-item[disabled]:hover{background:transparent;color:var(--dim)}
+.canvas-menu-item.destructive{color:var(--red)}
+.canvas-menu-item.destructive:hover,.canvas-menu-item.destructive:focus-visible{background:#f6e6e4;color:var(--red)}
+.canvas-menu-separator{display:block;height:1px;margin:5px 8px;background:var(--line)}
+@media (max-width:720px){.canvas-menu{min-width:190px}.canvas-menu-item{padding:11px 12px}}
+
+/* The signed-in account, in the rail foot. Only a deployment with a login shows
+   it; a local host has one operator and nothing to sign out of. */
+.account{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.account .rail-icon{color:var(--muted)}
+.account-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--muted)}
+.rail:not(.open) .account{flex-direction:column;gap:6px}
+
+/* The sign-in screen: one explanation and one way in. */
+.sign-in{max-width:520px;margin:12vh auto;text-align:center}
+.sign-in h1{font-size:26px}
+.sign-in p{margin:0 auto 16px;max-width:44ch;color:var(--muted)}
+.sign-in .button{text-decoration:none;display:inline-block}
+
+/* Waiting on one model call: a moving indicator and the elapsed time, which is
+   the only progress a single call can honestly report. */
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--line,#c9c2b8);border-top-color:var(--ink,#2c2a26);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spinner{animation:none}}
+.proposal-progress{display:flex;flex-direction:column;gap:6px;align-items:flex-start;padding:14px 16px;border:1px solid var(--line,#c9c2b8);border-radius:10px;background:var(--panel,#fbf9f6)}
+.proposal-progress p{margin:0}
+.proposal-progress .spinner{width:16px;height:16px;border-width:2px;margin-bottom:2px}
+.chosen-team{width:100%}
+.chosen-team ul{margin:4px 0 0;padding-left:18px}
+.chosen-team li{margin:2px 0}

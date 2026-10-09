@@ -128,11 +128,29 @@ from `runtime.profile` — a host that reports no profile is treated as local.
 - Tenant headers are never trusted on their own. A deployment supplies
   `principal_for` to map a caller *it* verified to a tenant; without one, the
   host serves its own tenant and a caller naming another changes nothing.
+- `conclave serve --hosted` runs this same adapter on a loopback address, so
+  identity, origins and framing can be exercised here before anything is
+  deployed. The socket layer is the one already in `conclave/api.py`; the adapter
+  owns everything else, including which origins may call it.
+- `conclave/identity.py`: Google sign-in a deployment can switch on, for the case
+  the bearer token cannot serve — a browser. It reuses the integration
+  `Transport` (approved hosts, pinned address, no redirects, size cap) and the
+  same PKCE construction, and adds ID-token verification plus a signed session
+  cookie. A verified address becomes the principal; the tenant comes from the
+  login file and never from the request, and only addresses the file admits may
+  sign in at all. Off unless `CONCLAVE_GOOGLE_LOGIN_FILE` and
+  `CONCLAVE_SESSION_KEY` are both set, so the local adapter is untouched.
+  Redirect URIs are exact and HTTPS, except on a loopback address, which is the
+  one case Google exempts; `after_login` and `same_site` describe a page served
+  from another origin.
 
 Still open in this area — do not treat it as finished:
 
-- Real user authentication and per-user authorization *inside* a tenant. The
-  adapter assumes the deployment authenticates callers, or uses a shared token.
+- Per-user authorization *inside* a tenant. Sign-in establishes who a person is
+  and which tenant they read; everyone in a tenant still sees that tenant's
+  applications and runs, and there are no roles beyond that.
+- Sessions cannot be revoked individually before they expire, and signing out
+  ends this deployment's session rather than the person's Google session.
 - A managed-database implementation of the two protocols; SQLite per tenant is
   the only implementation today.
 - Per-tenant resources and connector credentials: source folders are still

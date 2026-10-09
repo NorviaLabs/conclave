@@ -1,5 +1,6 @@
-import {canvasMarkup,canvasStepMarkup} from '/canvas-ui.js';
+import {canvasMarkup,canvasStepMarkup,canvasDockMarkup,uiIcon} from '/canvas-ui.js';
 import {activityDockMarkup} from '/run-activity.js';
+import {backendLabel,stepBackendLabel} from '/definition.js';
 // The run canvas: the same run the work plan lists, drawn on the plan's canvas,
 // with the exchanges between agents on the edges.
 //
@@ -93,7 +94,31 @@ function delegationCurve(from,to){const x1=from.x+canvasNodeWidth,y1=from.y+canv
 // The canvas itself: a node per step, a sub-agent per delegation, an edge per
 // handoff and per delegation. Edges are SVG; nodes are HTML, because a <section>
 // inside an <svg> would not render.
-export function runCanvasMarkup(d,run,selectedId,{escape:e,agentName,outputName,capabilityName,zoom=1,backends=[],activityExpanded=false,activityFilter='',followActive=true}){
+// What a step that is working is doing, and for how long. The clock comes from
+// the record's own timestamps, so a reload does not restart it, and the
+// activities are the ones the run has recorded for this step.
+export function runStepWorking(run,stageId,now=Date.now()){
+  const events=(run?.events||[]).filter(event=>event.stage===stageId);
+  const started=events.findLast(event=>event.type==='StageStarted');
+  if(!started||!['pending','running'].includes(run?.mode))return null;
+  if(events.some(event=>['RunFinished','ApplicationStateChanged','ApplicationFinished'].includes(event.type)))return null;
+  const tools=events.filter(event=>event.type==='ToolCalled');
+  const since=started.timestamp?Date.parse(started.timestamp):NaN;
+  return {seconds:Number.isNaN(since)?null:Math.max(0,Math.round((now-since)/1000)),
+          tools:tools.length,
+          failed:tools.filter(event=>event.ok===false).length,
+          last:tools.at(-1)||null};
+}
+// The line a working step shows: how long, how much, and the last thing it did.
+export function runStepWorkingText(working,capabilityName){
+  if(!working)return '';
+  const minutes=Math.floor(working.seconds/60),seconds=working.seconds%60;
+  const elapsed=working.seconds===null?'':' for '+(minutes?`${minutes}m ${seconds}s`:`${seconds}s`);
+  const calls=working.tools?` · ${working.tools} tool call${working.tools===1?'':'s'}${working.failed?` (${working.failed} failed)`:''}`:'';
+  const last=working.last?` · last ${capabilityName(working.last.tool)}${working.last.ok===false?' failed':''}`:'';
+  return `Working${elapsed}${calls}${last}`;
+}
+export function runCanvasMarkup(d,run,selectedId,{escape:e,agentName,outputName,capabilityName,zoom=1,backends=[],provider='',activityExpanded=false,activityFilter='',followActive=true,controls='',now=Date.now(),toolsDisabled=false}){
   const positions=canvasPositions(d),links=planConnections(d),delegations=runDelegations(run),handoffs=runHandoffs(d,run);
   // Results recorded against a plan that has since changed are marked, not hidden.
   const stale=staleRunSteps(run.definition,d);
@@ -107,17 +132,30 @@ export function runCanvasMarkup(d,run,selectedId,{escape:e,agentName,outputName,
   const nodes=d.workflow.map((step,index)=>{
     const agent=d.agents.find(item=>item.id===step.agent)||{name:step.agent,tools:[],kind:'ai'},human=agent.kind==='human',status=runStepStatus(d,run,index);
     const outOfDate=stale.has(step.id),produced=runProduced(d,run,step,index);
-    return canvasStepMarkup({id:step.id,index,human,selected:selectedId===step.id,position:positions[step.id],escape:e,mode:'run',status:runStatusClass(status),stale:outOfDate,header:`<span class="run-node-status" data-status="${e(runStatusClass(status))}"${outOfDate?' title="This result came from an earlier version of the plan"':''}><i></i>${outOfDate?'Out of date':e(status)}</span>`,content:`<button class="step-summary" data-run-step="${e(step.id)}" aria-pressed="${selectedId===step.id}"><strong>${e(step.name)}</strong><span class="step-output ${produced?'produced':''}"${produced?.title?` title="${e(produced.title)}"`:''}>${produced?e(produced.text):`Produces ${e(outputName(d,step.output))}`}</span><span class="step-member"><span class="role-symbol small" aria-hidden="true">${e(agent.name.slice(0,1))}</span><span>${e(agentName(d,step.agent))}</span></span></button>`});
+    // A step that is working says what it is doing in the status it already has,
+    // at the top of the card: how long it has been working and the last thing the
+    // record shows it doing, so a long call looks like work rather than a stall.
+    // One place, not two: the same words twice on one card is noise.
+    const working=runStepWorking(run,step.id,now),workingText=runStepWorkingText(working,capabilityName);
+    // What the run recorded for this step, when it recorded anything: a step that
+    // ran on the host's default has nothing of its own to report.
+    const [ranProvider,ranModel]=runBackends(run).get(step.id)||[];
+    const recorded=ranProvider||ranModel?backendLabel(backends,ranProvider,ranModel):'';
+    const state=outOfDate?'Out of date':workingText||status;
+    // Not a live region: this text changes every second while a step works, and a
+    // screen reader that announced each change would say nothing else.
+    const note=outOfDate?'This result came from an earlier version of the plan':workingText;
+    return canvasStepMarkup({id:step.id,index,human,selected:selectedId===step.id,position:positions[step.id],escape:e,mode:'run',status:runStatusClass(status),stale:outOfDate,header:`<span class="run-node-status" data-status="${e(runStatusClass(status))}"${note?` title="${e(note)}"`:''}><i aria-hidden="true"></i>${e(state)}</span>`,content:`<button class="step-summary" data-run-step="${e(step.id)}" aria-pressed="${selectedId===step.id}"><strong>${e(step.name)}</strong><span class="step-output ${produced?'produced':''}"${produced?.title?` title="${e(produced.title)}"`:''}>${produced?e(produced.text):`Produces ${e(outputName(d,step.output))}`}</span><span class="step-member"><span class="role-symbol small" aria-hidden="true">${e(agent.name.slice(0,1))}</span><span>${e(agentName(d,step.agent))}</span></span><span class="step-backend" title="${recorded?`Runs on ${e(recorded)}`:'Runs on'}">${e(recorded||stepBackendLabel(backends,provider,step,agent))}</span></button>`});
   }).join('');
-  return `<section class="run-workbench"><div class="canvas-heading"><span>${agents} agents${delegated?` · ${delegated} delegations`:''}${stale.size?` · ${stale.size} results out of date`:''}</span><button class="text-button" data-action="follow-active" aria-pressed="${followActive}">Follow active step ${followActive?'on':'off'}</button></div>${canvasMarkup({mode:'run',width:boardWidth,height:boardHeight,metrics,edges:flowArrow+edges+delegationEdges.join(''),overlay:subagentNodes.join(''),nodes,zoom})}${activityDockMarkup(d,run,{escape:e,agentName,capabilityName,expanded:activityExpanded,filter:activityFilter})}</section>`;
+  return `<section class="run-workbench"><div class="canvas-heading"><span>${agents} agents${delegated?` · ${delegated} delegations`:''}${stale.size?` · ${stale.size} results out of date`:''}</span><button class="text-button" data-action="follow-active" aria-pressed="${followActive}">Follow active step ${followActive?'on':'off'}</button></div>${canvasMarkup({mode:'run',width:boardWidth,height:boardHeight,metrics,edges:flowArrow+edges+delegationEdges.join(''),overlay:subagentNodes.join(''),nodes,zoom,dock:controls?canvasDockMarkup({controller:controls,toolsDisabled}) :canvasDockMarkup({toolsDisabled:false})})}${activityDockMarkup(d,run,{escape:e,agentName,capabilityName,expanded:activityExpanded,filter:activityFilter})}</section>`;
 }
 
 // The run workbench: the canvas, with the selected step's record on demand. A
 // definition that cannot be laid out (a loop saved before connections were
 // checked) falls back to the work plan list rather than showing nothing.
-export function runProgressMarkup(d,run,selectedId,{list='',detail='',zoom=1,escape,agentName,outputName,capabilityName,backends=[],activityExpanded=false,activityFilter='',followActive=true}){
+export function runProgressMarkup(d,run,selectedId,{list='',detail='',zoom=1,escape,agentName,outputName,capabilityName,backends=[],provider='',activityExpanded=false,activityFilter='',followActive=true,controls='',toolsDisabled=false}){
   try{
-    return `<div class="run-workbench-layout">${runCanvasMarkup(d,run,selectedId,{escape,agentName,outputName,capabilityName,zoom,backends,activityExpanded,activityFilter,followActive})}${selectedId?`<div class="run-inspector-drawer" role="complementary" aria-label="Step details"><button class="button inspector-close" data-action="close-run-inspector" aria-label="Close step details">Close ×</button>${detail}</div>`:''}</div>`;
+    return `<div class="run-workbench-layout">${runCanvasMarkup(d,run,selectedId,{escape,agentName,outputName,capabilityName,zoom,backends,provider,activityExpanded,activityFilter,followActive,controls,toolsDisabled})}${selectedId?`<div class="run-inspector-drawer" role="complementary" aria-label="Step details"><button class="text-button inspector-close" data-action="close-run-inspector" title="Close step details" aria-label="Close step details">${uiIcon('close')}</button>${detail}</div>`:''}</div>`;
   }catch(error){
     return `${list}<p class="version-note">The canvas cannot draw this plan: ${escape(error.message)}</p>`;
   }

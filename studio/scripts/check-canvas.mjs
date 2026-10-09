@@ -16,14 +16,15 @@ const load = async (path, replacements = []) => {
   return 'data:text/javascript,' + encodeURIComponent(source);
 };
 const shared = url('../shared/definition.js'), catalogue = url('../shared/catalogue.js');
-const runCanvasUrl = await load('../web/run-canvas.js', [['/definition.js', shared], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', url('../web/run-activity.js')]]);
+const activityUrl = await load('../web/run-activity.js', [['/canvas-ui.js', url('../web/canvas-ui.js')]]);
+const runCanvasUrl = await load('../web/run-canvas.js', [['/definition.js', shared], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', activityUrl]]);
 const planUrl=await load('../web/plan.js', [['/definition.js', shared]]);
-const workbenchUrl = await load('../web/workbench-ui.js', [['/plan.js',planUrl], ['/catalogue.js', catalogue], ['/definition.js', shared], ['/run-canvas.js', runCanvasUrl], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', url('../web/run-activity.js')]]);
+const workbenchUrl = await load('../web/workbench-ui.js', [['/plan.js',planUrl], ['/catalogue.js', catalogue], ['/definition.js', shared], ['/run-canvas.js', runCanvasUrl], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', activityUrl]]);
 
 const {emptyDefinition, initialState, validateDefinition, canvasPositions, planShape, setCanvasMetrics, staleRunSteps, stageBackend, backendOptions, backendModels, backendIssue, backendLabel, defaultBackend} = await import(shared);
-const {projectLiveRun} = await import(await load('../web/live.js', [['/definition.js', shared]]));
+const {projectLiveRun} = await import(await load('../web/live.js', [['/definition.js', shared], ['/canvas-ui.js', url('../web/canvas-ui.js')]]));
 const {runCanvasMarkup, runProgressMarkup, runStepStatus, runToolCalls, runDelegations, runHandoffs, payloadLabel, runBackends} = await import(runCanvasUrl);
-const {workbenchMarkup, executionPlanMarkup, executionDetailMarkup, canvasEdgePaths, canvasEdgeRemove} = await import(workbenchUrl);
+const {workbenchMarkup, executionPlanMarkup, executionDetailMarkup, canvasEdgePaths, canvasEdgeHandle} = await import(workbenchUrl);
 const {connectPlanSteps, disconnectPlanSteps, insertPlanStep, moveCanvasStep, layoutSaveDefinition} = await import(await load('../web/plan.js', [['/definition.js', shared]]));
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[character]));
 const agentName = (d, id) => d.agents.find(agent => agent.id === id)?.name || id;
@@ -36,6 +37,66 @@ const runSizing = studioSource.slice(studioSource.indexOf('function applyRunZoom
 const area = {closest:()=>({querySelector:()=>null,style:{setProperty(){}}}),clientWidth: 1800, clientHeight: 0, style: {}, getBoundingClientRect: () => ({top: 240})};
 Object.defineProperty(area.style, 'height', {set(value){area.clientHeight = parseFloat(value);}});
 const flow = {style: {width: '2800px', height: '1200px'}, closest: () => area};
+// The floating action bar is dragged with the pointer, and its position has to
+// survive the re-render that every run update triggers. Executed here against a
+// stand-in canvas, because none of it is reachable without a DOM.
+const dockCode = studioSource.slice(studioSource.indexOf('// The canvas action bar floats over the graph'), studioSource.indexOf('// The canvas context menu'));
+const dockListeners = {};
+const makeDock = () => ({
+  style: {}, offsetWidth: 320, offsetHeight: 44,
+  offsetParent: {getBoundingClientRect: () => ({left: 0, top: 0, width: 1200, height: 700})},
+  classList: {added: [], add(name) { this.added.push(name); }, remove(name) { this.added = this.added.filter(item => item !== name); }},
+  getBoundingClientRect: () => ({left: 440, top: 640}),
+  setPointerCapture() {}, releasePointerCapture() {}
+});
+const dock = makeDock();
+const dockContext = {
+  Map, Math, console, window: {innerWidth: 1200, innerHeight: 800}, currentId: 'app-a', dock,
+  $: () => ({querySelector: selector => selector === '[data-canvas-dock]' ? dockContext.dock : null, addEventListener(type, handler) { dockListeners[type] = handler; }}),
+  render() { dockContext.rendered = (dockContext.rendered || 0) + 1; }
+};
+// A top-level `const` stays in its own script scope, so the state under test is
+// published to the context on purpose.
+runInNewContext(`${dockCode}\nglobalThis.dockOffsets = dockOffsets;`, dockContext);
+const pointer = (type, x, y, onButton = false) => dockListeners[type]({pointerId: 7, button: 0, clientX: x, clientY: y,
+  target: {closest: selector => selector === '[data-canvas-dock]' ? dockContext.dock : onButton ? {button: true} : null}, preventDefault() {}});
+// A press on a button is a button press, not a drag.
+pointer('pointerdown', 500, 650, true);
+assert.deepEqual(dock.style, {}, 'pressing a button in the bar does not move it');
+pointer('pointerdown', 500, 650);
+pointer('pointermove', 560, 610);
+assert.equal(dock.style.left, '500px', 'the bar follows the pointer');
+assert.equal(dock.style.top, '600px');
+assert.equal(dock.style.transform, 'none', 'and stops being centred by the stylesheet');
+assert.equal(dock.style.bottom, 'auto');
+assert.ok(dock.classList.added.includes('dragging'), 'the press reads as a drag');
+pointer('pointerup', 560, 610);
+const kept = dockContext.dockOffsets.get('app-a');
+assert.deepEqual([kept.left, kept.top], [500, 600], 'the position is kept per application');
+// The bar is rebuilt with the canvas, so the position is re-applied after render.
+dock.style = {};
+runInNewContext('applyDockOffset()', dockContext);
+assert.equal(dock.style.left, '500px', 'a re-render puts the bar back where it was left');
+assert.equal(dock.style.top, '600px');
+// Clamped to the canvas it floats over, whatever the pointer does.
+pointer('pointerdown', 500, 600);
+pointer('pointermove', 5000, 5000);
+pointer('pointerup', 5000, 5000);
+const clamped = dockContext.dockOffsets.get('app-a');
+assert.deepEqual([clamped.left, clamped.top], [872, 648], 'the bar cannot be dragged off the canvas');
+// Another application has its own position.
+dockContext.currentId = 'app-b';
+dock.style = {};
+runInNewContext('applyDockOffset()', dockContext);
+assert.deepEqual(dock.style, {}, 'a fresh application starts with the bar where the stylesheet puts it');
+// A double-click on the bar takes it back to where it started.
+const doubleClick = () => dockListeners['dblclick']({target: {closest: selector => selector === '[data-canvas-dock]' ? dockContext.dock : null}});
+doubleClick();
+assert.equal(dockContext.rendered, undefined, 'a double-click on an unmoved bar changes nothing');
+dockContext.currentId = 'app-a';
+doubleClick();
+assert.equal(dockContext.dockOffsets.has('app-a'), false, 'double-clicking puts the bar back');
+assert.equal(dockContext.rendered, 1, 'a moved bar is redrawn in its default place');
 const level = {};
 const app = {querySelector: selector => selector.includes('canvas-flow') ? flow : selector.includes('canvas-view-level') ? level : area};
 const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0,addEventListener(){}}, canvasFitZoom, runCanvasZoom: null};
@@ -96,16 +157,20 @@ assert.match(planMarkup, /Enter on a connect port starts a connection/);
 assert.match(planMarkup, /Connecting from/, 'the click flow is still offered');
 assert.ok(!/Choose “Connect here”/.test(planMarkup), 'the prompt says what is happening, not what to click');
 
-// Edges are selectable, and only the selected one carries a remove handle.
+// Edges are selectable, and only the selected one carries the focusable handle
+// that opens the connection's actions.
 assert.equal((planMarkup.match(/data-canvas-edge="/g) || []).length, 2, 'every connection is drawn as a selectable edge');
 assert.equal((planMarkup.match(/class="edge-hit"/g) || []).length, 2, 'each edge has a wide hit area');
 assert.equal((planMarkup.match(/class="canvas-edge selected"/g) || []).length, 1, 'the selected edge is marked');
-assert.equal((planMarkup.match(/data-canvas-disconnect="/g) || []).length, 1, 'the selected edge offers one remove handle');
-assert.match(planMarkup, /<button type="button" class="canvas-edge-remove" data-canvas-disconnect="step_1" data-canvas-disconnect-to="step_2"/);
-assert.match(planMarkup, /aria-label="Remove the connection from Read the sources to Draft the brief"/);
-assert.equal(canvasEdgeRemove(plan, {}, escape, null), '', 'no handle without a selection');
+// A connection takes focus, so its actions are reachable without a mouse.
+assert.equal((planMarkup.match(/<g class="canvas-edge[^"]*" data-canvas-edge="[^"]+" tabindex="0" role="button" aria-pressed="(true|false)" aria-label="Connection from /g) || []).length, 2, 'each connection is a focusable, named button');
+assert.equal((planMarkup.match(/data-canvas-edge-menu="/g) || []).length, 1, 'the selected edge offers one handle');
+assert.match(planMarkup, /<button type="button" class="canvas-edge-handle" data-canvas-edge-menu="step_1|step_2"[^>]*title="Connection actions" aria-label="Connection actions from Read the sources to Draft the brief"/, 'and the handle is a real, named button');
+assert.ok(!/canvas-edge-remove|canvas-edge-insert|data-canvas-disconnect=/.test(planMarkup), 'the old floating remove and insert buttons are gone');
+assert.equal(canvasEdgeHandle(plan, {}, escape, null), '', 'no handle without a selection');
 const unselected = workbenchMarkup(plan, {...context, connectSource: null, selectedEdge: null});
-assert.ok(!unselected.includes('canvas-edge-remove'), 'an unselected canvas shows no remove handle');
+assert.ok(!unselected.includes('canvas-edge-handle'), 'an unselected canvas shows no handle');
+assert.equal(canvasEdgeHandle(plan, canvasPositions(plan), escape, 'step_1|step_2'), canvasEdgeHandle(plan, canvasPositions(plan), escape, 'step_1|step_2'), 'the handle is placed at the midpoint');
 assert.equal((unselected.match(/data-canvas-port="/g) || []).length, 3, 'the ports stay available while nothing is selected');
 assert.match(planMarkup, /data-canvas-mode="plan"/, 'the shared canvas renders planning mode');
 assert.ok(!/data-plan-slot|plan-drop-slot/.test(planMarkup), 'the plan is one canvas with no drop slots');
@@ -125,11 +190,14 @@ assert.match(view, /100%/, 'the level starts at 100%');
 assert.equal((view.match(/data-action="canvas-fullscreen"/g) || []).length, 1, 'full screen sits with the zoom controls');
 // The plan's own actions live on the canvas the person is working on, so the
 // page header above it stays a caption and a menu of application actions.
-assert.match(planMarkup, /data-action="tidy-canvas"[^>]*>[\s\S]*?Arrange/, 'Tidy layout is on the canvas');
-assert.match(planMarkup, /data-action="toggle-plan-resources" aria-expanded="false"[^>]*>[\s\S]*?Add step/, 'so is adding a step');
+// Both canvas actions are icon-only, so their hovertext is the label.
+assert.match(planMarkup, /data-action="tidy-canvas"[^>]*title="Arrange positions only; keep connections"[^>]*aria-label="Arrange positions only; keep connections"/, 'Tidy layout is on the canvas, named on hover and to a screen reader');
+assert.match(planMarkup, /data-action="toggle-plan-resources" aria-expanded="false"[^>]*title="Add step"[^>]*aria-label="Add step"/, 'so is adding a step');
 const heading = planMarkup.slice(0, planMarkup.indexOf('class="plan-workbench'));
 assert.ok(!/tidy-canvas|toggle-plan-resources/.test(heading), 'the plan heading carries no canvas controls');
 assert.match(heading, /data-action="import"/, 'the application menu still holds the file actions');
+// Set up is an application-level action too, so it is in that menu, not the header.
+assert.match(heading, /<details class="advanced-file-actions"><summary>Application<\/summary><button class="button" data-action="set-up">Set up<\/button>/, 'and the way into the setup questions');
 assert.match(planMarkup, /<summary>Application<\/summary>/, 'the application menu is named for what it holds');
 assert.match(planMarkup, /data-action="delete-application"/, 'deleting an application sits with the other application actions');
 
@@ -247,7 +315,10 @@ assert.match(canvas, /3 agents/);
 assert.match(canvas, /handed/);
 assert.ok(!/steps complete/.test(canvas), 'the canvas does not repeat the run overview');
 assert.ok(!/saved version/.test(canvas), 'the canvas does not repeat the saved version');
-assert.doesNotMatch(canvas, /run-chip|step-backend/, 'technical information stays off nodes');
+// What runs a step is on the card: the person choosing a plan needs to see it,
+// and the run needs to show which backend it actually used.
+assert.equal((canvas.match(/class="step-backend"/g) || []).length, 3, 'every step names what runs it');
+assert.match(canvas, /class="step-backend" title="Runs on">[^<]+<\/span>/, 'with the host\'s own name for that backend');
 assert.match(executionDetailMarkup(plan, projected, 'step_1', runContext), /Not approved/, 'tool denials remain inspectable');
 assert.match(canvas, /class="run-subagent" data-status="complete"/, 'a delegation becomes a sub-agent node');
 assert.match(canvas, /delegated by Researcher · depth 2 · completed/);
@@ -350,6 +421,25 @@ assert.match(producedCanvas, /Produces Brief/, 'a step that has not run yet stil
 const runHeader = canvas.slice(canvas.indexOf('canvas-heading'), canvas.indexOf('</div>', canvas.indexOf('canvas-heading')));
 assert.match(runHeader,/follow-active/, 'following is explicitly controllable');
 
+// Run, Pause and Stop are icons on the canvas surface, named on hover.
+const controlled = runProgressMarkup(plan, projected, 'step_2', {...runContext, toolsDisabled: true, controls:
+  '<button type="button" class="canvas-action" data-action="pause-live" title="Pause after the current step" aria-label="Pause after the current step"></button>'});
+assert.match(controlled, /class="canvas-dock" role="group" aria-label="Canvas controls"/, 'the canvas action bar floats in the canvas');
+assert.match(controlled, /class="canvas-dock-group" role="group" aria-label="Run controls"|<button type="button" class="canvas-action" data-action="pause-live"/, 'Pause sits on the canvas');
+// A run in flight disables the plan tools rather than taking them away, so the
+// bar keeps its shape and a person can see why they cannot edit yet.
+const tools = ['toggle-plan-resources', 'suggest-plan-change', 'tidy-canvas'];
+for (const action of tools) {
+  assert.match(controlled, new RegExp(`data-action="${action}"[^>]*disabled`), `${action} is still there, disabled, during a run`);
+}
+assert.match(controlled, /title="Add step · finish or stop the run to change the plan"/, 'and says why in the hovertext');
+assert.match(controlled, /data-action="toggle-plan-resources"[^>]*aria-label="Add step"/, 'while the name still says what it does');
+const idle = runProgressMarkup(plan, projected, 'step_2', {...runContext, controls: '<button data-action="edit-plan">Edit plan</button>'});
+for (const action of tools) {
+  assert.ok(!new RegExp(`data-action="${action}"[^>]*disabled`).test(idle), `${action} is usable once the run is over`);
+}
+assert.match(idle, /data-action="edit-plan"/, 'a finished run still offers the way back to the plan');
+
 // The canvas and the work plan are two views of one run.
 const list = executionPlanMarkup(plan, projected, 'step_2', {escape, agentName, outputName, capabilityName});
 const detail = executionDetailMarkup(plan, projected, 'step_2', {escape, agentName, outputName, capabilityName});
@@ -418,8 +508,10 @@ owning.agents[1].model = 'local-a:8b';
 validateDefinition(owning);
 const fields = (label, path, value, kind = 'input', options = []) => `${label}|${path}|${value}|${kind}|${options.map(option => option[0]).join(',')}`;
 const owningCanvas = workbenchMarkup(owning, {...context, backends, field: fields});
-assert.doesNotMatch(owningCanvas,/step-backend/, 'provider stays off plan nodes');
-assert.match(owningCanvas,/Ollama · local-a:8b/, 'provider remains in progressive settings');
+// The card says what runs the step, and the settings still offer both halves.
+assert.match(owningCanvas, /class="step-backend" title="Runs on">Codex · gpt-5<\/span>/, 'the step card names the backend its member runs on');
+assert.match(owningCanvas, /class="step-backend" title="Runs on">Ollama · local-a:8b<\/span>/, 'including a member on another backend');
+assert.match(owningCanvas,/Ollama · local-a:8b/, 'and the settings still name it where it is chosen');
 // The settings panel is showing step_2, whose member runs on Ollama.
 assert.match(owningCanvas, /This step runs on\|workflow\.1\.provider\|\|select\|,codex,ollama,opencode/, 'the step settings offer this host’s backends, with inheriting first');
 assert.match(owningCanvas, /This step’s model\|workflow\.1\.model\|\|select\|,local-a:8b,local-b:70b/, 'the step’s model is picked from what its backend reports');
@@ -428,7 +520,7 @@ const overridden = structuredClone(owning);
 overridden.workflow[1].provider = 'codex';
 validateDefinition(overridden);
 const overriddenCanvas = workbenchMarkup(overridden, {...context, backends, field: fields});
-assert.doesNotMatch(overriddenCanvas,/step-backend/, 'plan nodes stay non-technical');
+assert.match(overriddenCanvas, /class="step-backend" title="Runs on">Codex<\/span>/, 'a step that names its own backend says so on the card');
 assert.match(overriddenCanvas, /This step’s model\|workflow\.1\.model\|\|input\|/, 'a backend that reports no models takes a name instead of a list');
 const unofferable = structuredClone(plan);
 unofferable.agents[0].provider = 'gemini';
@@ -440,7 +532,8 @@ assert.match(warned,/gemini/, 'requested backend remains in settings');
 const startedRun = projectLiveRun({...run, status: 'running', events: run.events.slice(0, 2).concat([event(2.5, {type: 'StageStarted', stage: 'step_1', agent: 'researcher', provider: 'ollama', model: 'local-b:70b'})])});
 assert.deepEqual([...runBackends(startedRun).entries()], [['step_1', ['ollama', 'local-b:70b']]]);
 const startedCanvas = runCanvasMarkup(owning, startedRun, 'step_1', {...runContext, backends});
-assert.doesNotMatch(startedCanvas,/step-backend/, 'backend details stay off the canvas');
+assert.match(startedCanvas, /class="step-backend" title="Runs on Ollama · local-b:70b">Ollama · local-b:70b<\/span>/,
+             'the step that started on another backend shows what it actually ran on');
 assert.match(executionDetailMarkup(owning, startedRun, 'step_2', {...runContext, backends}), /Ollama · local-a:8b/, 'unstarted backend remains inspectable');
 assert.match(executionDetailMarkup(owning, startedRun, 'step_1', {...runContext, backends}), /<dt>Runs on<\/dt><dd>Ollama · local-b:70b<\/dd>/, 'the step detail reports the backend that ran it');
 
@@ -475,7 +568,20 @@ const used = new Set([...`${canvas}${planMarkup}${progress}`.matchAll(/class="([
 for (const name of used) assert.ok(css.includes('.' + name), `studio.css styles .${name}`);
 // The canvas is the primary view; everything else is a line or an overlay.
 assert.match(css, /\.shell\{display:grid;grid-template-columns:60px minmax\(0,1fr\)/, 'the rail is slim, so the canvas owns the width');
-assert.match(css, /--plan-height:clamp\(520px,calc\(100vh - 132px\),1400px\)/, 'the canvas takes the height the page has left');
+// The plan canvas is the page, so it is handed every pixel the header leaves:
+// the shell fills the window and each wrapper passes the height down, rather
+// than the canvas guessing with a fixed height.
+assert.match(css, /\.canvas-first-plan \.shell\{height:100dvh;min-height:0\}/, 'the page fills the window');
+assert.match(css, /\.canvas-first-plan \.main\{flex:1;min-height:0;display:flex;flex-direction:column\}/, 'the canvas column takes what the header leaves');
+assert.match(css, /\.canvas-first-plan \.workbench-plan\{flex:1;min-height:0\}/, 'and the canvas panel takes that');
+assert.match(css, /\.canvas-first-plan \.workbench-plan \.canvas-viewport\{flex:1;height:100%\}/, 'so the viewport itself is 100% of the space');
+assert.match(css, /\.canvas-first-plan \.canvas-dock\{bottom:16px/, 'the plan action bar floats in the canvas rather than hanging below it');
+// Panning the canvas must not start from a press on the bar, and the bar says it
+// can be moved by the pointer.
+assert.match(studioSource, /closest\('button,input,textarea,select,\[data-plan-node\],\[data-canvas-dock\]'\)/, 'the bar is not treated as the canvas background');
+assert.match(css, /\.canvas-dock\{cursor:grab;touch-action:none\}/, 'the bar says it can be dragged');
+assert.match(css, /\.canvas-dock\.dragging\{cursor:grabbing/, 'and says so while it moves');
+assert.match(css, /--plan-height:clamp\(520px,calc\(100vh - 132px\),1400px\)/, 'the run canvas keeps the height it was given');
 assert.match(css, /\.plan-canvas\{[^}]*overflow:auto/, 'and scrolls once the plan outgrows it');
 assert.match(css, /\.shell\.rail-open\{grid-template-columns:232px minmax\(0,1fr\)\}/, 'the sidebar opens when you ask it to');
 assert.match(css, /\.rail:not\(\.open\) \.rail-label\{display:none\}/, 'collapsed shows icons, never half a label');
@@ -544,4 +650,20 @@ for(const mode of ['plan','run']){
 }
 for(const label of ['Close step settings','Move earlier','Move later','Duplicate step','Remove step']){
   assert.match(planMarkup,new RegExp(`aria-label="${label}" title="${label}"`));
+}
+
+{
+  const planned = { ...plan, agents: plan.agents.map((agent, index) => index ? agent : { ...agent, provider: 'codex', model: 'gpt-5-codex' }) };
+  const declared = runCanvasMarkup(planned, projectLiveRun({ ...run, status: 'running', events: run.events.slice(0, 2) }), 'step_1',
+                                   { ...runContext, backends: [{ id: 'codex', name: 'Codex' }] });
+  assert.match(declared, /class="step-backend" title="Runs on">Codex · gpt-5-codex<\/span>/, 'a step that names a backend shows it');
+
+  const ran = runCanvasMarkup(plan, projectLiveRun({ ...run, status: 'running',
+    events: [...run.events.slice(0, 2), event(3, { type: 'StageStarted', stage: 'step_1', agent: 'researcher', provider: 'ollama', model: 'qwen3' })] }),
+    'step_1', { ...runContext, backends: [{ id: 'ollama', name: 'Ollama' }], provider: 'codex' });
+  assert.match(ran, /class="step-backend" title="Runs on Ollama · qwen3">Ollama · qwen3<\/span>/, 'and the run shows what it actually used');
+
+  const hostDefault = runCanvasMarkup(plan, projectLiveRun({ ...run, status: 'running', events: run.events.slice(0, 2) }), 'step_1',
+                                      { ...runContext, provider: 'codex' });
+  assert.match(hostDefault, /class="step-backend" title="Runs on">codex<\/span>/, 'a step on the host default is named as that default, never guessed');
 }

@@ -62,12 +62,16 @@ assert(toolChanges.some(change=>change.startsWith('Tool access')));
 validateDefinition(human);validateDefinition(parallel);
 console.log('PASS: five-step workflow, explicit parallel/between insertion, shared-member copy, connection/cycle safety, presentation-only reorder/move, draft-safe layout save, readiness and explicit proposals.');
 
-const runURL=await load('../web/run-canvas.js',[['/definition.js',shared],['/canvas-ui.js',new URL('../web/canvas-ui.js',import.meta.url).href],['/run-activity.js',new URL('../web/run-activity.js',import.meta.url).href]]);
-const {workbenchMarkup}=await import(await load('../web/workbench-ui.js',[['/definition.js',shared],['/plan.js',planURL],['/run-canvas.js',runURL],['/catalogue.js',new URL('../shared/catalogue.js',import.meta.url).href],['/canvas-ui.js',new URL('../web/canvas-ui.js',import.meta.url).href],['/run-activity.js',new URL('../web/run-activity.js',import.meta.url).href]]));
+const canvasURL=new URL('../web/canvas-ui.js',import.meta.url).href;
+const activityURL=await load('../web/run-activity.js',[['/canvas-ui.js',canvasURL]]);
+const runURL=await load('../web/run-canvas.js',[['/definition.js',shared],['/canvas-ui.js',canvasURL],['/run-activity.js',activityURL]]);
+const {workbenchMarkup}=await import(await load('../web/workbench-ui.js',[['/definition.js',shared],['/plan.js',planURL],['/run-canvas.js',runURL],['/catalogue.js',new URL('../shared/catalogue.js',import.meta.url).href],['/canvas-ui.js',new URL('../web/canvas-ui.js',import.meta.url).href],['/run-activity.js',activityURL]]));
 const ctx={escape:value=>String(value??'').replaceAll('<','&lt;'),field:label=>`<label>${label}</label>`,agentName:(definition,id)=>definition.agents.find(member=>member.id===id)?.name||id,outputName:(definition,key)=>definition.state.find(output=>output.key===key)?.label||key,capabilityName:id=>id,selectedId:'step_1',pane:'steps',members:[],showResources:false,showInspector:false,assistantText:'',runtime:{}};
 const markup=workbenchMarkup(d,ctx);
 assert.match(markup,/workbench-inspector" hidden/);assert.match(markup,/workbench-resources" hidden/);
-assert.doesNotMatch(markup,/step-backend|step-tool-chips/);
+// The card names what runs the step; the tool chips stay out of the way.
+assert.match(markup,/class="step-backend"/);
+assert.doesNotMatch(markup,/step-tool-chips/);
 assert.match(markup,/What happens\?/);assert.match(markup,/Who does it\?/);assert.match(markup,/What does it produce\?/);
 assert.match(markup,/Changes to this agent affect all 5/);
 assert.match(markup,/edit-shared-member/);assert.match(markup,/isolate-member/);

@@ -3,7 +3,7 @@ import {createServer} from 'node:http';
 import {fileURLToPath} from 'node:url';
 import {watch} from 'node:fs';
 import {injectReload} from './live-reload.mjs';
-import {hostConfig} from './config.mjs';
+import {hostConfig,pageConfig} from './config.mjs';
 
 if (Number(process.versions.node.split('.')[0]) < 24) {
   throw new Error('The local Studio preview requires Node.js 24 or newer.');
@@ -34,12 +34,17 @@ const watchers=['web','shared','worker'].map(directory=>watch(directory,{recursi
 const port = config.port;
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid STUDIO_PORT');
 const origin = 'http://127.0.0.1:' + port;
+const page = pageConfig(config);
 const server = createServer(async (incoming, outgoing) => {
   try {
     if (incoming.headers.host !== '127.0.0.1:' + port && incoming.headers.host !== 'localhost:' + port) {
       outgoing.writeHead(403);
       outgoing.end('Use the local Studio address.');
       return;
+    }
+    if(new URL(incoming.url, origin).pathname==='/config.json'&&incoming.method==='GET'){
+      outgoing.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
+      outgoing.end(JSON.stringify(page));return;
     }
     if(incoming.url==='/__studio_reload'&&incoming.method==='GET'){
       outgoing.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
@@ -75,6 +80,7 @@ const server = createServer(async (incoming, outgoing) => {
 server.listen(port, '127.0.0.1', () => {
   console.log('Conclave Studio: ' + origin);
   console.log('Conclave REST API: '+config.apiUrl);
+  console.log(page.base?'The page calls the API directly at '+page.base+' with credentials.':'The page calls the API through this origin, with the configured token.');
   console.log('Live reload enabled: CSS updates in place; other changes reload the page.');
 });
 for (const signal of ['SIGINT', 'SIGTERM']) {

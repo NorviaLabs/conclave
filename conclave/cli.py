@@ -8,6 +8,7 @@ from pathlib import Path
 from contextlib import contextmanager
 
 from .application.definition import validate_definition
+from .application.presentation import render_run
 from .application.service import configured_host
 from .application.service import setting
 
@@ -70,7 +71,10 @@ async def execute(args):
         if active:
             await active[0]
         _, record = await host.handle("get", {"run_id": record["id"]})
-        print(json.dumps(record, indent=2, allow_nan=False))
+        if args.format == "text":
+            print(render_run(record), end="")
+        else:
+            print(json.dumps(record, indent=2, allow_nan=False))
         return 1 if record["status"] in {"failed", "interrupted"} else 0
     finally:
         await host.close()
@@ -85,11 +89,15 @@ def run(argv=None):
     create.add_argument("--instructions", required=True)
     server = commands.add_parser("serve", help="Start the local Conclave REST API and Studio page")
     server.add_argument("--port", type=int, default=8080)
+    server.add_argument("--hosted", action="store_true",
+                        help="Serve this deployment's adapter (sign-in, origins) on a loopback address")
     server.add_argument("--provider", help="Bundled backend; the one on this computer when omitted")
     server.add_argument("--model", help="Model passed to the backend; its own default when omitted")
     for name in ("run", "status", "review", "resume", "cancel"):
         command = commands.add_parser(name)
         command.add_argument("--database", help="Run database (shared with Studio by default)")
+        command.add_argument("--format", choices=("json", "text"), default="json",
+                             help="json (default) for the whole record, text to read it")
         command.add_argument("--provider", help="Bundled backend; custom factories use CONCLAVE_PROVIDER_FACTORY")
         command.add_argument("--model", help="Model passed to the backend; its own default when omitted")
         if name == "run":
@@ -112,7 +120,7 @@ def run(argv=None):
             if not 0 <= args.port <= 65535:
                 raise ValueError("Use a port between 0 and 65535")
             with host_settings(args):
-                asyncio.run(serve(args.port))
+                asyncio.run(serve(args.port, hosted=args.hosted))
             return
         if args.command == "create":
             definition = create_definition(args.name, args.instructions)

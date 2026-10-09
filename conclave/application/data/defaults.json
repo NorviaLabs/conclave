@@ -72,7 +72,7 @@
     "max_per_agent": 4,
     "max_depth": 2,
     "tool_calls": 40,
-    "wall_clock_seconds": 300,
+    "wall_clock_seconds": null,
     "tokens": null,
     "cost_usd": null
   }

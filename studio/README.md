@@ -48,8 +48,10 @@ the dev server after changing its scripts or configuration. This is dev-only
 live reload, not state-preserving JavaScript HMR; production builds are unchanged.
 
 `uv run python dev.py --provider codex` starts both processes at once and stops
-them together; select the Node executable with `--node /path/to/node` or
-`STUDIO_NODE`.
+them together. It runs the backend as the deployment's own adapter, allows this
+origin to call it, and signs in with Google when a login file is present —
+`--login PATH` names one, `--no-login` leaves sign-in off. Select the Node
+executable with `--node /path/to/node` or `STUDIO_NODE`.
 
 ## Model backends
 
@@ -69,17 +71,170 @@ a hosted deployment) has no catalogue and refuses any named backend.
 ## Run canvas
 
 The plan and the run are the same canvas: editing shows the plan, an open run
-shows the same graph with each step's status. The header's Run control starts a
-run and reads Run again once one is open; either way it opens one modal for the
-request, its context and its source, so no separate run screen exists. Run again
-is prefilled with the request that ran and creates a new run rather than
+shows the same graph with each step's status. Run — the play icon in the canvas
+action bar — opens one modal for the request, its context and its source, so no
+separate run screen exists. Once a run is open the same control reads Run again
+and is prefilled with the request that ran, creating a new run rather than
 resuming the old one.
+
+### The canvas action bar
+
+The canvas floats one action bar over the graph (`canvas-dock`). It is icons
+only — no words — so every control carries its name in `title` and `aria-label`,
+and each button in it is one thing a person can do:
+
+| Run state | Run controls | Plan tools |
+| --- | --- | --- |
+| No run open | Run (play) | enabled |
+| Going | Pause (`‖`), Stop (`■`) | disabled |
+| Paused | Run (play) continues, Stop (`■`) | disabled |
+| Needs your input | Stop (`■`) | disabled |
+| Finished, stopped, failed or cancelled | Run again (play) | enabled |
+
+Plan tools are Add step (`+`), Suggest change (`✦`) and Arrange (grid), and they
+sit after a separator in the same bar.
+
+**The bar keeps its shape.** While a run is in flight the three plan tools stay
+put, greyed out, with the reason in their hovertext ("Add step · finish or stop
+the run to change the plan") rather than disappearing, so nothing moves under
+your hands mid-run. They work again as soon as the run stops, finishes or fails.
+
+**The bar can be moved.** Drag it by its grip (or any part of its surface that
+is not a button) to put it out of the way of the graph; the position is
+remembered per application for the session and clamped to the canvas.
+Double-clicking the bar puts it back where it started. Pressing it never pans
+the canvas.
+
+**What the run is waiting for stays in words above the canvas.** Review input and
+View results live in the status line (`run-overview`), not in the bar, so no
+action is offered twice and none is wordless-only. There is no Edit plan button:
+using any plan tool already leaves the run, so a separate switch would be a
+second name for the same thing.
+
+**Pause stops between steps, never during one.** The step already running
+finishes, the run records a checkpoint, and Run continues from the next step, so
+completed work and approved external actions are never repeated. Stop is
+different and final: it discards what has not run.
+
+Because the canvas owns the run controller, the header carries Run only on the
+setup screen, where there is no canvas — one Run control per screen, never two.
+
+The header itself holds only what belongs to the whole page: the application
+name, Save, run history, and — on the setup screen — Run and the way back to the
+canvas. Everything that acts on *this application* is in the canvas's
+**Application** menu beside the plan: Set up, Import application file, Export
+application file, Delete application. Set up is not a second header button, so
+the header stays a caption plus the page's own actions.
+
+### Right-click menu
+
+Right-clicking a canvas surface opens the actions that belong to whatever was
+pressed. The menu is a shortcut, never the only route: every item carries the
+same data attribute as the on-screen control it stands for, so it runs through
+the same handler, the same validation and the same permission gates.
+
+| Pressed | Items |
+| --- | --- |
+| Step | Edit step · Advanced limits · Add step after · Add parallel branch · Move earlier / later · Duplicate · New member for this step · Edit the shared member · Make a copy for this step · Edit output structure in setup · Connect to another step · Remove what this step depends on · Centre in view · Remove step |
+| Connection | Insert a step between · Add a parallel branch from here · Reverse direction · Show the source step · Show the target step · Centre this connection in view · Change where this connection ends · Remove this connection |
+| Plan background | Add a step here · Suggest a change · Arrange · Fit to view · Reset to 100% · Full screen |
+| Run card | Step details · Show this step in activity · Copy this step's output (plus a note when the result is out of date) |
+| Run background | Follow the active step · Show/hide the activity stream · Run information · Fit to view · Reset to 100% |
+
+An item that cannot act yet is disabled with the reason in its hovertext ("Move
+earlier" on the first step, "Remove what this step depends on" when there is
+nothing to remove, "Copy this step's output" before it has produced anything),
+so the menu never changes shape. Removal items are last and red.
+
+Opening a step's menu **selects that step**, and an open settings panel follows
+it, because the panel's own commands ("New member for this step", "Edit the
+shared member", "Make a copy for this step") read the selected step.
+
+**Connections have one handle, not two floating buttons.** Selecting an edge
+draws a single `⋮` handle at its midpoint; clicking it (or pressing Enter on the
+focused edge) opens the same menu the right-click does. The old `×` and
+`+ Insert step` buttons are gone — they were 28px targets sitting on the graph,
+they only worked with a mouse, and the menu covers both. `Delete` on the edge or
+its handle removes the connection, and the step panel's dependency checkboxes
+remain the other keyboard route.
+
+Each connection is itself a focusable, labelled button (`tabindex="0"`,
+`role="button"`), so the whole flow works without a pointer: Tab to the
+connection, Enter to select it, Shift+F10 to open its menu. A focused connection
+highlights its line.
+
+**What stays in the panel, and why.** Fields and lists do not belong in a menu:
+Step name, What happens?, What does it produce?, Team member, Member name, the
+backend, Output label, Tool uses, Seconds, the per-tool permission checkboxes
+and the dependency checkboxes all need a surface that shows the current value,
+takes typing and validates as you go. A menu item is a command with no state.
+The panel also keeps its own Move ±, Duplicate, Add after/parallel and Remove
+buttons, deliberately: the menu is an accelerator, and a destructive action must
+never become reachable only by a gesture a person may not discover.
+
+**Run, Pause and Stop are deliberately not in it.** They stay visible in the
+action bar — a control that stops a run must never be hidden behind a
+right-click.
+
+**Keyboard and touch.** Shift+F10 or the Menu key opens the menu for the focused
+step, edge or canvas; arrow keys, Home and End move through the items, Escape
+closes it and returns focus where it was, and choosing an item closes the menu
+before the action runs. On a touch device, press and hold does the same thing
+after 500ms, and the press does not also click the step. The browser's own menu
+still appears on fields and outside the canvas.
+
+
+
+The canvas is the page, so it takes the whole height the page has left: the
+shell fills the window (`100dvh`) and each wrapper passes that height down with
+`flex:1` until the viewport, which is `100%` of it. There is no fixed canvas
+height to go stale and no dead band under the graph; the viewport scrolls once
+the plan outgrows the space. Because the canvas now reaches the bottom of the
+window, the plan's action bar floats inside it (`bottom:16px`) rather than
+hanging below the panel where it would be clipped.
+
+The run canvas keeps `--plan-height` (`clamp(520px, calc(100vh - 132px),
+1400px)`) because its page has a run overview, request details and results below
+the canvas that need the remaining space.
 
 During a run, canvas cards show blue animated working steps, green completed
 steps with a check mark, red failed steps with a cross, and neutral dashed steps
 that have not run or remain incomplete. Human review and out-of-date results are
 amber. Selection has a separate outline; reduced-motion preferences disable the
 working spinner and pulse.
+
+## Signing in
+
+A deployment can require people to sign in with Google (`CONCLAVE_GOOGLE_LOGIN_FILE`
+plus `CONCLAVE_SESSION_KEY`; see `REST_API.md`). Studio asks who it is before it
+fetches anything:
+
+- an API answer of 401 replaces the page with one screen — an explanation and a
+  single **Sign in with Google** link — so no application chrome is shown to
+  somebody the host has not admitted;
+- a completed sign-in returns to `/`, and a failed one to `/?signin=failed`,
+  which the screen reports without inventing a reason;
+- once signed in, the rail foot names the account and offers **Sign out**, which
+  posts to the host and reloads into the sign-in screen.
+
+A local `conclave serve` has no login at all, so the account line and the screen
+never appear there. The page sends `credentials: "include"`, which is what a
+deployment authenticating with a session cookie needs.
+
+Which deployment shapes can carry that cookie:
+
+| Where the page is served | What it needs |
+| --- | --- |
+| From the API's own origin (`conclave serve --hosted`, or a host serving both) | Nothing: the cookie is same-origin. Set `CONCLAVE_UI_ORIGINS` to that origin and the API accepts this page's writes. |
+| From another origin, with `config.json` naming the API (`{"base": "...", "credentials": "include"}`) | The API must allow the origin in `CONCLAVE_UI_ORIGINS`; if the two are on different *sites*, the login file needs `"same_site": "none"`. |
+| Through this bundle's own worker proxy (default `config.json`) | Not usable for sign-in: the proxy answers with its own headers, so a `Set-Cookie` from the API never reaches the browser. Point the page at the API instead, as above. |
+
+The sign-in link and the sign-out request go straight to the API address, never
+through the proxy, so `/auth/*` needs no proxy rule.
+
+Signing in is **not** connecting Google Drive, Docs or Sheets: those are
+connections with their own scopes and tokens, made in Connections. The sign-in
+screen says so, because the two are easy to confuse.
 
 ## Served from somewhere else
 
@@ -320,3 +475,201 @@ node studio/scripts/check-plan-experience.mjs
 node studio/scripts/check-canvas.mjs
 node studio/scripts/check-studio-source.mjs
 ```
+
+### Integration connections (partial first pass)
+
+Open a Plan step's **Connections and tools → Manage connections** to search
+service adapters, configure a named connection, check provider access and
+remove local access. Save the application first. Credentials are submitted to
+Conclave and are never saved in the workflow definition or browser storage.
+Select operations explicitly in connection setup, then check the granted tools
+for an agent. Shared-member tool changes affect all steps using that member.
+
+The host must configure `CONCLAVE_INTEGRATION_KEY`. Custom API/feed endpoint
+hosts require `CONCLAVE_INTEGRATION_HOSTS`. Manual tokens are currently used;
+Studio OAuth sign-in and per-tool write approval are not yet implemented. Reads
+can run within their connection grants. Writes are denied unless a trusted host
+supplies an approver. Protocol/database/S3 adapters use deployment-owned
+`CONCLAVE_INTEGRATION_ADAPTERS_FILE` configuration; missing drivers or unconfigured
+adapters are shown as unavailable,
+not as connected accounts. See [status matrix](../INTEGRATIONS.md).
+
+```sh
+node studio/scripts/check-integrations.mjs
+uv run pytest --no-cov tests/test_integration_connections.py tests/test_integration_runtime.py
+```
+
+### What the catalog shows
+
+**Templates → Connections** lists the services this host can run, grouped by
+category. Availability comes from the host, not the bundled catalog: an entry
+reads *Connected for this application*, *Available — not connected yet*, or
+*Needs host setup* (MCP, HTTP/OpenAPI, PostgreSQL, MySQL and Amazon S3 until an
+operator configures them). Each entry says what it can do in plain language, and
+**Connect** opens the connection manager at that service.
+
+A named host instance (a database account, bucket or endpoint) is its own entry,
+so you pick the account rather than the service name. Services that templates
+mention but this host cannot run stay under *Suggested by templates, not installed
+on this host*, where **Add to plan** records intent only — it grants nothing.
+Installed integrations are connected rather than added to the plan, so there is
+one mechanism to learn for granting access.
+
+```sh
+node studio/scripts/check-integrations.mjs
+```
+
+### Refining a goal
+
+**New application → What do you want to achieve?** shows a sparkle beside the goal
+when the host has a provider. One click rewords the goal in place and reports what
+changed; there is no second screen and nothing to accept or discard, because
+wording is the only thing it touches.
+
+```sh
+node studio/scripts/check-goal-refinement.mjs
+node studio/scripts/check-goal-questions.mjs
+```
+
+### Questions about the goal
+
+Submitting a goal asks the host **one question at a time**, each one following the
+answer before it, and stops as soon as the answers settle what the host would ask
+next — before the fifth if that is when it has enough. Answer what you can and
+leave the rest blank: nothing waits on these, **Stop asking and suggest a team**
+ends the questions whenever you want, and a host that cannot answer proposes from
+the goal alone.
+
+Only the answers you give shape the proposed team, and all of them — including
+the ones still open — are saved with the application as *Clarified requirements*,
+editable beside the goal in the Setup step and listed in the plan's Application
+menu. When the application runs, the answered requirements are given to the team
+as your words, not as instructions from the host.
+
+### While the team is chosen
+
+Choosing a team is the slowest thing in the flow, and it is two calls: the first
+asks the host for the team and the results only, and the second designs the plan
+around them — the members, the steps, the connections that order those steps, the
+instructions and the shared state. The chosen team is named in the second request
+rather than handed over as its base definition, because a base definition is
+preserved: the team-only reply passes validation with nothing connected, so using
+it as the base produced a plan whose steps had no edges between them. The step is replaced by a moving indicator, the backend the host is
+using, how many answers are going with the goal, and the seconds elapsed — and as
+soon as the first call answers, the members and results it chose are listed by
+name while the plan is still being written. A host that will not answer the first
+call is not asked twice: the plan is proposed from the goal alone.
+
+Nothing is claimed about stages a call does not report, which is why the member
+names appear when the first call lands rather than while it runs: the provider
+layer returns one buffered reply per call and streams nothing.
+
+### Budgets: what stops a run
+
+A run does not get to keep going forever. Four things bound it, and they are
+written for the person paying for the run rather than for the machine:
+
+| What it bounds | In plain terms |
+| --- | --- |
+| **Action steps** | how much one member may *do* in a single stage — look something up, read a file, record a finding |
+| **Tool calls** | how many lookups the whole run may make, across every member |
+| **Time** | how long the whole run may take |
+| **Spend** | tokens or money, if you set either |
+
+Delegations and depth are bounded too: how many sub-agents the team may create,
+how deep they may nest. Nothing here needs tuning to get a working application —
+a new one has no time limit and generous action limits, because the actions are
+what actually bound the work.
+
+**When a limit is reached, the work is not thrown away.** The member that ran out
+is asked for the answer it would have given, from what it already gathered, and
+that is what the stage produces. The record says so, so a stage that was written
+up after its actions ran out is not mistaken for one that finished early. If it
+still will not answer, the run stops and says which member ran into which limit,
+and which stage was never completed — `market_researcher: used all 12 action
+steps without completing Research opportunities`.
+
+The idea is simple: **a limit costs you time, not your work.** Limits exist to
+stop a runaway, not to decide what is worth keeping.
+
+Three things hold that up, and between them a spent budget never throws work
+away:
+
+1. **The agent is told.** Its instructions name the budget before any of it is
+   spent, every action reports where it stands (`Action 7 of 20.`), and its last
+   action — or the last minute of the clock — is announced as such, so the answer
+   is written rather than the search being left unfinished.
+2. **The stage hands back what it has.** When a budget runs out anyway, the member
+   is asked once more for the answer it would have given, with no tools left to
+   offer, and that answer is what the stage produces. The record says which budget
+   was spent, so this is never mistaken for a stage that finished early.
+3. **The run can be continued.** Every stage that completes is checkpointed as it
+   goes, and a run stopped by a budget keeps that checkpoint: press **Continue**
+   on a stopped run and it carries on from the last stage that finished — nothing
+   already done is repeated, and the spend already recorded is not forgotten. If
+   it stopped on a limit, raise the limit first; the resumed run keeps the old
+   spend, which is the honest thing for accounting to do.
+
+A backend that stops answering is treated the same way. If a model call does not
+come back in time — five minutes by default — the run **stops** rather than
+failing, keeps its checkpoint, and can be continued when the backend is well
+again. Raise that wait with `CONCLAVE_MODEL_TIMEOUT` if your backend is simply
+slow. A backend that reports an error, or whose command fails, is still a failure:
+that is a defect to fix, not a moment to wait out.
+
+What is *not* recovered is a stage that was cut off mid-flight: it starts again
+from the beginning of that stage, because the runtime does not replay a half-done
+call. With the write-up in place, that stage usually answers instead of being cut
+off, which is why the write-up matters more than the resume. A run left behind by
+a process that died is marked interrupted when a host next opens the store, so it
+never sits there pretending to still be working.
+
+Set them, if you want them, in **Setup → Controls → Limits and approvals**. The
+warning thresholds there are what make a run say it is approaching a limit before
+it reaches it.
+
+### What runs a step
+
+Every step card names the backend it runs on, under the member that does the work:
+`Codex · gpt-5` when the step or its member names one, and the host's own name for
+its default when neither does — a backend that was never chosen is named as the
+host's rather than guessed at. On the run canvas the card shows what the run
+*recorded* for that step once it has started, falling back to the plan's
+declaration before then, so a step that ran on another backend says so. The
+choice itself is `stageBackend`'s, so the card and the run cannot disagree.
+
+### Watching a step work
+
+The run canvas says what the step in flight is doing, in the state it already
+shows at the top of the card: `Working for 1m 20s · 8 tool calls · last Web
+fetch`, with a failed call counted and named, and the same words on hover. One
+place, not two — the same detail twice on one card is noise.
+
+The elapsed time is read from the run's own event timestamps, so it survives a
+reload, and the view is redrawn once a second while a step is working — a long
+model call records nothing until it returns, and a still screen would be
+indistinguishable from a stuck one. It is not a live region: text that changes
+every second would be announced every second.
+
+The activity stream (`Show the activity stream`) lists the same events as they
+arrive, newest first, and can be filtered to one step. Both come from
+`/api/runs/<id>/events`, which the page follows by push when the host reports it
+can, and by asking on a timer when it cannot.
+
+### Icons and hovertext
+
+Dense, repeated gestures are icon-only: removals (×), move earlier/later,
+duplicate, arrange, add step, full screen, zoom, fit, run history, download a
+result, run information, the plan/canvas switch and the runtime disclosure.
+
+An icon-only control carries **both** `title` and `aria-label`, because a mouse
+user needs hovertext and a screen reader needs a name — they are not
+interchangeable. `check-studio-source.mjs` fails if either is missing, and the
+canvas view group plus the workbench step actions are the pattern to copy.
+
+Words stay where a mistake is expensive or the action is the main one: Delete
+application, Disconnect, Revoke provider access, Approve this action, Reject,
+Discard, Cancel, Stop, Run, Save, Resume, Connect, Authorize account, Add to
+plan, and every recovery action such as Try again or Reload. Approving an
+external change must be unambiguous at a glance, so it never becomes a bare
+checkmark.

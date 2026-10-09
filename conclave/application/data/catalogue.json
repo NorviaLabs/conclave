@@ -1478,157 +1478,37 @@
       ]
     },
     {
-      "id": "investigation",
-      "name": "Investigation",
-      "example": "Explain why API latency increased.",
-      "purpose": "Investigate a question, collect evidence, test explanations and produce an evidence-backed synthesis.",
+      "id": "starter",
+      "name": "Start from scratch",
+      "example": "Draft a short summary of the supplied material.",
+      "purpose": "One member writes the answer you asked for, and you review it before it is used.",
       "members": [
         {
-          "id": "coordinator",
-          "name": "Coordinator",
-          "preset": "coordinator",
-          "tools": []
-        },
-        {
-          "id": "researcher",
-          "name": "Researcher",
-          "preset": "researcher",
-          "tools": [
-            "list_files",
-            "read_file",
-            "search_files",
-            "web_search",
-            "web_fetch"
-          ]
-        },
-        {
-          "id": "architect",
-          "name": "Analyst",
-          "preset": "analyst",
-          "tools": []
-        },
-        {
-          "id": "critic",
-          "name": "Critic",
-          "preset": "reviewer",
-          "tools": []
-        },
-        {
-          "id": "verifier",
-          "name": "Verifier",
-          "preset": "verifier",
-          "tools": []
-        },
-        {
-          "id": "synthesizer",
-          "name": "Synthesizer",
+          "id": "writer",
+          "name": "Writer",
           "preset": "creator",
           "tools": []
         }
       ],
-      "tools": [
-        "list_files",
-        "read_file",
-        "search_files",
-        "web_search",
-        "web_fetch"
-      ],
+      "tools": [],
       "outputs": [
         {
-          "key": "evidence",
-          "name": "Evidence",
-          "kind": "findings",
-          "owner": "researcher",
-          "task": "Gather source observations and their locators."
-        },
-        {
-          "key": "facts",
-          "name": "Facts",
-          "kind": "findings",
-          "owner": "researcher",
-          "task": "Record facts supported by evidence."
-        },
-        {
-          "key": "hypotheses",
-          "name": "Hypotheses",
-          "kind": "findings",
-          "owner": "architect",
-          "task": "Assess competing explanations against the evidence."
-        },
-        {
-          "key": "questions",
-          "name": "Open questions",
-          "kind": "findings",
-          "owner": "critic",
-          "task": "Record missing evidence and unresolved questions."
-        },
-        {
-          "key": "synthesis",
-          "name": "Synthesis",
+          "key": "draft",
+          "name": "Draft",
           "kind": "document",
-          "owner": "synthesizer",
-          "task": "Write a synthesis of the strongest explanation, alternatives and limitations. Refer to source identifiers."
+          "owner": "writer",
+          "task": "Write the requested answer from the supplied material."
         }
       ],
       "plan": [
         {
-          "id": "frame",
-          "name": "Frame the investigation",
-          "agent": "coordinator",
-          "output": "questions",
-          "task": "Define the question, missing information and completion criteria."
-        },
-        {
-          "id": "gather",
-          "name": "Gather evidence",
-          "agent": "researcher",
-          "output": "evidence",
-          "task": "Gather source observations and their locators."
-        },
-        {
-          "id": "establish",
-          "name": "Establish facts",
-          "agent": "researcher",
-          "output": "facts",
-          "task": "Record evidence-supported facts."
-        },
-        {
-          "id": "reason",
-          "name": "Test hypotheses",
-          "agent": "architect",
-          "output": "hypotheses",
-          "task": "Propose and compare competing explanations."
-        },
-        {
-          "id": "challenge",
-          "name": "Challenge the findings",
-          "agent": "critic",
-          "output": "questions",
-          "task": "Record unanswered questions and limitations."
-        },
-        {
-          "id": "verify",
-          "name": "Verify the evidence",
-          "agent": "verifier",
-          "output": "facts",
-          "task": "Independently verify recorded facts against their sources."
-        },
-        {
-          "id": "synthesize",
-          "name": "Synthesize",
-          "agent": "synthesizer",
-          "output": "synthesis",
-          "task": "Write an evidence-backed synthesis with alternatives and limitations."
+          "id": "draft",
+          "name": "Draft",
+          "agent": "writer",
+          "output": "draft",
+          "task": "Write the requested answer from the supplied material."
         }
-      ],
-      "output_statuses": {
-        "hypotheses": [
-          "proposed",
-          "supported",
-          "refuted",
-          "unresolved"
-        ]
-      }
+      ]
     },
     {
       "id": "document-review",
@@ -5192,13 +5072,6 @@
       {
         "application": "decision-support",
         "pattern": "\\b(compare|choose|recommend|decision|options)\\b",
-        "flags": "gi",
-        "priority": false,
-        "weight": 1
-      },
-      {
-        "application": "investigation",
-        "pattern": "\\b(investigate|why|cause|latency|evidence)\\b",
         "flags": "gi",
         "priority": false,
         "weight": 1

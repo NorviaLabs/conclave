@@ -10,6 +10,7 @@ import getpass
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from conclave.providers import OLLAMA_DEFAULT_URL, LocalBackends, resolve_provid
 from .definition import stage_backend, validate_host_tools
 from .runs import RunRepository, validate_run_request
 from .extensions import ConnectorAdapter, load_extensions, load_provider_factory
-from .planning import propose
+from .planning import propose, questions, refine
 from .principal import Principal, resolve_principal
 from .profile import LOCAL, resolve_profile
 from .resources import load_resources, register_source_tools, bind_resources, working_folder, SourceTools, SOURCE_TOOLS
@@ -32,10 +33,15 @@ def setting(name, default=None):
 def public_record(record):
     """Keep checkpoint internals on the host; publish actual saved results."""
     record = dict(record)
-    events, metrics = [], {}
+    events, metrics, resumable = [], {}, False
     for item in record["events"]:
         event = {key: value for key, value in item["event"].items() if key != "checkpoint"}
         checkpoint = item["event"].get("checkpoint")
+        # Whether this run can be continued, without handing over the checkpoint
+        # itself: a stop that finished its steps can be resumed, and a person is
+        # told so rather than left to guess.
+        if event.get("type") == "ApplicationFinished":
+            resumable = bool(checkpoint) and event.get("status") in {"waiting_for_human", "paused", "stopped"}
         if checkpoint:
             metrics = checkpoint["budget"]["spent"]
             if event["type"] == "ApplicationStateChanged":
@@ -43,7 +49,7 @@ def public_record(record):
         if event.get("metrics"):
             metrics = event["metrics"]
         events.append({"sequence": item["sequence"], "event": event})
-    record["events"], record["metrics"] = events, metrics
+    record["events"], record["metrics"], record["resumable"] = events, metrics, resumable
     return record
 
 
@@ -75,11 +81,15 @@ class LocalRunHost:
         self.provider_source = provider_source
         self.profile = profile or LOCAL
         self.tasks = {}
+        # Runs a person asked to pause; each stops between steps, never mid-call.
+        self.pauses = set()
+        from .tool_approvals import ToolApprovals
+        self.tool_approvals = ToolApprovals(repository)
         self.adapters = tuple(adapters)
         self.resources = resources
         self.source_extensions = source_extensions
 
-    def run_tools(self, request):
+    def run_tools(self, request, *, owner=None):
         """The tools one run may use, and where its calls actually run.
 
         A sandbox factory is consulted per run, so the executor carries that
@@ -89,6 +99,9 @@ class LocalRunHost:
         tools = bind_resources(self.tools, self.resources, request, self.source_extensions) if self.resources is not None else self.tools
         tools = tools.copy()
         tools.max_output_chars = request['definition']['run_config']['max_tool_output_chars']
+        if getattr(self, 'connections', None) is not None:
+            tools = self.connections.bind(tools, request['definition'], self.principal.tenant,
+                                          owner or self.principal.name, request['application_id'], sandbox=self.sandbox is not None)
 
         if self.sandbox is not None:
             # The host's registry is shared between runs; a run's grant is not.
@@ -112,11 +125,20 @@ class LocalRunHost:
             if not active[0].done():
                 raise ValueError("This request is already running")
             self.tasks.pop(run_id)
-        tools = self.run_tools(self.repository.get(run_id)["request"])
+        owner = self.connections.run_owner(run_id, self.principal.tenant) if getattr(self, 'connections', None) else None
+        tools = self.run_tools(self.repository.get(run_id)["request"], owner=owner)
         # A run may mix backends, so it is handed the router when there is one.
         provider = self.backends or self.provider
-        stream = (self.repository.resume(run_id, provider, tools, loop=self.loop) if resume
-                  else self.repository.execute(run_id, provider, tools, loop=self.loop))
+        async def approver(request):
+            if not request.tool.startswith('connection.') or not getattr(self, 'connections', None):
+                return False
+            return await self.tool_approvals.approver(run_id, owner or self.principal.name)(request)
+        # A resumed run is no longer paused, or it would stop again immediately.
+        self.pauses.discard(run_id)
+        stream = (self.repository.resume(run_id, provider, tools, loop=self.loop, approver=approver,
+                                         pause_requested=lambda: run_id in self.pauses) if resume
+                  else self.repository.execute(run_id, provider, tools, loop=self.loop, approver=approver,
+                                               pause_requested=lambda: run_id in self.pauses))
         # Claim and commit the first event before returning success to Node.
         try:
             await anext(stream)
@@ -129,6 +151,8 @@ class LocalRunHost:
         def forget_task(done):
             if self.tasks.get(run_id) == (done, stream):
                 self.tasks.pop(run_id)
+                # A pause asked for too late to be used must not outlive the run.
+                self.pauses.discard(run_id)
 
         task.add_done_callback(forget_task)
 
@@ -197,6 +221,7 @@ class LocalRunHost:
             # `local` is the older name for the same question the profile
             # answers, so the two can never disagree.
             return 200, {"local": self.profile.name == "local", "service": True,
+                         "integrations": self._integration_descriptors(),
                          "available": self.provider is not None, "provider": self.provider_name,
                          "provider_source": self.provider_source,
                          # What this host can be asked to run, per member and
@@ -220,6 +245,15 @@ class LocalRunHost:
                                               for tool in self.tools.tools.values()],
                          "features": {"dag": True, "durable_reviews": True, "manual": True,
                                       "schedules": False, "events": streaming, "budget_warnings": True}}
+        if command == "refine":
+            # One model call that only sharpens the person's own words.
+            self._require_provider()
+            return 200, await refine(self.provider, value)
+        if command == "questions":
+            # One model call that asks what only the person can answer. Answering
+            # is theirs to skip, so the limit is the host's policy, not theirs.
+            self._require_provider()
+            return 200, await questions(self.provider, value, limit=goal_question_limit())
         if command == "propose":
             self._require_provider()
             return 200, await propose(self.provider, self.tools, value)
@@ -228,10 +262,11 @@ class LocalRunHost:
             value = validate_run_request(value)
             if "resources" not in value and value["definition"].get("resources"):
                 value["resources"] = dict(value["definition"]["resources"])
-            validate_host_tools(value["definition"], self.tools)
+            actor = principal or self.principal
+            validate_host_tools(value["definition"], self.run_tools(value, owner=actor.name))
             self._validate_backends(value["definition"])
 
-            self.run_tools(value)
+            self.run_tools(value, owner=actor.name)
             # Pin the compatibility default just like an explicit selection.
             if self.resources is not None and not value.get("resources") and "default" in self.resources:
                 if any(SOURCE_TOOLS.intersection(agent["tools"]) for agent in value["definition"]["agents"]):
@@ -251,21 +286,58 @@ class LocalRunHost:
                     if adapter.mode == "read" and mode != "read" or adapter.mode == "model" and mode != "model":
                         raise ValueError("Selected connector does not support these actions: " + adapter.id)
             run_id = self.repository.create(value)
+            if getattr(self, 'connections', None):
+                self.connections.pin_run(run_id, actor.tenant, actor.name)
             await self._schedule(run_id)
             return 201, public_record(self.repository.get(run_id))
+        if command == "hook":
+            # Only a transport that verified the delivery signature reaches here.
+            if set(value) != {'connection_id', 'payload', 'definition', 'revision', 'owner', 'inputs'}:
+                raise ValueError('Signed hook deliveries are the only way to trigger this run')
+            store = getattr(self, 'connections', None)
+            if store is None:
+                raise ValueError('Integration connections are not configured on this host')
+            record = store.hook(value['connection_id'])
+            if record['owner'] != value['owner']:
+                raise ValueError('Hook connection owner does not match the delivery')
+            application = record['applications'][0]
+            trigger = store.start_hook_run(record, value['payload'])
+            request_value = validate_run_request({'version': 1, 'application_id': application,
+                'revision': value['revision'], 'definition': value['definition'],
+                'task': trigger['task'], 'inputs': value['inputs']})
+            run_id = self.repository.create(request_value)
+            store.pin_run(run_id, self.principal.tenant, record['owner'])
+            await self._schedule(run_id)
+            return 201, {'run_id': run_id, 'application_id': application, 'delivery_id': trigger['delivery_id'],
+                         'received_fields': trigger['received'], 'connection_id': record['id']}
         if command == "list":
             if set(value) != {"application_id"} or not isinstance(value["application_id"], str):
                 raise ValueError("Choose an application")
-            return 200, {"runs": self.repository.list(value["application_id"])}
-        if command in {"get", "resume", "cancel"}:
+            runs = self.repository.list(value['application_id'])
+            if getattr(self, 'connections', None):
+                runs = [run for run in runs if self.connections.run_owner(run['id'], self.principal.tenant)
+                        in (None, (principal or self.principal).name)]
+            return 200, {'runs': runs}
+        if command in {"get", "resume", "cancel", "pause"}:
             if set(value) != {"run_id"} or not isinstance(value["run_id"], str):
                 raise ValueError("Choose a saved request")
             run_id = value["run_id"]
+            if getattr(self, 'connections', None):
+                owner = self.connections.run_owner(run_id, self.principal.tenant)
+                if owner is not None and owner != (principal or self.principal).name:
+                    raise ValueError('Integration run belongs to another principal')
             self.repository.get(run_id)
-            if command == "resume":
+            if command == "pause":
+                # Asked between steps: the run finishes the step it is in and
+                # stops with a checkpoint, so resuming continues from there.
+                if run_id not in self.tasks:
+                    raise ValueError("Only a run that is still going can be paused")
+                self.pauses.add(run_id)
+            elif command == "resume":
                 self._require_provider()
                 await self._schedule(run_id, resume=True)
             elif command == "cancel":
+                self.pauses.discard(run_id)
                 active = self.tasks.get(run_id)
                 if active is not None:
                     task, stream = active
@@ -275,16 +347,53 @@ class LocalRunHost:
                     except asyncio.CancelledError:
                         pass
                     await stream.aclose()
-                if active is None or self.repository.get(run_id)["status"] == "waiting_for_human":
+                if active is None or self.repository.get(run_id)["status"] in {"waiting_for_human", "paused"}:
                     self.repository.cancel_waiting(run_id)
             return 200, public_record(self.repository.get(run_id))
         if command == "review":
             if set(value) != {"run_id", "review_id", "output"} or not isinstance(value["run_id"], str) or not isinstance(value["review_id"], str):
                 raise ValueError("Choose the waiting review and provide your contribution")
             reviewer = (principal or self.principal).name
+            if getattr(self, 'connections', None):
+                owner = self.connections.run_owner(value['run_id'], self.principal.tenant)
+                if owner is not None and owner != reviewer:
+                    raise ValueError('Integration run belongs to another principal')
             self.repository.submit_review(value["run_id"], value["review_id"], reviewer=reviewer, output=value["output"])
             return 200, public_record(self.repository.get(value["run_id"]))
         raise ValueError("Unknown local run command")
+
+    @staticmethod
+    def _integration_group(category):
+        """A stable family name, so a plan can offer real alternatives."""
+        return re.sub(r"[^a-z0-9]+", "-", category.lower()).strip("-")
+
+    def _integration_descriptors(self):
+        """What the catalogue may advertise, and only what this host can run.
+
+        Availability is whether an execution adapter exists, never whether a
+        person has connected an account: a connection belongs to one owner and
+        one application, so claiming it here would speak for everyone.
+        """
+        from conclave.integrations.services import integrations
+        store = getattr(self, 'connections', None)
+        instances = list(store.adapters.instances.items()) if store and store.adapters else []
+        configured = {service.id for _, service in instances}
+        # Each host instance is its own catalogue entry: a person picks the
+        # account or endpoint, not just the service name.
+        choices = [(identifier, service.name, service)
+                   for identifier, service in instances
+                   if service.operations]
+        choices += [(identifier, service.name, service)
+                    for identifier, service in (store.catalogue() if store else integrations()).items()
+                    if identifier not in configured]
+        return [{"id": identifier, "name": name, "group": self._integration_group(service.category), "category": service.category,
+                 "description": "Connect an account to use " + name + ".",
+                 "default_mode": "read" if {item.capability for item in service.operations} <= {"read"} else "draft",
+                 "status": "available" if service.operations else "unavailable",
+                 "available": bool(service.operations), "origin": "integration",
+                 "operations": [{"name": item.name, "description": item.description, "capability": item.capability}
+                                for item in service.operations]}
+                for identifier, name, service in choices]
 
     async def close(self):
         active = list(self.tasks.values())
@@ -399,10 +508,28 @@ def configured_host(*, workspace=None, source_dir=None, principal=None):
         raise ValueError("CONCLAVE_HISTORY_LIMIT must be positive")
     repository = RunRepository(paths.runs)
     repository.history_limit = history_limit
-    return LocalRunHost(repository, provider, tools,
+    # This host is taking over the store, so nothing in it can still be running.
+    repository.sweep_abandoned()
+    host = LocalRunHost(repository, provider, tools,
                         reviewer=principal.name, provider_name=name, unavailable=reason, adapters=adapters,
                         resources=resources, source_extensions=source_extensions, provider_source=source,
                         profile=profile, principal=principal, paths=paths, backends=backends)
+    key = setting('INTEGRATION_KEY')
+    if key:
+        from conclave.integrations import ConnectionStore
+        from conclave.integrations.host import HostAdapters
+        adapter_file = setting('INTEGRATION_ADAPTERS_FILE')
+        adapters = HostAdapters(json.loads(Path(adapter_file).read_text())) if adapter_file else None
+        oauth_file = setting('INTEGRATION_OAUTH_FILE')
+        oauth = None
+        if oauth_file:
+            from conclave.integrations.oauth import OAuth
+            from conclave.integrations.transport import Transport
+            providers = json.loads(Path(oauth_file).read_text())
+            oauth = OAuth(providers, Transport({host for config in providers.values() for host in config['hosts']}))
+        host.connections = ConnectionStore(paths.root / 'connections.sqlite', key.encode(),
+                                           hosts=filter(None, setting('INTEGRATION_HOSTS', '').split(',')), adapters=adapters, oauth=oauth)
+    return host
 
 
 def request_body_limit():
@@ -414,3 +541,16 @@ def request_body_limit():
     if limit < 1:
         raise ValueError("CONCLAVE_MAX_REQUEST_BYTES must be positive or unlimited")
     return limit
+
+
+def goal_question_limit():
+    """How many questions a host may ask about one goal, at most.
+
+    A host policy, not part of a definition: it bounds what this deployment asks
+    of the person, and every application here is asked the same way.
+    """
+
+    value = str(setting("MAX_GOAL_QUESTIONS", "5")).strip()
+    if not value.isdigit() or not 1 <= int(value) <= 20:
+        raise ValueError("CONCLAVE_MAX_GOAL_QUESTIONS must be between 1 and 20")
+    return int(value)

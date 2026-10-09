@@ -96,7 +96,7 @@ def test_local_host_cancel_closes_active_iterator(tmp_path, immediate):
             await started.wait()
         _, record = await host.handle("cancel", {"run_id": run["id"]})
         assert record["status"] == "interrupted"
-        with pytest.raises(ValueError, match="Only a waiting run"):
+        with pytest.raises(ValueError, match="Only a waiting, paused or stopped run"):
             await host.handle("resume", {"run_id": run["id"]})
         await host.close()
 

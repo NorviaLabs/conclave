@@ -96,16 +96,20 @@ def test_cli_serve_uses_conclave_provider_settings(monkeypatch):
     from conclave import api
     calls = []
 
-    async def serve(port):
+    async def serve(port, *, hosted=False):
         import os
-        calls.append((port, os.environ.get("CONCLAVE_PROVIDER"), os.environ.get("CONCLAVE_MODEL")))
+        calls.append((port, os.environ.get("CONCLAVE_PROVIDER"), os.environ.get("CONCLAVE_MODEL"), hosted))
 
     monkeypatch.setattr(api, "serve", serve)
     monkeypatch.delenv("CONCLAVE_PROVIDER", raising=False)
     monkeypatch.delenv("CONCLAVE_MODEL", raising=False)
     cli.run(["serve", "--port", "9000", "--provider", "custom", "--model", "exact/model"])
     import os
-    assert calls == [(9000, "custom", "exact/model")]
+    assert calls == [(9000, "custom", "exact/model", False)]
+    # `--hosted` selects this deployment's own adapter, sign-in included. The
+    # provider flags are per invocation, so this one sets none.
+    cli.run(["serve", "--hosted", "--port", "9100"])
+    assert calls[-1] == (9100, None, None, True)
     assert "CONCLAVE_PROVIDER" not in os.environ
     assert "CONCLAVE_MODEL" not in os.environ
     for port in ("-1", "65536"):

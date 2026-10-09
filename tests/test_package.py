@@ -45,32 +45,6 @@ def test_the_core_ships_no_numbers():
         ), f"{field.name} has a default"
 
 
-def test_application_round_limits_are_unlimited():
-    application = importlib.import_module(
-        "investigation.config"
-    )
-
-    assert application.MAX_ROUNDS is None
-    assert application.MAX_DELEGATIONS_PER_ROUND is None
-
-
-def test_the_application_states_its_own_numbers():
-    from investigation import config
-
-    budget = config.make_budget()
-
-    assert budget.max_per_agent is None
-    assert budget.max_delegations is None
-    assert budget.max_depth is None
-    assert all(getattr(config.RUN_CONFIG, field.name) is None
-               for field in dataclasses.fields(RunConfig))
-    limited = config.make_budget(max_delegations=15, max_per_agent=4, max_depth=2)
-    assert limited.max_per_agent <= limited.max_delegations
-    assert limited.max_depth == 2
-    assert config.make_budget() is not budget
-    assert config.TIMEOUT_SECONDS > 0
-
-
 def test_a_run_config_carries_what_the_caller_chose():
     config = RunConfig(
         max_tool_steps=3,
@@ -109,9 +83,9 @@ def test_importing_the_core_does_not_pull_the_bundled_tools():
                 "import sys",
                 "import conclave",
                 "assert 'conclave.tools' not in sys.modules",
+                "assert 'ddgs' not in sys.modules",
                 (
-                    "assert not any(name == 'investigation' "
-                    "or name.startswith('investigation.') "
+                    "assert not any(name.startswith('conclave.integrations') "
                     "for name in sys.modules)"
                 ),
                 "print('ok')",
@@ -154,12 +128,13 @@ def test_web_search_dependency_is_included_in_normal_install():
                for requirement in requirements)
 
 
-def test_main_module_exposes_run():
-    module = importlib.import_module(
-        "investigation.__main__"
-    )
+def test_main_module_is_the_command():
+    """`python main.py` is kept as an alias for the one command."""
 
-    assert callable(module.run)
+    module = importlib.import_module("main")
+    from conclave import cli
+
+    assert module.run is cli.run
 
 
 def test_console_entry_point_targets_the_app():
@@ -173,16 +148,13 @@ def test_console_entry_point_targets_the_app():
         if entry.group == "console_scripts"
     }
 
-    assert (
-        scripts["investigation"]
-        == "investigation.cli:run"
-    )
-
-    assert scripts["conclave"] == "conclave.cli:run"
+    # One command, and the application package it used to sit beside is gone:
+    # an installation must not offer a second entry point for it.
+    assert scripts == {"conclave": "conclave.cli:run"}
 
 
-def test_the_library_contains_no_investigation_domain():
-    """Acceptance test: the core stays free of this app's vocabulary."""
+def test_the_library_contains_no_application_domain():
+    """Acceptance test: the core stays free of one application's vocabulary."""
 
     from pathlib import Path
 
@@ -194,8 +166,8 @@ def test_the_library_contains_no_investigation_domain():
         "hypothes",
         "investigation",
         "roadmap",
-        # This app's cast and its currency. A prompt or a refusal that
-        # names them is the core assuming which system it is running.
+        # A cast and its currency. A prompt or a refusal that names them is the
+        # core assuming which system it is running.
         "coordinator",
         "evidence",
         "researcher",

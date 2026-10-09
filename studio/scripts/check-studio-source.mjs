@@ -9,7 +9,12 @@ const source = await readFile(new URL('../web/studio.js', import.meta.url), 'utf
 const bootstrap = await readFile(new URL('../web/bootstrap.js', import.meta.url), 'utf8');
 // A page that fails to load must not be reported as a backend that is down.
 assert.match(bootstrap, /Studio failed to load/, 'a module failure says so');
-assert.match(bootstrap, /\/api\/health/, 'and checks whether the backend answered before blaming it');
+assert.match(bootstrap, /apiUrl\(settings,'\/api\/health'\)/, 'and asks the address the page actually uses');
+assert.match(bootstrap, /status<500/, 'counting any answer below a server error as an answer: sign-in replies 401, a proxy that cannot reach its API replies 503');
+assert.match(bootstrap, /Nothing answered at/, 'naming where it looked');
+assert.match(bootstrap, /CONCLAVE_UI_ORIGINS=/, 'and the setting that would explain a silent refusal');
+assert.match(bootstrap, /\$\{escaped\(detail\)\}/, 'with what the page itself reported, escaped');
+assert.match(bootstrap, /\/api\/config\/defaults','\/api\/config\/catalogue'/, 'and the status of the modules the page imports over REST, which is what a failed import is usually about');
 
 // Both functions build page-level markup that no other check can execute.
 const body = name => {
@@ -28,6 +33,8 @@ const declared = name => {
   if (globals.has(name)) return true;
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return [
+    // An imported helper is as available to page markup as a local function.
+    new RegExp(`import\\s*\\{[^}]*\\b${escaped}\\b[^}]*\\}\\s*from`),
     new RegExp(`(?:let|const|var)[^;\\n]*\\b${escaped}\\b\\s*=`),
     new RegExp(`[,{]\\s*${escaped}\\s*=`),
     new RegExp(`^\\s*${escaped}\\s*[,=]`, 'm'),
@@ -40,7 +47,8 @@ const declared = name => {
 
 const used = [...new Set([...template.matchAll(/\$\{([A-Za-z_$][\w$]*)/g)].map(match => match[1]))];
 assert.ok(used.length > 8, 'the page markup interpolates state');
-assert.ok(used.includes('running') && used.includes('runs'), 'both builders are covered');
+// One identifier only the page markup uses, and one only the run list uses.
+assert.ok(used.includes('railOpen') && used.includes('runs'), 'both builders are covered');
 const missing = used.filter(name => !declared(name));
 assert.deepEqual(missing, [], `the page markup interpolates an undeclared identifier: ${missing.join(', ')}`);
 
@@ -77,9 +85,11 @@ assert.ok(dragStart > 0, 'the canvas drag handler is where the page is built');
 const canvasDrag = source.slice(dragStart, dragStart + 900);
 assert.match(canvasDrag, /event\.target\.closest\('\[data-plan-node\]'\)/, 'pressing a step starts a drag');
 assert.match(canvasDrag, /data-canvas-port/, 'while its port and buttons keep their own meaning');
-const keydownStart = source.indexOf("addEventListener('keydown'");
-assert.ok(keydownStart > 0, 'the keyboard handler is where the page is built');
-const keydown = source.slice(keydownStart, keydownStart + 420);
+// The arrow-key handler that moves a focused step, found by what it does rather
+// than by being the first keydown listener on the page (the menu has its own).
+const keydownStart = source.indexOf("const id=event.target.closest('[data-plan-node]')");
+assert.ok(keydownStart > 0, 'the keyboard handler is where the canvas is');
+const keydown = source.slice(keydownStart - 200, keydownStart + 420);
 assert.match(keydown, /ArrowUp[\s\S]{0,200}closest\('\[data-plan-node\]'\)/, 'the arrow keys move the focused step');
 assert.match(source, /data-plan-node="\$\{CSS\.escape\(focusId\)\}"\] \.step-summary/, 'and focus lands on something that exists, so they keep working');
 assert.match(source, /event\.target\.closest\('\[data-plan-node\]'\)\?\.dataset\.planNode/, 'and the step it belongs to is what decides');
@@ -104,19 +114,39 @@ assert.match(source, /function resetRuns\(\)\{layoutSaved=false;clearTimeout\(la
 
 // One way to do one thing: a control per action, a handler per action, and no
 // second name for something that already has one.
-const web = await Promise.all(['studio.js', 'live.js', 'workbench-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js']
+const web = await Promise.all(['studio.js', 'live.js', 'workbench-ui.js', 'integrations-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js', 'menu-ui.js']
   .map(name => readFile(new URL(`../web/${name}`, import.meta.url), 'utf8')));
 const all = web.join('\n');
+// An icon-only control has no visible label, so it must carry both a hovertext
+// and an accessible name: a mouse user and a screen reader each need one.
+const iconOnly = [], unnamed = [];
+for (const [index, name] of ['studio.js', 'live.js', 'workbench-ui.js', 'integrations-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js'].entries()) {
+  for (const match of web[index].matchAll(/<button([^>]*?)>((?:[^<]|<span[^>]*>)*?)<\/button>/g)) {
+    const [, attrs, body] = match;
+    const iconOnlyBody = (body.includes('uiIcon(') || ['×', '⨯'].includes(body.trim())) && !/>[^<]*[A-Za-z]{2}/.test(body);
+    if (!iconOnlyBody) continue;
+    iconOnly.push(`${name}: ${body.trim().slice(0, 20)}`);
+    if (!attrs.includes('title="') || !attrs.includes('aria-label="')) unnamed.push(iconOnly.at(-1));
+  }
+}
+assert.deepEqual(unnamed, [], `icon-only controls need a title and an aria-label: ${unnamed.join(', ')}`);
+assert.ok(iconOnly.length >= 10, 'the icon-only controls this rule covers are actually found');
+console.log(`PASS: ${iconOnly.length} icon-only controls, each naming itself on hover and to a screen reader.`);
+
 const controls = [...all.matchAll(/data-action="([^"]+)"/g)].map(match => match[1]);
 const handlers = new Set([...all.matchAll(/action==='([^']+)'/g)].map(match => match[1]));
 const counted = name => controls.filter(value => value === name).length;
 
-// Both modes use the same application-header Run control.
-assert.equal(counted('run'), 1, 'one Run control in the application header');
+// Run lives in the canvas's floating action bar. The setup screen has no canvas,
+// so its header carries the one Run button instead: never two on one screen.
+assert.equal(counted('run'), 2, 'the canvas controller and the setup screen each offer Run once');
+assert.match(source, /\$\{view==='setup'\?`<button class="button primary" data-action="run"/, 'the header Run belongs to the setup screen only');
 // One page for the plan and the run: Run is also Run again, and what a run needs
 // is configured in a modal rather than a second screen.
 assert.equal(counted('show-request-form'), 0, 'no second control opens the request form');
-assert.match(source, /data-action="edit-plan"/, 'a finished run leaves the plan one control away');
+// There is no Edit plan: the plan tools are in the same bar and using one leaves
+// the run, so a separate mode switch would be a second name for the same thing.
+assert.ok(!/edit-plan/.test(all), 'no Edit plan control survives anywhere');
 assert.match(source, /function openRunConfiguration\(\)[\s\S]{0,400}\$\('run-dialog'\)\.open[\s\S]{0,40}showModal\(\)/, 'Run and Run again open one configuration modal');
 assert.match(source, /studioLiveMarkup\(true\)/, 'the modal is the request form, not a second run view');
 assert.ok(!/view==='run'|view='run'/.test(source), 'the canvas is one page rather than a plan view and a run view');
@@ -140,12 +170,14 @@ assert.deepEqual(unhandled, [], `controls with no handler: ${unhandled.join(', '
 const orphaned = [...handlers].filter(name => !controls.includes(name));
 assert.deepEqual(orphaned, [], `handlers with no control: ${orphaned.join(', ')}`);
 
-// The tabs are gone: one screen, and the header's slot plays and stops a run.
+// The tabs are gone: one screen, and the header's slot starts a run.
 assert.ok(!/data-tab|role="tab"|tablist/.test(source), 'no view switch survives in the page');
-assert.match(source, /data-action="run"/, 'the header offers Run');
-assert.match(source, /data-action="cancel-live" \$\{liveBusy\?'disabled':''\}>Stop/, 'and Stop while a run is going');
+assert.match(source, /data-action="run"[^>]*title="\$\{preview\?\.live\?'Run again':'Run this application'\}"/, 'the canvas starts a run with one named play icon');
 assert.match(source, /data-action="back-to-plan"/, 'and a way back to the plan');
-assert.match(source, /data-action="set-up"/, 'and a way into the setup questions');
+// Set up is an application-level action, so it lives in the canvas's
+// Application menu rather than as a second header button.
+assert.ok(!/data-action="set-up"/.test(source), 'the header keeps no Set up button');
+assert.match(all, /<details class="advanced-file-actions"><summary>Application<\/summary>[\s\S]{0,600}?<button class="button" data-action="set-up">Set up<\/button>/, 'Set up opens the setup questions from the Application menu');
 // Requests live in a list of their own, not on the canvas and not in a picker.
 assert.match(source, /data-action="show-history"/, 'the header reaches the request list');
 // The sidebar is icons when collapsed, with a control that opens it.

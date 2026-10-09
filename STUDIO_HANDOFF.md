@@ -48,7 +48,7 @@ For core development, return to the repository root and follow AGENTS.md:
 
 ~~~sh
 uv sync
-uv run investigation --help
+uv run conclave --help
 ~~~
 
 ## Current boundary

@@ -1,4 +1,5 @@
 import {initialState,executionOrder,planConnections,mergeRecords,preflightIssues} from '/definition.js';
+import {uiIcon} from '/canvas-ui.js';
 
 function inputState(definition,stageId,patches){
   const ancestors=new Set(),links=planConnections(definition);
@@ -40,14 +41,14 @@ export function projectLiveRun(record){
   if(!['running','waiting_for_human'].includes(record.status)){activeStep=null;working.clear();}
   return {live:true,definition:d,task:record.request.task,inputs:record.request.inputs,revision:record.request.revision,
     runId:record.id,resources:record.request.resources||{},mode:record.status==='waiting_for_human'?'waiting_human':record.status,state,activeStep,version,
-    activeSteps:[...working],completedSteps,executionOrder:executionOrder(d),trace,textOrigins,events,review,metrics:record.metrics||{}};
+    activeSteps:[...working],completedSteps,executionOrder:executionOrder(d),trace,textOrigins,events,review,metrics:record.metrics||{},resumable:!!record.resumable};
 }
 
 export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress,runtime,busy,error,source='',applicationId='',requestOnly=false,warningsReviewed=false}){
   // A host that reports no profile is local, which is the server's default.
   const local=runtime.profile?runtime.profile==='local':true;
   const hostedPill=`HOSTED RUN${runtime.tenant&&runtime.tenant!=='local'?` · ${e(runtime.tenant)}`:''}`;
-  const labels={pending:'Starting',running:'Team at work',waiting_human:'Your review is needed',completed:'Results are ready',stopped:'Work stopped',cancelled:'Request cancelled',interrupted:'Work interrupted',failed:'Request failed'};
+  const labels={pending:'Starting',running:'Team at work',waiting_human:'Your review is needed',completed:'Results are ready',stopped:'Work stopped',cancelled:'Request cancelled',interrupted:'Work interrupted',failed:'Request failed',paused:'Paused between steps'};
   const active=run&&['pending','running'].includes(run.mode),last=run?.events.findLast(event=>event.type==='ApplicationFinished');
   const missing=[...new Set(d.agents.flatMap(member=>member.tools))].filter(name=>!runtime.tools?.includes(name));
   const needsSource=d.agents.some(member=>member.tools.some(name=>runtime.resource_tools?.includes(name)));
@@ -66,7 +67,7 @@ export function liveRunMarkup(d,run,{escape:e,requestForm,outputs,human,progress
   }
   if(!run)return `<div class="runtime-banner"><span class="runtime-pill">${local?'LOCAL RUN':hostedPill}</span><p>${local?'Uses the AI provider configured on this computer.':'Uses the AI provider configured for this workspace.'}</p>${configuration}</div>`;
   const current=d.workflow[run.activeStep],status=current?`${d.agents.find(agent=>agent.id===current.agent)?.name||current.agent} ${run.mode==='waiting_human'?'needs your input':'is working'}`:labels[run.mode]||run.mode;
-  return `<div class="run-overview" role="status"><span class="run-status ${run.mode==='completed'?'complete':''}">${e(labels[run.mode]||run.mode)}</span><span>${run.completedSteps.length} of ${run.definition.workflow.length} steps complete${current?` · ${e(status)}`:''}</span><div class="run-secondary-actions">${run.mode==='completed'?'<button class="button" data-action="view-results">View results</button>':''}${run.mode==='waiting_human'?'<button class="button" data-action="view-review">Review input</button>':''}<button class="text-button" data-action="view-run-info">Run information</button></div></div>
+  return `<div class="run-overview" role="status"><span class="run-status ${run.mode==='completed'?'complete':''}">${e(labels[run.mode]||run.mode)}</span><span>${run.completedSteps.length} of ${run.definition.workflow.length} steps complete${current?` · ${e(status)}`:''}</span><div class="run-secondary-actions">${run.mode==='completed'?'<button class="button" data-action="view-results">View results</button>':''}${run.mode==='waiting_human'?'<button class="button" data-action="view-review">Review input</button>':''}<button class="text-button" data-action="view-run-info" title="Run information" aria-label="Run information">${uiIcon('info')}</button></div></div>
   ${error?`<p class="validation" role="alert">${e(error)}</p>`:''}${progress}
   <details class="quiet-details run-information" data-disclosure="live-request-details"><summary>Request, context and run information</summary><p>${e(run.task)}</p><p>${local?'LOCAL RUN':hostedPill} · Saved version ${e(run.revision)}</p>${run.resources?.source?`<p>Source resource: ${e(run.resources.source)}</p>`:''}${Object.entries(run.inputs).map(([key,value])=>`<p><strong>${e(run.definition.inputs?.find(field=>field.id===key)?.label||key)}</strong><br>${e(value)}</p>`).join('')}${last?.reason?`<p>${e(last.reason)}</p>`:''}<details data-disclosure="live-details"><summary>Usage and execution metrics</summary><p>Unreported measurements remain unavailable.</p><div class="metrics-grid">${[['wall_clock_seconds','AI execution seconds'],['tokens','AI text units'],['tool_calls','Tool attempts'],['cost_usd','Cost · USD']].map(([key,label])=>`<div><strong>${label}</strong><p>${e(run.metrics[key]??'Not reported')}</p></div>`).join('')}</div></details></details>
   ${human}${outputs}`;

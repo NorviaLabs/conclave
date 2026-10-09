@@ -1,4 +1,15 @@
 // Studio connects to an independently managed Conclave REST service.
+//
+// A page cannot present the proxy's bearer token, and the proxy answers with its
+// own headers, so a Set-Cookie from the API would never reach the browser. When
+// the host authenticates browsers with a session cookie instead, the page talks
+// to the API directly and sends credentials; `config.json` beside the page is
+// what tells it where. A token deployment keeps the same-origin proxy, because
+// only the proxy can present the token.
+export function pageConfig({apiUrl,apiToken}){
+  return apiToken?{base:'',credentials:'same-origin'}:{base:apiUrl,credentials:'include'};
+}
+
 export function hostConfig(env=process.env){
   function integer(name,fallback,max=Number.MAX_SAFE_INTEGER){const value=Number(env[name]??fallback);if(!Number.isSafeInteger(value)||value<1||value>max)throw new Error('Invalid '+name);return value;}
   const apiUrl=env.CONCLAVE_API_URL||'http://127.0.0.1:8080';

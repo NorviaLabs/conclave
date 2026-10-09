@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import signal
 import socket
@@ -6,6 +7,10 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
+
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -186,3 +191,130 @@ def test_launcher_names_the_port_that_stays_in_use(monkeypatch, capsys):
     monkeypatch.setattr(subprocess, "Popen", lambda *arguments, **keywords: Service())
     assert dev.main(["--backend-port", "18080", "--studio-port", "18787"]) == 1
     assert "Still in use after stopping the services: port 18080, 18787." in capsys.readouterr().err
+
+
+# --- The pair a signed-in Studio needs ---------------------------------------
+
+def login_file(tmp_path, **value):
+    path = tmp_path / "login.json"
+    path.write_text(json.dumps({"tenant": "acme", "redirect_uris": ["http://127.0.0.1:8080/auth/google/callback"],
+                                **value}))
+    return path
+
+
+def test_launcher_finds_the_login_file_only_when_one_is_wanted(tmp_path):
+    (tmp_path / "studio" / ".studio-local").mkdir(parents=True)
+    assert dev.login_file(tmp_path) is None
+    local = tmp_path / "studio" / ".studio-local" / "login.json"
+    local.write_text("{}")
+    assert dev.login_file(tmp_path) == local
+    assert dev.login_file(tmp_path, off=True) is None
+    assert dev.login_file(tmp_path, chosen="/somewhere/else.json") == Path("/somewhere/else.json")
+
+
+def test_the_page_origin_is_allowed_and_the_login_is_passed_on():
+    settings = dev.login_environment({"CONCLAVE_UI_ORIGINS": "https://studio.example.com"},
+                                     login=Path("login.json"), studio_port=8787, session_key="k" * 40)
+    assert settings["CONCLAVE_UI_ORIGINS"] == "https://studio.example.com,http://127.0.0.1:8787,http://localhost:8787"
+    assert settings["CONCLAVE_GOOGLE_LOGIN_FILE"] == "login.json"
+    assert settings["CONCLAVE_SESSION_KEY"] == "k" * 40
+
+    # A key already in the environment is reused, so restarting keeps sessions.
+    kept = dev.login_environment({"CONCLAVE_SESSION_KEY": "existing-key"}, login=Path("login.json"), studio_port=8787)
+    assert kept["CONCLAVE_SESSION_KEY"] == "existing-key"
+
+    # Generated when there is none, and long enough to be one.
+    generated = dev.login_environment({}, login=Path("login.json"), studio_port=8787)
+    assert len(generated["CONCLAVE_SESSION_KEY"]) >= 32
+
+    # Without a login there is nothing to key or to point at.
+    plain = dev.login_environment({}, login=None, studio_port=8787)
+    assert "CONCLAVE_SESSION_KEY" not in plain and "CONCLAVE_GOOGLE_LOGIN_FILE" not in plain
+    assert plain["CONCLAVE_UI_ORIGINS"] == "http://127.0.0.1:8787,http://localhost:8787"
+
+
+def test_the_launcher_names_the_redirect_uri_google_must_allow():
+    matching = dev.sign_in_lines(Path("login.json"), {"tenant": "acme", "redirect_uri": "http://127.0.0.1:8080/auth/google/callback"},
+                                 backend_port=8080, studio_port=8787)
+    assert "Sign in at http://127.0.0.1:8787/" in matching[0]
+    assert matching[1] == "Google must allow this exact redirect URI: http://127.0.0.1:8080/auth/google/callback (tenant acme)"
+
+    # The likeliest way for a correct setup to look broken is these two disagreeing.
+    wrong = dev.sign_in_lines(Path("login.json"), {"tenant": "acme", "redirect_uri": "http://127.0.0.1:8123/auth/google/callback"},
+                              backend_port=8080, studio_port=8787)
+    assert "but the login file says http://127.0.0.1:8123/auth/google/callback" in wrong[1]
+
+    assert dev.sign_in_lines(None, {"tenant": "?", "redirect_uri": "?"}, backend_port=8080, studio_port=8787) == [
+        "Google sign-in is off: no login file. Pass --login PATH to use one."]
+
+
+def test_the_launcher_reads_a_login_file_without_trusting_it():
+    assert dev.login_details(Path("/nonexistent/login.json")) == {"tenant": "?", "redirect_uri": "?"}
+
+
+def test_readiness_accepts_an_api_that_asks_for_sign_in(monkeypatch):
+    """A login deployment answers 401 here; that is a service that is up."""
+
+    def gated(*arguments, **keywords):
+        raise urllib.error.HTTPError("http://127.0.0.1:8080/api/health", 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", gated)
+    assert wait_ready("http://127.0.0.1:8080/api/health", [], threading.Event(), timeout=1) is None
+
+
+def test_readiness_still_waits_for_a_service_that_never_answers(monkeypatch):
+    def refused(*arguments, **keywords):
+        raise urllib.error.URLError("Connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refused)
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        wait_ready("http://127.0.0.1:8080/api/health", [], threading.Event(), timeout=0.3)
+
+
+def test_the_launcher_starts_the_hosted_adapter_with_the_login(monkeypatch, tmp_path, capsys):
+    started = []
+    login = login_file(tmp_path)
+
+    class Service:
+        pid = 4321
+
+        def poll(self):  # Exit at once, so the launcher finishes.
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(dev, "port_error", lambda number: None)
+    monkeypatch.setattr(dev, "wait_ready", lambda *arguments, **keywords: None)
+    monkeypatch.setattr(signal, "signal", lambda *arguments: None)
+    monkeypatch.setattr(subprocess, "run", lambda *arguments, **keywords: SimpleNamespace(stdout="v24.0.0"))
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **keywords: (started.append((argv, keywords)), Service())[1])
+    monkeypatch.delenv("CONCLAVE_SESSION_KEY", raising=False)
+    monkeypatch.delenv("CONCLAVE_UI_ORIGINS", raising=False)
+
+    assert dev.main(["--backend-port", "18080", "--studio-port", "18787", "--login", str(login)]) == 1
+    backend, frontend = started
+    assert backend[0][1:] == ["-m", "conclave", "serve", "--hosted", "--port", "18080"]
+    assert frontend[0] == ["node", "scripts/dev.mjs"]
+    for _, keywords in started:
+        assert keywords["env"]["CONCLAVE_GOOGLE_LOGIN_FILE"] == str(login)
+        assert "http://127.0.0.1:18787" in keywords["env"]["CONCLAVE_UI_ORIGINS"]
+        assert len(keywords["env"]["CONCLAVE_SESSION_KEY"]) >= 32
+    printed = capsys.readouterr().out
+    assert "Sign in at http://127.0.0.1:18787/" in printed
+    assert "Google must allow http://127.0.0.1:18080/auth/google/callback" in printed
+
+
+def test_the_launcher_refuses_a_login_file_that_is_not_there(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(dev, "port_error", lambda number: None)
+    monkeypatch.setattr(signal, "signal", lambda *arguments: None)
+    monkeypatch.setattr(subprocess, "run", lambda *arguments, **keywords: SimpleNamespace(stdout="v24.0.0"))
+    assert dev.main(["--backend-port", "18080", "--studio-port", "18787",
+                     "--login", str(tmp_path / "missing.json")]) == 1
+    assert "No login file at" in capsys.readouterr().err
+
+
+def test_the_launcher_will_not_take_both_login_flags():
+    with pytest.raises(SystemExit) as refused:
+        dev.main(["--login", "a.json", "--no-login"])
+    assert refused.value.code == 2

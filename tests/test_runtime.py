@@ -991,3 +991,165 @@ def test_complete_json_charges_every_attempt():
         usage.total_tokens
         for usage in seen
     ] == [3, 3]
+
+
+def test_an_agent_on_a_clock_is_told_to_answer_before_time_runs_out(runtime):
+    """Time is not an action budget, so the agent is asked rather than cut off.
+
+    The clock is read from the run's own accounting, which is what makes this
+    testable without waiting: the budget says nine and a half seconds of a
+    ten-second run are already spent.
+    """
+
+    from conclave.protocol import TIME_LEFT_RULE
+    from conclave.runtime import TIME_LEFT_WINDOW
+
+    budget = make_budget(wall_clock_seconds=10)
+    budget.spent["wall_clock_seconds"] = 10 - (TIME_LEFT_WINDOW / 2)
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                {"type": "note", "content": "One finding"},
+                FINAL,
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        runtime(provider, run_budget=budget).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert result.content == FINAL["content"]
+    prompts = [prompt for _, prompt in provider.prompts]
+    assert TIME_LEFT_RULE in prompts[-1], "the answer is asked for while there is time to give it"
+    assert TIME_LEFT_RULE not in prompts[0], "and not before the clock is nearly out"
+
+
+def test_an_agent_with_no_clock_is_never_told_time_is_short(runtime):
+    """A run with no time limit has no clock to warn about."""
+
+    from conclave.protocol import TIME_LEFT_RULE
+
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                {"type": "note", "content": "One finding"},
+                FINAL,
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        runtime(provider, run_budget=make_budget()).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert result.content == FINAL["content"]
+    assert all(TIME_LEFT_RULE not in prompt for _, prompt in provider.prompts)
+
+
+def test_the_agent_is_told_where_it_stands_after_every_action(runtime):
+    """An agent that cannot see its budget cannot plan with it.
+
+    The private scratchpad already reports its own count ("Note 1/12 recorded.");
+    the action budget is reported the same way, so the last-action rule is not the
+    first time an agent hears about it.
+    """
+
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                {"type": "note", "content": "One finding"},
+                {"type": "note", "content": "Another"},
+                FINAL,
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        runtime(provider).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert result.content == FINAL["content"]
+    prompts = [prompt for _, prompt in provider.prompts]
+    limit = CONFIG.max_tool_steps
+    assert f"Action 1 of {limit}." in prompts[1], "the count follows the action it counts"
+    assert f"Action 2 of {limit}." in prompts[2]
+    assert "Action" not in prompts[0], "nothing has been spent before the first action"
+
+
+def test_an_agent_with_no_action_limit_is_not_counted(runtime):
+    """A run with no limit has no count to report, and says nothing about one."""
+
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                {"type": "note", "content": "One finding"},
+                FINAL,
+            ]
+        }
+    )
+
+    asyncio.run(
+        runtime(provider, config=replace(CONFIG, max_tool_steps=None)).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert all("Action " not in prompt for _, prompt in provider.prompts)
+
+
+def test_the_instructions_name_the_action_budget_before_any_is_spent(runtime):
+    """The limit is in the instructions, so the first action is already planned."""
+
+    from conclave.protocol import PrivateState
+
+    runner = runtime(ScriptedProvider({"repo-researcher": []}))
+    spec = AGENTS["repo-researcher"]
+    text = runner.system_prompt(spec, 1, PrivateState(runner.config))
+    assert f"You have at most {CONFIG.max_tool_steps} actions for this stage" in text
+    assert "Every tool call, note or delegation is one action." in text
+
+    unlimited = runtime(ScriptedProvider({"repo-researcher": []}), config=replace(CONFIG, max_tool_steps=None))
+    assert "actions for this stage" not in unlimited.system_prompt(spec, 1, PrivateState(unlimited.config))
+
+
+def test_a_stage_that_runs_out_of_time_writes_up_what_it_has(runtime):
+    """Time, too: a clock that ends a search does not end the stage's answer.
+
+    The write-up is one call beyond the limit, which is the trade this makes
+    deliberately: a spent budget should cost time, not the work.
+    """
+
+    from conclave.protocol import WRITE_UP_RULE
+
+    budget = make_budget(wall_clock_seconds=1)
+    budget.spent["wall_clock_seconds"] = 2
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                {"type": "note", "content": "One finding"},
+                FINAL,
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        runtime(provider, run_budget=budget).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert result.content == FINAL["content"], "the stage still answers"
+    assert result.exhausted_by == "wall_clock_seconds", "and the record says why it had to"
+    assert WRITE_UP_RULE in provider.prompts[-1][1], "asked for with nothing left to offer"

@@ -39,7 +39,10 @@ The dev UI is at http://127.0.0.1:8787. On this checkout, the working Node execu
 is `/tmp/conclave-studio-node/node_modules/node/bin/node`; it can invoke
 `scripts/dev.mjs` directly if the system Node installation is unavailable.
 Stopping Studio leaves Conclave running. Stopping Conclave closes its active
-runs safely; inspect their saved status before retrying.
+runs safely; inspect their saved status before retrying. A paused run is not an
+interrupted one: it stopped at a step boundary on request, so resuming it
+continues from the next step without repeating completed work or approved
+external actions.
 
 `CONCLAVE_API_TOKEN` applies to the API only: a browser page cannot present a
 bearer token, so `conclave serve` leaves Studio unserved while a token is set
@@ -93,8 +96,13 @@ provider logs, raw model replies and tool arguments are not exposed in run event
 | GET | `/api/runs/{id}/events?after={sequence}` | Poll ordered events after a cursor; returns `next_cursor` and status |
 | GET | `/api/runs/{id}/reviews` | List durable review requests and submitted contributions |
 | POST | `/api/runs/{id}/reviews` | `{review_id, output}`; validate and persist a human contribution |
-| POST | `/api/runs/{id}/resume` | `{}`; continue after the required human contribution |
-| POST | `/api/runs/{id}/cancel` | `{}`; stop active or waiting work |
+| POST | `/api/runs/{id}/resume` | `{}`; continue a waiting run after its contribution, or a paused run from its checkpoint |
+| POST | `/api/runs/{id}/pause` | `{}`; ask a running run to stop **between steps** and keep a checkpoint |
+| POST | `/api/runs/{id}/cancel` | `{}`; stop active, waiting or paused work |
+| GET | `/api/me` | Who this request is, and how to sign in or out when the deployment has a login |
+| GET | `/auth/google/start` | Begin Google sign-in; answers 302 to Google, or 400 when the redirect is not authorized |
+| GET | `/auth/google/callback` | 302 to `/` with the session cookie, or to `/?signin=failed` |
+| POST | `/auth/logout` | `{}`; clears the session cookie, 204 |
 
 POST creation returns 201. Read/update/actions return 200. Successful deletion
 returns 204. Malformed definitions/requests return 400; missing resources return
@@ -102,6 +110,119 @@ returns 204. Malformed definitions/requests return 400; missing resources return
 services return 503. HTTP framing adds 401 for a missing/incorrect configured
 token, 403 for disallowed origins/Host headers, 413 for oversized requests and
 415 for non-JSON mutations. Backend exceptions are redacted.
+
+## Google sign-in (optional)
+
+A deployment can require people to sign in with Google. It is off unless
+`CONCLAVE_GOOGLE_LOGIN_FILE` names a JSON file and `CONCLAVE_SESSION_KEY` holds
+at least 32 characters; with no login file, every deployment behaves exactly as
+before, and the local loopback server never has one.
+
+```json
+{
+  "client_id": "...", "client_secret": "...",
+  "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
+  "token_url": "https://oauth2.googleapis.com/token",
+  "jwks_url": "https://www.googleapis.com/oauth2/v3/certs",
+  "hosts": ["accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"],
+  "redirect_uris": ["https://studio.example.com/auth/google/callback"],
+  "after_login": "https://studio.example.com/",
+  "tenant": "acme",
+  "domains": ["acme.com"], "emails": ["contractor@partner.test"]
+}
+```
+
+Those four URLs are the live ones from Google's discovery document
+(`https://accounts.google.com/.well-known/openid-configuration`), which also
+publishes `id_token_signing_alg_values_supported: ["RS256"]`, the scopes
+`openid`, `email`, `profile`, and `code_challenge_methods_supported` including
+`S256` — the four things this login relies on.
+
+The flow is authorization code with PKCE(S256), a single-use `state` per attempt,
+a `nonce` bound into the ID token, and an exact redirect-URI match. The ID token
+must be RS256 against a key in `jwks_url` and must agree on `iss`, `aud`, `exp`,
+`iat`, the nonce and `email_verified`; a token that asks for another algorithm is
+refused, so a shared-secret confusion attack is not possible. The session is a
+signed, expiring cookie (`conclave_session`): `HttpOnly`, `SameSite=Lax`, and
+`Secure` whenever the request arrived over HTTPS.
+
+A verified address becomes the principal — `name` is the address, `source` is
+`google` — and the tenant always comes from `tenant` in the file, never from the
+request. **Who may sign in is deny-by-default**: an address must match `domains`
+or `emails`, and a file that names neither is refused when the login is built
+rather than opened to everyone. A Host header or `X-Forwarded-Proto` is only ever
+used to *propose* a redirect URI, which must appear in `redirect_uris`.
+
+`redirect_uris` are exact, because Google requires an exact match, and they must
+be HTTPS — **except on a loopback address**, which is the one case Google
+exempts ("Redirect URIs must use the HTTPS scheme, not plain HTTP. Localhost URIs
+(including localhost IP address URIs) are exempt from this rule"). So
+`http://127.0.0.1:8080/auth/google/callback` is accepted for local use and
+`http://studio.example.com/...` never is: an authorization code or a session
+cookie over plain HTTP is a leak.
+
+Three more keys decide how the browser moves through the flow:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `after_login` | `/` | Where the browser lands after signing in, and after a failed attempt (with `?signin=failed`). A deployment whose page is served from another origin must set it, or the person lands on the API's own root. An absolute HTTPS URL, a loopback HTTP URL, or a path on this deployment's own address. |
+| `same_site` | `lax` | `lax` when the page and the API share a site; `none` when the page is on another site, because a `Lax` cookie is not sent on a cross-site request at all. `none` always sets `Secure`, which a browser requires. |
+| `session_seconds` | 43200 | How long a session lasts, between a minute and 30 days. |
+
+With a login configured, `Authorization: Bearer $CONCLAVE_API_TOKEN` still works
+for programmatic callers, and either credential ends in a principal established
+at the transport. Unauthenticated API requests answer 401 with
+`{"error": "Sign in to continue", "login": "/auth/google/start"}`.
+
+A page on another origin reads the API with `credentials: "include"`, which needs
+two things this adapter does: the response carries
+`access-control-allow-credentials: true` whenever the origin is allowed, and the
+cookie is `SameSite=None` when that origin is on another site. Behind a proxy,
+forward `X-Forwarded-Proto` so the cookie is marked `Secure`, and set
+`CONCLAVE_UI_ORIGINS` to the page's own origin — the adapter refuses a mutation
+from any origin it was not told about, credentials or not.
+
+Two limits are deliberate and worth knowing: sessions cannot be revoked
+individually before they expire (rotate `CONCLAVE_SESSION_KEY` to end them all),
+and signing out ends this deployment's session, not the person's Google session.
+
+Signing in is not the same as connecting Google Drive, Docs or Sheets to an
+application: those are *connections* with their own MCP-scoped access tokens, and
+the login never shares a token with them.
+
+### Trying it on your own machine
+
+`conclave serve --hosted` runs this deployment's adapter on a loopback address —
+the same code path a hosted deployment serves, sign-in included — so the flow can
+be exercised before anything is deployed:
+
+```bash
+# 1. In the Google Cloud console, create a Web application OAuth client and add
+#    exactly this authorised redirect URI:
+#      http://127.0.0.1:8123/auth/google/callback
+# 2. Write login.json with that same redirect_uris value, a tenant, and the
+#    addresses that may sign in (domains or emails).
+export CONCLAVE_GOOGLE_LOGIN_FILE=login.json
+export CONCLAVE_SESSION_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export CONCLAVE_UI_ORIGINS=http://127.0.0.1:8123
+uv run conclave serve --hosted --port 8123
+```
+
+The command prints where the API is and where sign-in starts. Open the printed
+address, and the page asks you to sign in: an unauthenticated page is the
+intended first view. The same server serves the Studio bundle, because this is a local profile, so no
+second process is needed. `CONCLAVE_PROFILE=hosted` turns that off — the shape a
+deployment has, where the page is served elsewhere and `after_login` and
+`same_site` are set to match.
+
+Being served from one loopback address is what keeps this local: the Host header
+must be `127.0.0.1:PORT` or `localhost:PORT`, and only this machine can reach it.
+
+Google's side of the setup matters too: the consent screen must be configured for
+the addresses you list, and an app that is still being tested only admits the
+**test users** it names, so a sign-in can be refused by Google before this code
+sees anything. That refusal arrives as `/?signin=failed` on the page, and this
+adapter reports it without inventing a reason.
 
 Polling is the event transport for this version; no SSE/WebSocket endpoint is
 claimed. Schedules and event triggers remain metadata, and execution is explicitly
@@ -371,7 +492,9 @@ cannot `PUT /api/settings/sources` — its sources come from the deployment.
 - `studio/web/` and `studio/shared/`: UI, editing, rendering and browser checks.
 - `studio/worker/index.js`: same-origin REST proxy and static asset serving.
 - `studio/scripts/dev.mjs`: UI HTTP server only.
-- `investigation/`: separate reference application using the same core.
+- `applications/`: the definition-driven entry point — `run_application` and
+  `validate_definition`, with `create`/`run`/`status`/`review`/`resume`/`cancel`
+  served by `conclave/cli.py`.
 
 `applications` retains compatibility imports for the earlier application CLI.
 Studio's former Python runtime and JSON-lines bridge have been removed. Historical
@@ -379,3 +502,168 @@ D1 migration files remain as schema history; they are not run by Studio or used
 by the current REST architecture.
 
 Application deletion retains run snapshots and history. Deleted starters are not reseeded on restart. Fictional fixture configuration is no longer exposed.
+
+## Opt-in integration connections
+
+See [integration setup and status](INTEGRATIONS.md) for implemented operations,
+security boundaries and the explicit remaining scope. Integration credentials
+are not application fields. Configure `CONCLAVE_INTEGRATION_KEY` server-side to
+enable encrypted connection storage. `CONCLAVE_INTEGRATION_ADAPTERS_FILE`
+loads deployment-approved MCP/OpenAPI/database/S3 instances; custom endpoint hosts require
+`CONCLAVE_INTEGRATION_HOSTS`. With no key, discovery works but connection setup
+returns 503. No live verification is implied by a configured connection.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/integrations` | Exactly 23 service/protocol descriptors with implemented operations |
+| GET / POST | `/api/connections` | List redacted connections / create explicit application and operation grants |
+| DELETE | `/api/connections/{id}` | Disconnect and remove encrypted local credentials |
+| POST | `/api/connections/{id}/health` | `{}`; probe a safe granted read when possible |
+| POST | `/api/integrations/recommend` | `{goal, application_id}`; suggestions, never grants |
+
+Tool assignments use `connection.<id>.<operation>` in the existing agent `tools`
+array. Each execution resolves the encrypted connection server-side and rechecks
+ownership, tenant, application, operation, scopes and revocation. Mutations
+remain WRITE capabilities, so no configured approver means denial. The current
+Studio host does not provide a per-tool approval dialog; trusted Python callers
+can use the existing approver callback. In-process run events include
+`connection_id` and `operation` without credentials or raw arguments.
+
+OAuth lifecycle is opt-in via `CONCLAVE_INTEGRATION_OAUTH_FILE`; see
+[OAuth setup and limitations](INTEGRATIONS.md#oauth-lifecycle-update).
+Authorization begin/callback are authenticated POST endpoints. Tokens are
+never returned in API responses. Refresh runs server-side before expiry;
+provider revocation is separate from ordinary local disconnect.
+
+## Inbound triggers and tool approvals
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/hooks/{connection_id}` | A signed inbound delivery starts one authorized run |
+| GET | `/api/runs/{id}/tool-approvals` | Pending external actions for this run |
+| POST | `/api/runs/{id}/tool-approvals` | `{approval_id,approved}`; one-shot, owner-bound |
+
+`/api/hooks/` is exempt from `CONCLAVE_API_TOKEN` only when `CONCLAVE_HOOKS=1`
+configures a hook resolver, because the signature is its own authentication.
+Without that resolver the path stays token-protected and refuses every caller.
+Approvals live in process memory, expire after five minutes and never replay;
+arguments are shown to the authenticated run owner and are not persisted.
+
+## Goal refinement
+
+`POST /api/goals/refine` takes `{goal}` (1–4000 characters) and returns
+`{goal, summary}`: the person's own goal reworded, plus a short note of what was
+made clearer. It reads nothing else, creates nothing, saves nothing and runs
+nothing. The result is a suggestion the person edits and accepts in Studio; it is
+never applied for them. The request shares the per-tenant proposal lock, so one
+model call runs at a time, and it uses the planning timeout on the hosted proxy.
+Provider failures return one generic message; provider text is never forwarded.
+
+## Why a run stopped
+
+`ApplicationFinished` carries the `status` and a `reason`. A run cut short by a
+member's own limits is `stopped`, and the reason names the member, the limit and
+the stage that was never completed — `market_researcher: used all 12 action steps
+without completing Research opportunities` — rather than reporting only that a
+stage did not complete. The limits themselves are the application's:
+`run_config.max_tool_steps` ("Agent action steps" in Setup) bounds the actions one
+member may take in a stage before it must answer, and `run_budget.*` bounds the
+whole run.
+
+An agent with one action left is told so, in the observation it is given: a budget
+that ends without an answer produces nothing, so the last action is spent on the
+answer rather than on work that cannot be finished. It is told where it stands
+after every action (`Action 3 of 20.`), and its instructions name the budget before
+any of it is spent, because an agent that cannot see its budget cannot plan with
+it. A run with no action limit is told nothing about one. When the action budget is
+spent anyway, the agent is asked once more for the answer, with nothing left to
+offer — no tools, no delegations — and that answer completes the stage. The call
+is charged like any other, and `AgentResult.exhausted_by` names the setting that
+was spent either way, so a stage written up after its budget ran out is not
+mistaken for one that finished early. `run_budget.wall_clock_seconds` is
+absolute: it is not exceeded to rescue a stage, which is why a new application
+does not start with one.
+
+The runtime's own default for every dimension is no limit. The bundled
+application defaults (`conclave/application/data/defaults.json`, replaceable with
+`DEFAULTS_FILE`) bound the work rather than the clock: 12 action steps per stage,
+40 tool calls per run, no time limit.
+
+## What runs each step
+
+A member, or a single step, may name the backend and model that run it; a step
+that names neither runs on its member's, and one whose member names neither runs
+on the host's own default. `StageStarted` carries the `provider` and `model` the
+run actually used for that step, which is empty when the host's default ran it —
+nothing is invented to fill that in, and a caller that needs a name asks
+`/api/runtime` for the host's own.
+
+## Continuing a run
+
+A run's record carries `resumable`: true when it stopped in a way that can be
+continued — a waiting review, a pause, or a budget stop that recorded a
+checkpoint. The checkpoint itself stays on the host; the flag is what a caller
+needs to offer the choice.
+
+A backend that did not answer in time, or could not be reached, **stops** a run
+rather than failing it: that is a condition of the moment, not a defect in the
+application, so the run records a checkpoint and can be continued. The timeout is
+the host's own (`CONCLAVE_MODEL_TIMEOUT`, 300 seconds by default) and applies to
+one call, which is why a slow backend can also overshoot a wall-clock budget
+between checks. A backend that failed, reported an error or returned an unreadable
+reply is a failure, and a failure is not continued.
+
+A host taking over its store marks any run left `running` by a process that is
+gone as `interrupted`, with the reason recorded and deliberately without a
+checkpoint: a run cut off mid-flight may have had an external action in it, so it
+is reported rather than offered for replay.
+
+`POST /api/runs/<id>/resume` continues from the last stage that completed.
+Completed stages and the budget already spent are restored from the checkpoint,
+so nothing finished is repeated and no spend is forgotten — which also means a
+run stopped on a limit needs that limit raised before resuming is useful. A
+half-finished stage is not restored: agent-internal recovery is unsupported, and
+a call that was interrupted is never replayed. A `failed` run is not resumable at
+all, because a failure is not a budget.
+
+## A run's events
+
+`GET /api/runs/<id>/events` streams the run's record as server-sent events, one
+frame per change, and ends when the run does. Every recorded event carries
+`timestamp`, set on the host's clock when it was recorded, so a page can say how
+long a step has been working without keeping its own clock — a reload does not
+restart it, and the answer describes the run rather than the reader.
+
+A deployment's adapter streams these frames through whatever serves it. This
+machine's own server writes each frame to the socket as the adapter produces it:
+a server that collected the response first would hold the stream until the run
+ended, and a page watching a step work would sit on the snapshot it started with,
+with no error to fall back on.
+
+## Questions about a goal
+
+`POST /api/goals/questions` takes `{goal}` (1–4000 characters) and optionally
+`{requirements}` — the questions asked so far with the answers given, the same
+shape a definition holds — and returns `{questions}`: **at most one** question,
+the next one worth asking. Each question follows the answers before it, and the
+host returns none as soon as those answers settle what it would ask, so the
+person is not asked for more than the host needs. It reads nothing else, creates
+nothing, saves nothing and runs nothing, and it shares the same per-tenant lock
+and timeout as refinement.
+
+`CONCLAVE_MAX_GOAL_QUESTIONS` sets the host's limit (default 5, 1–20). At that
+limit the host answers `{questions: []}` without calling the model at all, and a
+model that returns more than one question, repeats a question already asked, or
+answers with anything other than a list of questions is refused rather than
+trimmed, so the person is never shown a question the host did not intend to ask.
+A goal that is already clear is allowed to produce none.
+
+Answering is optional. Studio asks after the goal is submitted, and a host that
+cannot answer — no provider, a provider failure, an unusable reply — proposes
+from the goal alone rather than standing between the person and their
+application. The answers the person gives are saved with the application as
+`requirements`, a list of `{question, answer}` in their own words; an unanswered
+question is kept with an empty answer so the plan can show it as open, and only
+answered requirements are put in front of the agents when the application runs.
+A definition without `requirements` is valid, so applications saved before this
+existed keep working.

@@ -381,7 +381,7 @@ class FakeReader:
         return self.body
 
 
-def respond_once(monkeypatch, api, request, *, body=b"", token=None, assets=None):
+def respond_once(monkeypatch, api, request, *, body=b"", token=None, assets=None, app=None):
     """The server's bytes for one raw request, without binding a socket."""
     from types import SimpleNamespace
     from conclave import api as module
@@ -394,7 +394,7 @@ def respond_once(monkeypatch, api, request, *, body=b"", token=None, assets=None
         return server
 
     monkeypatch.setattr(module.asyncio, "start_server", capture)
-    asyncio.run(module.start_server(api, 0, token=token, assets=assets))
+    asyncio.run(module.start_server(api, 0, token=token, assets=assets, app=app))
     writer = FakeWriter()
     asyncio.run(captured["respond"](FakeReader(request, body), writer))
     head, _, payload = writer.written.partition(b"\r\n\r\n")
@@ -568,3 +568,388 @@ def test_deleted_starter_stays_deleted_after_restart_and_legacy_samples_are_hidd
     with pytest.raises(KeyError):
         restored.get(saved["id"])
     assert len(restored.applications()) == len(starters) - 1
+
+
+# --- Serving a deployment's adapter from this machine ------------------------
+
+def hosted_app(*, login_result, origins=()):
+    from conclave.api import TenantAPIs
+    from conclave.asgi import application
+
+    return application(apis=TenantAPIs(), login=login_result, origins=origins)
+
+
+def header(head, name):
+    """One response header, whatever case the writer spelled it in."""
+
+    for line in head.split("\r\n")[1:]:
+        key, _, value = line.partition(": ")
+        if key.lower() == name.lower():
+            return value
+    raise AssertionError(f"{name} is missing from {head!r}")
+
+
+def request_head(method, target, *headers):
+    return f"{method} {target} HTTP/1.1\r\n" + "".join(f"{line}\r\n" for line in headers) + "\r\n"
+
+
+def hosted_login(monkeypatch, **overrides):
+    """A login whose callback this deployment listed for a loopback address."""
+
+    from test_identity import claims, config, id_token, keypair
+    from conclave.identity import GoogleLogin
+
+    key, _ = keypair()
+    settings = {"redirect_uris": ["http://127.0.0.1:8080/auth/google/callback"],
+                "after_login": "http://127.0.0.1:8080/", **overrides}
+    result = GoogleLogin(config(**settings), _HostedHTTP(key), session_key="k" * 40)
+    return key, result
+
+
+class _HostedHTTP:
+    """The token endpoint and key set, without a network."""
+
+    def __init__(self, key):
+        self.key, self.token = key, None
+
+    async def request(self, method, url, *, headers=None, body=None, params=None, raw=False):
+        if url.endswith("/token"):
+            return self.token or {}
+        from test_identity import keypair
+        from conclave.identity import public_key_from_jwk
+        _, jwk = keypair()
+        numbers = self.key.public_key().public_numbers()
+        from test_identity import encode
+        jwk = {**jwk, "n": encode(numbers.n.to_bytes((numbers.n.bit_length() + 7) // 8, "big")),
+               "e": encode(numbers.e.to_bytes((numbers.e.bit_length() + 7) // 8, "big"))}
+        return {"keys": [jwk]}
+
+
+def test_the_hosted_adapter_runs_on_this_machine(tmp_path, monkeypatch):
+    """`conclave serve --hosted`: the deployment's own adapter, over loopback."""
+
+    from test_identity import claims, id_token
+
+    key, login_result = hosted_login(monkeypatch)
+    app = hosted_app(login_result=login_result, origins=("http://localhost:5173",))
+    assets = studio_assets()
+    host = "Host: 127.0.0.1:8080"
+
+    # The Studio page and the API are served from one address, as locally.
+    head, payload = respond_once(monkeypatch, None, request_head("GET", "/", host), assets=assets, app=app)
+    assert head.startswith("HTTP/1.1 200") and b"<title>Conclave" in payload
+
+    # Nothing is served to an unauthenticated API caller but a way to sign in.
+    head, payload = respond_once(monkeypatch, None, request_head("GET", "/api/me", host), app=app)
+    assert head.startswith("HTTP/1.1 401") and json.loads(payload) == {"error": "Sign in to continue",
+                                                                      "login": "/auth/google/start"}
+
+    # The redirect URI Google is given is the loopback one this login listed.
+    head, _ = respond_once(monkeypatch, None, request_head("GET", "/auth/google/start", host), app=app)
+    assert head.startswith("HTTP/1.1 302")
+    location = header(head, "location")
+    assert location.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Fauth%2Fgoogle%2Fcallback" in location
+    state = location.split("state=")[1].split("&")[0]
+
+    # Google answers with a token for the nonce this deployment asked for.
+    login_result.transport.token = {"id_token": id_token(key, claims(nonce=login_result.pending[state][2]))}
+    head, _ = respond_once(monkeypatch, None, request_head("GET", f"/auth/google/callback?code=code-1&state={state}", host), app=app)
+    assert head.startswith("HTTP/1.1 302") and header(head, "location") == "http://127.0.0.1:8080/"
+    cookie = header(head, "set-cookie")
+    assert cookie.startswith("conclave_session=") and "HttpOnly" in cookie and "SameSite=Lax" in cookie
+
+    # That cookie is the credential: it reaches the API, and the page may read it.
+    value = cookie.split(";")[0].split("=", 1)[1]
+    head, payload = respond_once(monkeypatch, None, request_head("GET", "/api/me", host,
+                                                                 f"Cookie: conclave_session={value}",
+                                                                 "Origin: http://localhost:5173"), app=app)
+    assert head.startswith("HTTP/1.1 200") and head.lower().count("access-control-allow-credentials: true") == 1
+    assert json.loads(payload)["principal"]["name"] == "person@example.com"
+
+    # The adapter's own rules decide now, not the loopback check: a credential
+    # that exists is still not readable from an origin this deployment never named.
+    head, payload = respond_once(monkeypatch, None, request_head("GET", "/api/me", host,
+                                                                 f"Cookie: conclave_session={value}",
+                                                                 "Origin: http://elsewhere.test"), app=app)
+    assert head.startswith("HTTP/1.1 403") and json.loads(payload)["error"] == "Use an allowed origin"
+    # And without a credential the answer is the same wherever it came from.
+    head, _ = respond_once(monkeypatch, None, request_head("GET", "/api/me", host, "Origin: http://elsewhere.test"), app=app)
+    assert head.startswith("HTTP/1.1 401")
+
+
+def test_a_hosted_page_may_be_turned_off_and_the_api_still_runs(tmp_path, monkeypatch):
+    """A deployment that ships the bundle elsewhere serves the API alone."""
+
+    _, login_result = hosted_login(monkeypatch)
+    app = hosted_app(login_result=login_result, origins=("https://studio.example.com",))
+    head, _ = respond_once(monkeypatch, None, request_head("GET", "/", "Host: 127.0.0.1:8080"), app=app)
+    assert header(head, "content-type").startswith("application/json")
+    head, payload = respond_once(monkeypatch, None, request_head("GET", "/api/health", "Host: 127.0.0.1:8080"), app=app)
+    assert "HTTP/1.1 401" in head
+    # A non-browser caller still has to be on this machine: only loopback Hosts.
+    head, payload = respond_once(monkeypatch, None, request_head("GET", "/api/health", "Host: api.example.com"), app=app)
+    assert "HTTP/1.1 403" in head and json.loads(payload)["error"] == "Use the local Conclave address"
+
+
+def test_serving_the_hosted_adapter_prints_where_to_sign_in(tmp_path, monkeypatch, capsys):
+    """`conclave serve --hosted` is how sign-in is tried before deploying."""
+
+    import json as _json
+    from types import SimpleNamespace
+
+    from conclave import api as module
+    from conclave.identity import MINIMUM_SESSION_KEY
+    from test_identity import keypair
+
+    _, jwk = keypair()
+    login_file = tmp_path / "login.json"
+    login_file.write_text(_json.dumps({
+        "client_id": "client-1", "client_secret": "secret-1",
+        "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "jwks_url": "https://www.googleapis.com/oauth2/v3/certs",
+        "hosts": ["accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"],
+        "redirect_uris": ["http://127.0.0.1:8123/auth/google/callback"],
+        "tenant": "acme", "emails": ["person@example.com"]}))
+    monkeypatch.setenv("CONCLAVE_GOOGLE_LOGIN_FILE", str(login_file))
+    monkeypatch.setenv("CONCLAVE_SESSION_KEY", "k" * MINIMUM_SESSION_KEY)
+    monkeypatch.setenv("CONCLAVE_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.delenv("CONCLAVE_API_TOKEN", raising=False)
+
+    captured = {}
+
+    class Server:
+        """A socket that is served, then closed, without binding one."""
+
+        sockets = []
+
+        async def __aenter__(self):
+            self.sockets = [SimpleNamespace(getsockname=lambda: ("127.0.0.1", captured["port"]))]
+            return self
+
+        async def __aexit__(self, *exception):
+            return False
+
+    async def capture(api, port, *, token=None, assets=None, app=None):
+        captured.update(api=api, port=port, app=app, assets=assets)
+        return Server()
+
+    class Stopped(asyncio.Event):
+        async def wait(self):
+            return None
+
+    monkeypatch.setattr(module, "start_server", capture)
+    monkeypatch.setattr(module.asyncio, "Event", Stopped)
+    asyncio.run(module.serve(8123, hosted=True))
+
+    printed = capsys.readouterr().out
+    assert captured["port"] == 8123 and captured["api"] is None
+    assert captured["app"].login is not None and captured["app"].login.config.tenant == "acme"
+    assert "http://127.0.0.1:8123/api/health" in printed
+    assert "Google sign-in: http://127.0.0.1:8123/auth/google/start" in printed
+    # An unnamed origin may read but not write, so the command says so outright.
+    assert "Page origins allowed to call this API: none." in printed
+    assert "Set CONCLAVE_UI_ORIGINS=http://127.0.0.1:8123" in printed
+    monkeypatch.setenv("CONCLAVE_UI_ORIGINS", "http://127.0.0.1:8123, https://studio.example.com")
+    asyncio.run(module.serve(8123, hosted=True))
+    assert "Page origins allowed to call this API: http://127.0.0.1:8123 https://studio.example.com" in capsys.readouterr().out
+    monkeypatch.delenv("CONCLAVE_UI_ORIGINS", raising=False)
+
+    # Without a login file the same command serves the API and says so.
+    monkeypatch.delenv("CONCLAVE_GOOGLE_LOGIN_FILE", raising=False)
+    asyncio.run(module.serve(8123, hosted=True))
+    assert "Google sign-in: off." in capsys.readouterr().out
+    assert captured["assets"], "a local profile serves the page"
+
+    # On a hosted profile the page is served elsewhere, as in a deployment.
+    monkeypatch.setenv("CONCLAVE_PROFILE", "hosted")
+    asyncio.run(module.serve(8123, hosted=True))
+    assert captured["assets"] == {} and "Studio:" not in capsys.readouterr().out
+    monkeypatch.delenv("CONCLAVE_PROFILE", raising=False)
+
+
+def test_an_adapter_that_fails_is_not_reported_as_a_bad_request(tmp_path, monkeypatch):
+    """A broken deployment is a 500 here, and it still says nothing private."""
+
+    async def broken(scope, receive, send):
+        raise RuntimeError("private host detail")
+
+    async def silent(scope, receive, send):
+        return None
+
+    for app in (broken, silent):
+        head, payload = respond_once(monkeypatch, None, request_head("GET", "/api/health", "Host: 127.0.0.1:8080"), app=app)
+        assert "HTTP/1.1 500" in head and "private host detail" not in payload.decode()
+
+
+def test_a_misconfigured_login_is_reported_as_a_setting(tmp_path, monkeypatch, capsys):
+    """The command says which setting is wrong, in one line."""
+
+    from conclave import api as module
+    from conclave import cli
+
+    monkeypatch.setenv("CONCLAVE_GOOGLE_LOGIN_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("CONCLAVE_SESSION_KEY", "k" * 32)
+    with pytest.raises(ValueError, match="login file could not be read"):
+        asyncio.run(module.serve(8123, hosted=True))
+
+    with pytest.raises(SystemExit) as exit_code:
+        cli.run(["serve", "--hosted", "--port", "8123"])
+    assert exit_code.value.code == 2
+    assert "clave: The login file could not be read: FileNotFoundError" in capsys.readouterr().err
+
+
+def test_the_deployments_own_page_may_write_to_it(tmp_path, monkeypatch):
+    """A page the adapter serves itself is not a foreign origin.
+
+    Browsers attach an origin to every write, including same-origin ones, so a
+    deployment that judged origins only by the list of *other* pages would refuse
+    its own page. The origin has to match the host the request arrived on.
+    """
+
+    from conclave.api import TenantAPIs
+    from conclave.asgi import application
+    from conclave.cli import create_definition
+
+    # This test writes an application, so the store is its own directory rather
+    # than the one this checkout uses.
+    monkeypatch.setenv("CONCLAVE_DATA_DIR", str(tmp_path))
+    app = application(apis=TenantAPIs(), token="a-token", origins=("http://localhost:5173",))
+    host = "Host: 127.0.0.1:8080"
+    definition = json.dumps({"definition": create_definition("one", "Do the thing the person asked for, carefully.")}).encode()
+
+    def write(origin):
+        return respond_once(monkeypatch, None,
+                            request_head("POST", "/api/applications", host, "Authorization: Bearer a-token",
+                                         f"Origin: {origin}", "Content-Type: application/json",
+                                         f"Content-Length: {len(definition)}"),
+                            body=definition, app=app)
+
+    # The deployment's own page, posting to the address it was served from.
+    head, payload = write("http://127.0.0.1:8080")
+    assert head.startswith("HTTP/1.1 201"), payload
+
+    # Every other page is still refused, including one claiming this port's host
+    # from another host name, and one claiming this host from another port.
+    for origin in ("https://elsewhere.test", "http://localhost:8080", "http://127.0.0.1:9999"):
+        head, payload = write(origin)
+        assert head.startswith("HTTP/1.1 403") and json.loads(payload)["error"] == "Use an allowed origin", origin
+
+
+def test_the_pages_own_modules_load_before_signing_in(tmp_path, monkeypatch):
+    """The page cannot reach its sign-in screen if its modules are gated.
+
+    `definition.js` and `catalogue.js` are served rewritten to import this
+    deployment's defaults and catalogue over REST, so they are part of the page's
+    module graph: a 401 there is a page that never loads, which is what a
+    signed-out visitor would see instead of a way in. They hold the deployment's
+    own configuration, not anybody's data, and the rest of the API stays gated.
+    """
+
+    from conclave.api import TenantAPIs
+    from conclave.asgi import application
+
+    monkeypatch.setenv("CONCLAVE_DATA_DIR", str(tmp_path))
+    key, login_result = hosted_login(monkeypatch)
+    app = hosted_app(login_result=login_result, origins=("http://localhost:5173",))
+    host = "Host: 127.0.0.1:8080"
+
+    for module in ("/api/config/defaults", "/api/config/catalogue"):
+        head, payload = respond_once(monkeypatch, None, request_head("GET", module, host), app=app)
+        assert head.startswith("HTTP/1.1 200"), (module, head)
+        assert json.loads(payload), module
+
+    # Everything that is somebody's data is still gated, including a write.
+    head, payload = respond_once(monkeypatch, None, request_head("GET", "/api/me", host), app=app)
+    assert head.startswith("HTTP/1.1 401") and json.loads(payload)["login"] == "/auth/google/start"
+    head, _ = respond_once(monkeypatch, None, request_head("GET", "/api/applications", host), app=app)
+    assert head.startswith("HTTP/1.1 401")
+
+    # A deployment that authenticates machines instead keeps its configuration
+    # to itself: no browser flow means no page to boot.
+    machine = application(apis=TenantAPIs(), token="a-token", origins=("http://localhost:5173",))
+    head, _ = respond_once(monkeypatch, None, request_head("GET", "/api/config/catalogue", host), app=machine)
+    assert head.startswith("HTTP/1.1 401")
+
+
+def test_a_streamed_response_reaches_the_socket_frame_by_frame(monkeypatch):
+    """A run's events must reach a watching page while the run is still working.
+
+    The adapter's messages are written as they arrive. A server that collected
+    them first would hold an endless event stream until the run finished, and the
+    page would sit on whatever snapshot it started with — with no error to fall
+    back on, which is exactly how a working step looks stuck.
+    """
+
+    from types import SimpleNamespace
+
+    from conclave import api as module
+
+    writer = FakeWriter()
+    seen = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream")]})
+        seen.append(writer.written)
+        await send({"type": "http.response.body", "body": b"data: one\n\n", "more_body": True})
+        seen.append(writer.written)
+        await send({"type": "http.response.body", "body": b"data: two\n\n", "more_body": True})
+        seen.append(writer.written)
+
+    async def capture(handler, host, port, **kwargs):
+        capture.respond = handler
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(module.asyncio, "start_server", capture)
+    asyncio.run(module.start_server(None, 0, app=app))
+    asyncio.run(capture.respond(FakeReader(request_head("GET", "/api/runs/abc/events", "Host: 127.0.0.1:8080")), writer))
+
+    # The head is out before the first event, and each event is out before the
+    # adapter is asked for the next one.
+    assert seen[0].startswith(b"HTTP/1.1 200 Response\r\ncontent-type: text/event-stream")
+    assert seen[0].endswith(b"\r\n\r\n") and b"data:" not in seen[0]
+    assert b"data: one\n\n" in seen[1] and b"data: two" not in seen[1]
+    assert b"data: one\n\ndata: two\n\n" in seen[2]
+    assert writer.written.endswith(b"data: two\n\n")
+
+
+def test_a_client_that_went_away_is_not_an_error(tmp_path, monkeypatch):
+    """Closing a stream you are watching is not this server failing.
+
+    A browser that navigates away mid-stream leaves a broken pipe behind. The
+    response is still written where it can be, and the connection is closed
+    quietly: the run carries on in its own task either way.
+    """
+
+    from types import SimpleNamespace
+
+    from conclave import api as module
+
+    monkeypatch.setenv("CONCLAVE_DATA_DIR", str(tmp_path))
+
+    class ClosedEarly(FakeWriter):
+        def __init__(self):
+            super().__init__()
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    writer = ClosedEarly()
+
+    async def capture(handler, host, port, **kwargs):
+        capture.respond = handler
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(module.asyncio, "start_server", capture)
+    asyncio.run(module.start_server(make_api(tmp_path), 0))
+    asyncio.run(capture.respond(FakeReader(request_head("GET", "/api/runtime", "Host: 127.0.0.1:8080")), writer))
+
+    assert writer.written.startswith(b"HTTP/1.1 200 Response"), "the answer is still written"
+    assert writer.closed, "and the connection is still closed"
+

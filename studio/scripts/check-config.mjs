@@ -30,7 +30,9 @@ for(const input of ['', '50000']){
  assert.equal(context.object.max_tool_output_chars,input===''?null:50000,'runtime limit editing stores numbers or null');
 }
 d.agents[0].tools=['<script>'];assert.throws(()=>validateDefinition(d));d.agents[0].tools=[];
-const source=(await readFile(new URL('../web/advanced.js',import.meta.url),'utf8')).replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href));
+const source=(await readFile(new URL('../web/advanced.js',import.meta.url),'utf8'))
+  .replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href))
+  .replace("'/canvas-ui.js'",JSON.stringify(new URL('../web/canvas-ui.js',import.meta.url).href));
 const {contractMarkup}=await import('data:text/javascript,'+encodeURIComponent(source));
 const escape=value=>String(value).replaceAll('<','&lt;').replaceAll('>','&gt;');
 assert.match(contractMarkup(d,{validation:()=>'',escape,runtime:{available:true,provider:'codex',tools:['custom_lookup']}}),/Local AI execution is available/);
@@ -45,7 +47,7 @@ validateWorkspaceCatalogue(catalog);installWorkspaceCatalogue(catalog);
 assert.ok(templates.some(template=>template.id==='custom_starter'));
 assert.ok(applicationTypes.some(template=>template.id==='custom_starter'));
 installWorkspaceCatalogue(emptyWorkspaceCatalogue());assert.ok(!templates.some(template=>template.id==='custom_starter'));
-const collision=emptyWorkspaceCatalogue();collision.starters.push({id:'investigation',name:'Collision',definition:emptyDefinition()});assert.throws(()=>validateWorkspaceCatalogue(collision));
+const collision=emptyWorkspaceCatalogue();collision.starters.push({id:'case-resolution',name:'Collision',definition:emptyDefinition()});assert.throws(()=>validateWorkspaceCatalogue(collision));
 console.log('PASS: custom catalog validation, installation, deletion and bundled identifier protection.');
 const {validateRecordFields,validateRecordValues}=await import('../shared/definition.js');
 const fields=[{key:'score',label:'Score',type:'number',required:true},{key:'verified',label:'Verified',type:'boolean',required:true}];
