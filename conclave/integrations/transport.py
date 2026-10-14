@@ -3,6 +3,7 @@ import asyncio
 import http.client
 import ipaddress
 import json
+import re
 import socket
 import ssl
 from urllib.parse import urlencode, urlsplit
@@ -28,6 +29,25 @@ def public_addresses(host):
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
         raise IntegrationError('Private or reserved network targets are forbidden')
     return sorted(addresses)
+
+
+PERMISSIONS = re.compile(r'[a-z_]+=[a-z]+(?:[,;] ?[a-z_]+=[a-z]+)*')
+
+
+def refusal(response):
+    """What a refused request needed, from headers GitHub sets for that.
+    Unlike the body these hold no account data, and only the expected shape
+    of a permission list or an SSO demand is repeated. GitHub names the
+    accepted permissions on every response, so only a 403 is a refusal: a 404
+    for a missing file would otherwise read as a credential problem."""
+    if response.status != 403:
+        return ''
+    needed = (response.getheader('X-Accepted-GitHub-Permissions') or '').strip()
+    if needed and len(needed) <= 200 and PERMISSIONS.fullmatch(needed):
+        return f'; the token needs {needed}'
+    if (response.getheader('X-GitHub-SSO') or '').startswith('required'):
+        return '; the token needs SSO authorization for this organization'
+    return ''
 
 
 class PinnedHTTPS(http.client.HTTPSConnection):
@@ -61,7 +81,11 @@ class Transport:
                     query += ('&' if query else '') + urlencode(params, doseq=True)
                 if query:
                     path += '?' + query
-                request_headers = {'Accept': 'application/json', **(headers or {})}
+                # GitHub answers 403 to a request with no User-Agent, so the
+                # transport identifies itself; a service may still send its own.
+                request_headers = {'Accept': 'application/json',
+                                   'User-Agent': 'Conclave/0.1 (authorized API integration)',
+                                   **(headers or {})}
                 payload = body
                 if isinstance(payload, (dict, list)):
                     payload = json.dumps(payload, allow_nan=False).encode()
@@ -74,7 +98,7 @@ class Transport:
                 if response.status == 429:
                     raise IntegrationError('Provider rate limit reached; retry later')
                 if not 200 <= response.status < 300:
-                    raise IntegrationError(f'Provider request failed (HTTP {response.status})')
+                    raise IntegrationError(f'Provider request failed (HTTP {response.status}){refusal(response)}')
                 data = response.read(self.max_bytes + 1)
                 if len(data) > self.max_bytes:
                     raise IntegrationError('Provider response exceeds the configured size limit')

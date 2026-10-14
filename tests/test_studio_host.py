@@ -361,6 +361,15 @@ def test_custom_write_tool_keeps_core_approval_gate(tmp_path):
         ]})
         host = LocalRunHost(RunRepository(tmp_path / "runs.sqlite"), provider, tools, reviewer="operator")
         _, run = await host.handle("start", value)
+        # The gate is the person, not the tool's origin: the run waits for an
+        # answer, and a refusal still denies the call.
+        for _ in range(200):
+            pending = host.tool_approvals.list(run["id"], "operator")
+            if pending:
+                break
+            await asyncio.sleep(.001)
+        assert pending and pending[0]["tool"] == "domain_write" and calls == []
+        host.tool_approvals.decide(run["id"], pending[0]["id"], "operator", False)
         await wait_for_status(host, run["id"], "waiting_for_human")
         assert calls == []
         assert any(item["event"]["type"] == "ToolDenied" and item["event"]["tool"] == "domain_write" for item in host.repository.get(run["id"])["events"])

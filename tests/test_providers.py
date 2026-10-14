@@ -19,6 +19,42 @@ from conclave.providers import (
 )
 
 
+class FakeStream:
+    """The pipes of a process that streams: stdout read whole, stderr by line."""
+
+    def __init__(self, process, data: bytes):
+        self.process, self.data = process, data
+
+    async def read(self):
+        if self.process.hang:
+            await asyncio.sleep(5)
+        data, self.data = self.data, b""
+        return data
+
+    async def readline(self):
+        if not self.data:
+            if self.process.hang_after_stderr:
+                await asyncio.sleep(5)
+            return b""
+        line, newline, rest = self.data.partition(b"\n")
+        self.data = rest
+        return line + newline
+
+
+class FakeWriter:
+    def __init__(self, process):
+        self.process = process
+
+    def write(self, data):
+        self.process.input = (self.process.input or b"") + data
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        pass
+
+
 class FakeProcess:
     def __init__(
         self,
@@ -26,13 +62,19 @@ class FakeProcess:
         stderr: bytes = b"",
         returncode: int = 0,
         hang: bool = False,
+        hang_after_stderr: bool = False,
     ):
-        self.stdout = stdout
-        self.stderr = stderr
+        self.output, self.errors = stdout, stderr
         self.returncode = returncode
         self.hang = hang
+        self.hang_after_stderr = hang_after_stderr
         self.killed = False
+        self.reaped = False
         self.calls = 0
+        self.input = None
+        self.stdin = FakeWriter(self)
+        self.stdout = FakeStream(self, stdout)
+        self.stderr = FakeStream(self, stderr)
 
     async def communicate(self, input=None):
         self.input = input
@@ -41,7 +83,12 @@ class FakeProcess:
         if self.hang and self.calls == 1:
             await asyncio.sleep(5)
 
-        return self.stdout, self.stderr
+        return self.output, self.errors
+
+    async def wait(self):
+        # A streamed process is reaped by waiting, as communicate reaps the other.
+        self.reaped = True
+        return self.returncode
 
     def kill(self):
         self.killed = True
@@ -110,7 +157,10 @@ def test_codex_command_and_completion(monkeypatch, model):
     assert "--ephemeral" in command
     assert "read-only" in command
     assert 'web_search="disabled"' in command
-    for feature in ("shell_tool", "unified_exec", "multi_agent", "apps", "plugins", "hooks"):
+    # Codex's read-only sandbox must not reach the model as a limit on its tools.
+    assert "include_permissions_instructions=false" in command
+    assert "include_environment_context=false" in command
+    for feature in ("shell_tool", "unified_exec", "multi_agent", "apps", "plugins", "hooks", "code_mode_host"):
         index = command.index(feature)
         assert command[index - 1] == "--disable"
     if model:
@@ -136,6 +186,21 @@ def test_codex_event_failures(monkeypatch, events, kind, message):
     assert failure.value.kind == kind
 
 
+@pytest.mark.parametrize("returncode", [1, 0])
+def test_codex_usage_limit_is_a_wait_not_a_broken_command(monkeypatch, returncode):
+    """Codex reports a usage limit as an event and exits non-zero; the run must
+    learn it can continue later, not that the backend is broken."""
+    limit = "You've hit your usage limit. Try again at 12:39 AM."
+    async def fake_exec(*command, **kwargs):
+        return FakeProcess(stdout=codex_events({"type": "error", "message": limit},
+                                               {"type": "turn.failed", "error": {"message": limit}}),
+                           stderr=b"", returncode=returncode)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(ProviderError, match="usage limit") as failure:
+        asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
+    assert failure.value.kind == "rate_limited"
+
+
 @pytest.mark.parametrize("stderr,message", [(b"login required", "login required"), (b"", "Codex failed")])
 def test_codex_process_failure(monkeypatch, stderr, message):
     async def fake_exec(*command, **kwargs):
@@ -159,6 +224,101 @@ def test_codex_unreported_usage(monkeypatch, event):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     result = asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
     assert result.usage is None
+
+
+NATIVE_CALL = b"ERROR codex_core::tools::router: error=code-mode host is disabled\n"
+
+
+def test_codex_keeps_the_reply_written_before_a_native_tool_call(monkeypatch):
+    """A code-mode model writes its JSON action, then tries to run it through
+    Codex's exec tool, and answers that failure. The action is the reply."""
+    action = '{"type":"tool","name":"read_issue","arguments":{}}'
+    process = FakeProcess(stdout=codex_events(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": action}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "The tools are unavailable."}},
+        {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 2}},
+    ), stderr=NATIVE_CALL)
+    started = []
+    async def fake_exec(*command, **kwargs):
+        started.append(command)
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(CodexProvider(None, TIMEOUT).complete([{"role": "user", "content": "go"}]))
+    assert result.text == action
+    assert result.usage.total_tokens == 7
+    assert len(started) == 1
+
+
+def test_codex_keeps_the_first_action_of_a_turn(monkeypatch):
+    """A model can write a tool action and then, in the same turn and without
+    its result, a final reply saying no result came back. The action is the
+    reply; what follows it was written blind."""
+    process = FakeProcess(stdout=codex_events(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"type":"tool","name":"read_file"}'}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"type":"final","content":"no result"}'}},
+    ))
+    async def fake_exec(*command, **kwargs):
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    assert asyncio.run(CodexProvider(None, TIMEOUT).complete([])).text == '{"type":"tool","name":"read_file"}'
+
+
+def test_codex_without_a_json_message_keeps_its_last_message(monkeypatch):
+    process = FakeProcess(stdout=codex_events(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "thinking aloud"}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "the answer"}},
+    ))
+    async def fake_exec(*command, **kwargs):
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    assert asyncio.run(CodexProvider(None, TIMEOUT).complete([])).text == "the answer"
+
+
+def test_codex_ignores_a_blank_message_after_the_reply(monkeypatch):
+    process = FakeProcess(stdout=codex_events(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"type":"tool"}'}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": ""}},
+    ))
+    async def fake_exec(*command, **kwargs):
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    assert asyncio.run(CodexProvider(None, TIMEOUT).complete([])).text == '{"type":"tool"}'
+
+
+def test_codex_native_tool_call_is_asked_again(monkeypatch):
+    """A model that calls Codex's own exec tool gets a failure back and then
+    reports the caller's tools as unavailable. That reply is discarded and the
+    model asked again, reminded that only a text reply reaches the caller."""
+    answer = codex_events({"type": "item.completed", "item": {"type": "agent_message", "text": '{"type":"tool"}'}})
+    blocked = codex_events({"type": "item.completed", "item": {"type": "agent_message", "text": "tools are unavailable"}})
+    processes = [FakeProcess(stdout=blocked, stderr=NATIVE_CALL), FakeProcess(stdout=answer)]
+    started = []
+    async def fake_exec(*command, **kwargs):
+        started.append(command)
+        return processes[len(started) - 1]
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(CodexProvider(None, TIMEOUT).complete([{"role": "user", "content": "go"}]))
+    assert result.text == '{"type":"tool"}'
+    assert len(started) == 2
+    assert processes[0].input == b"USER:\ngo"
+    assert processes[1].input.startswith(b"USER:\ngo\n\nSYSTEM:\n")
+    assert b"do not run here" in processes[1].input
+    # The caller's own tools stay available; only Codex's are ruled out.
+    assert b"still work" in processes[1].input
+    assert b"Do not call any tool" not in processes[1].input
+
+
+def test_codex_native_tool_calls_that_persist_fail_the_call(monkeypatch):
+    blocked = codex_events({"type": "item.completed", "item": {"type": "agent_message", "text": "tools are unavailable"}})
+    started = []
+    async def fake_exec(*command, **kwargs):
+        started.append(command)
+        return FakeProcess(stdout=blocked, stderr=NATIVE_CALL)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(ProviderError, match="its own tools") as failure:
+        asyncio.run(CodexProvider(None, TIMEOUT).complete([]))
+    assert failure.value.kind == "backend_error"
+    assert len(started) == 3
 
 
 def test_codex_timeout_reaps_process(monkeypatch):
@@ -188,7 +348,7 @@ def test_cli_cancellation_reaps_process(monkeypatch, backend):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(cancel_call())
     assert process.killed
-    assert process.calls == 2
+    assert process.calls == 2 if backend == "codex" else process.reaped
 
 
 def test_model_provider_complete_raises():
@@ -205,15 +365,24 @@ def test_model_provider_complete_raises():
     "model",
     ["fast-model", "openai/gpt-5.2-codex"],
 )
-def test_opencode_commands_and_config(monkeypatch, model):
+def test_opencode_commands_and_config(monkeypatch, tmp_path, model):
     captured = {}
+    # The person's own OpenCode setup: a provider, which is kept, and a plugin,
+    # which is not.
+    personal = tmp_path / "home"
+    (personal / "opencode").mkdir(parents=True)
+    (personal / "opencode" / "opencode.json").write_text(json.dumps(
+        {"plugin": ["caveman"], "provider": {"mine": {"name": "Mine"}}}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(personal))
 
     async def fake_exec(*command, **kwargs):
         captured["command"] = command
         captured["env"] = kwargs["env"]
         captured["cwd"] = kwargs["cwd"]
+        captured["stdin"] = kwargs["stdin"]
+        captured["process"] = FakeProcess(stdout=b"  answer  \n")
 
-        return FakeProcess(stdout=b"  answer  \n")
+        return captured["process"]
 
     monkeypatch.setattr(
         asyncio,
@@ -244,18 +413,24 @@ def test_opencode_commands_and_config(monkeypatch, model):
 
     command = captured["command"]
 
-    assert command[:5] == (
+    assert command[:9] == (
         "opencode",
         "run",
+        "--pure",
+        "--print-logs",
+        "--log-level",
+        "ERROR",
         "--agent",
         "model-only",
         "--model",
     )
 
-    assert command[5] == model
+    assert command[9] == model
 
-    assert "SYSTEM:\nsys" in command[-1]
-    assert "USER:\nusr" in command[-1]
+    # The prompt travels on stdin: argv has a size limit a long run passes.
+    assert len(command) == 10
+    assert captured["stdin"] == asyncio.subprocess.PIPE
+    assert captured["process"].input == b"SYSTEM:\nsys\n\nUSER:\nusr"
 
     assert captured["env"]["NO_COLOR"] == "1"
 
@@ -267,7 +442,23 @@ def test_opencode_commands_and_config(monkeypatch, model):
         "permission"
     ] == {"*": "deny"}
 
-    assert captured["cwd"] == Path("/tmp/repo")
+    # Nothing of the person's setup reaches the prompt but their providers.
+    env = captured["env"]
+    assert config["provider"] == {"mine": {"name": "Mine"}}
+    assert "plugin" not in config
+    assert env["XDG_CONFIG_HOME"] != str(personal)
+    for switch in ("OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_CLAUDE_CODE",
+                   "OPENCODE_DISABLE_EXTERNAL_SKILLS"):
+        assert env[switch] == "1"
+    # The default plugins carry OpenCode's ChatGPT sign-in; --pure keeps the
+    # person's own plugins out.
+    assert env.get("OPENCODE_DISABLE_DEFAULT_PLUGINS") != "1"
+    assert "--pure" in captured["command"]
+    assert config["agent"]["model-only"]["prompt"]
+    assert captured["cwd"] != Path("/tmp/repo")
+    # OpenCode names its working directory from PWD; it must be its own folder.
+    assert env["PWD"] == str(captured["cwd"])
+    assert env["OPENCODE_DB"].startswith(str(captured["cwd"].parent))
 
 
 def test_opencode_without_model_flag(monkeypatch):
@@ -365,6 +556,22 @@ def test_opencode_reports_generic_failure(monkeypatch):
         )
 
 
+def test_opencode_usage_limit_stops_the_call_instead_of_waiting_it_out(monkeypatch):
+    """OpenCode retries a spent usage limit without exiting; its error log is
+    read as it comes, so the call ends as a wait rather than a timeout."""
+    process = FakeProcess(stderr=b'level=ERROR message="stream error" error.error="AI_APICallError: Go usage limit exceeded"\n',
+                          hang_after_stderr=True)
+
+    async def fake_exec(*command, **kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(ProviderError, match="usage limit") as failure:
+        asyncio.run(OpenCodeProvider(Path("."), model=None, timeout=2).complete([{"role": "user", "content": "hi"}]))
+    assert failure.value.kind == "rate_limited"
+    assert process.killed
+
+
 def test_opencode_times_out_and_kills(monkeypatch):
     process = FakeProcess(hang=True)
 
@@ -397,7 +604,7 @@ def test_opencode_times_out_and_kills(monkeypatch):
         )
 
     assert process.killed
-    assert process.calls == 2
+    assert process.reaped
 
 
 def test_ollama_posts_chat_payload(monkeypatch):
@@ -521,14 +728,14 @@ def test_read_usage_tolerates_missing_counts():
 def test_opencode_drops_null_bytes_from_the_prompt(
     monkeypatch,
 ):
-    """argv cannot carry a NUL byte, so the prompt cannot either."""
+    """A NUL byte would cut the prompt short, so the prompt carries none."""
 
     captured = {}
 
     async def fake_exec(*command, **kwargs):
-        captured["prompt"] = command[-1]
+        captured["process"] = FakeProcess(stdout=b"ok")
 
-        return FakeProcess(stdout=b"ok")
+        return captured["process"]
 
     monkeypatch.setattr(
         asyncio,
@@ -551,8 +758,8 @@ def test_opencode_drops_null_bytes_from_the_prompt(
         )
     )
 
-    assert "\x00" not in captured["prompt"]
-    assert "beforeafter" in captured["prompt"]
+    assert b"\x00" not in captured["process"].input
+    assert b"beforeafter" in captured["process"].input
 
 
 # =============================================================================

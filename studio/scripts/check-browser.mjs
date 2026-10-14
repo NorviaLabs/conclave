@@ -109,7 +109,7 @@ try{
   await page.locator('[data-action="start-live"]').click();
   await page.locator('[data-action="cancel-live"]').waitFor();
   await page.locator('[data-action="cancel-live"]').click();
-  await status.filter({hasText:/Work interrupted|Request cancelled/}).waitFor();
+  await status.filter({hasText:/Run interrupted|Run cancelled/}).waitFor();
   await page.setViewportSize({width:390,height:844});
   await page.screenshot({path:`${artifacts}/live-mobile.png`,fullPage:true});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Mobile layout overflows');

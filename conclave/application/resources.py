@@ -5,10 +5,17 @@ import re
 import hashlib
 
 from conclave import Capability, Tool, ToolRegistry
+# The bundled write tools are registered here, against the folder a run was
+# authorized to use. `conclave` itself never imports this module, so importing
+# the core still imports no bundled tool.
+from conclave.tools.changes import CHANGE_TOOL_NAMES, CHANGE_TOOLS
 
 REPOSITORY_TOOLS = frozenset({"git_status", "git_log", "git_diff", "git_show", "github_issue", "github_pr",
                               "github_search_issues", "github_search_prs"})
-SOURCE_TOOLS = frozenset({"list_files", "read_file", "search_files", "knowledge_search"}) | REPOSITORY_TOOLS
+# A tool that changes a repository needs the authorization a read tool needs:
+# the folder a run may read is the folder it may write, and nothing else.
+SOURCE_TOOLS = (frozenset({"list_files", "read_file", "search_files", "knowledge_search"})
+                | REPOSITORY_TOOLS | CHANGE_TOOL_NAMES)
 
 
 def load_resources(filename, source=None, *, configured=None):
@@ -21,7 +28,7 @@ def load_resources(filename, source=None, *, configured=None):
     for identifier, value in resources.items():
         if not isinstance(identifier, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", identifier):
             raise ValueError("Resource identifiers must be valid")
-        if not isinstance(value, dict) or set(value) - {"path", "name", "applications"}:
+        if not isinstance(value, dict) or set(value) - {"path", "name", "applications", "extensions"}:
             raise ValueError("Invalid host resource settings")
         if not isinstance(value.get("path"), str):
             raise ValueError("Resources require a source folder")
@@ -36,6 +43,19 @@ def load_resources(filename, source=None, *, configured=None):
             raise ValueError("Resource applications must be application IDs")
         result[identifier] = {"path": root, "name": name, "applications": allowed,
                               "revision": hashlib.sha256(str(root).encode()).hexdigest()}
+        # Which files the source tools read here. The host's default is
+        # documents; a code checkout an application changes must be readable
+        # as code, so a source may name its own suffixes, or "*" for any text
+        # file. Hidden files and containment are enforced either way.
+        if "extensions" in value:
+            extensions = value["extensions"]
+            if extensions == "*":
+                result[identifier]["extensions"] = None
+            elif (isinstance(extensions, list) and extensions
+                  and all(isinstance(item, str) and re.fullmatch(r"\.[a-z0-9_-]+", item) for item in extensions)):
+                result[identifier]["extensions"] = set(extensions)
+            else:
+                raise ValueError('Resource extensions must be "*" or a list of file suffixes such as ".rs"')
     return result
 
 
@@ -83,7 +103,8 @@ class SourceTools:
 
     def document(self, path):
         resolved = self.safe_path(path)
-        if resolved.suffix.lower() not in self.extensions:
+        # None: every file that is not hidden; binaries are refused on reading.
+        if self.extensions is not None and resolved.suffix.lower() not in self.extensions:
             raise ValueError("Choose a plain-text source document in the source folder")
         return resolved
 
@@ -148,6 +169,7 @@ def register_source_tools(registry, source=None):
         registry.register(Tool(name, description, parameters, getattr(source, name) if source else unbound, frozenset({Capability.READ})))
 
     from conclave.tools import build_tool_registry
+    from conclave.tools.changes import Changes, build_change_tools
     bundled = build_tool_registry(source.root if source else Path.cwd(), registry.max_output_chars)
 
     def scoped(func):
@@ -160,6 +182,18 @@ def register_source_tools(registry, source=None):
         registry.register(Tool(name, tool.description, tool.parameters,
                                scoped(tool.func) if source else unbound, tool.capabilities))
 
+    # The write tools are bound the same way, so a run can change the folder it
+    # was authorized to read and no other. Their implementations live in
+    # `conclave.tools.changes`; `scoped` keeps their module here, which is what
+    # binding and the runtime's resource listing key on.
+    if source is None:
+        for name, description, parameters, capabilities in CHANGE_TOOLS:
+            registry.register(Tool(name, description, parameters, unbound, capabilities))
+    else:
+        for tool in build_change_tools(Changes(source.root)):
+            registry.register(Tool(tool.name, tool.description, tool.parameters,
+                                   scoped(tool.func), tool.capabilities))
+
 
 def bind_resources(tools, resources, request, extensions):
     """The tools one request may use, with source tools bound to its source."""
@@ -171,9 +205,9 @@ def bind_resources(tools, resources, request, extensions):
         binding = 'default'
     if binding is None:
         if requested & SOURCE_TOOLS:
-            raise ValueError("This application reads source documents, but no source folder is authorized"
-                             " for it. Set CONCLAVE_SOURCE_DIR, pass --source-dir, or add a source in Studio's"
-                             " source settings.")
+            raise ValueError("This application reads or changes source documents, but no source folder is"
+                             " authorized for it. Set CONCLAVE_SOURCE_DIR, pass --source-dir, or add a source"
+                             " in Studio's source settings.")
         return tools
     resource = resources.get(binding)
     if resource is None:
@@ -188,7 +222,7 @@ def bind_resources(tools, resources, request, extensions):
         raise ValueError("Selected source resource changed; start a new request")
     bound = tools.copy()
     scoped = ToolRegistry(tools.max_output_chars)
-    register_source_tools(scoped, SourceTools(resource['path'], extensions))
+    register_source_tools(scoped, SourceTools(resource['path'], resource.get('extensions', extensions)))
     for name, tool in scoped.tools.items():
         original = tools.tool(name)
         # Trusted extensions may override a bundled name. Do not replace their

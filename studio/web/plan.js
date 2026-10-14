@@ -89,6 +89,6 @@ export function planReadiness(d,runtime={}){
     if(missing.length)issues.push({stage:step.id,severity:'error',message:`Required tools unavailable on this host: ${missing.join(', ')}.`});
     if(runtime.backends?.length){const message=backendIssue(runtime.backends,stageBackend(member,step)[0]);if(message)issues.push({stage:step.id,severity:'error',message});}
   }
-  if(runtime.available===false&&d.workflow.some(step=>d.agents.find(member=>member.id===step.agent)?.kind!=='human'))issues.push({severity:'error',message:runtime.reason||'No AI provider is available on this host. Configure a provider before running.'});
+  if(runtime.available===false&&d.workflow.some(step=>d.agents.find(member=>member.id===step.agent)?.kind!=='human'))issues.push({severity:'error',message:runtime.reason||'No AI provider is available, so AI steps cannot run. Set one up, or ask whoever runs this host.'});
   return issues;
 }

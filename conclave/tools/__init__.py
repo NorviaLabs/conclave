@@ -5,8 +5,11 @@ tool may change or leave without a major version. Importing `conclave` does not
 import this package or launch tools. The application host registers these tools
 automatically; external Git and GitHub executables remain host-owned.
 
-Every tool here declares its capabilities. None of them declares WRITE, so
-none of them needs an approver to run.
+Every tool here declares its capabilities. The tools this module registers
+declare READ, SHELL and NETWORK and never WRITE, so none of them needs an
+approver to run. `conclave.tools.changes` holds the write tools, which the
+application layer registers against the same authorized folder and whose every
+call is approved.
 """
 
 from pathlib import Path

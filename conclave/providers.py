@@ -8,6 +8,7 @@ backend can measure one. Backends that cannot measure tokens return
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 import urllib.error
@@ -32,7 +33,7 @@ class ProviderError(RuntimeError):
     request data, so a caller persists `kind` and never the message.
     """
 
-    KINDS = ("timeout", "unreachable", "command_failed", "backend_error", "unreadable")
+    KINDS = ("timeout", "unreachable", "command_failed", "backend_error", "unreadable", "rate_limited")
 
     def __init__(self, kind: str, detail: str):
         if kind not in self.KINDS:
@@ -90,6 +91,23 @@ class ProviderRouter(Protocol):
     def for_call(self, provider: str, model: str) -> ModelProvider | None: ...
 
 
+def opencode_providers(environ) -> dict:
+    """The person's own OpenCode model providers, and nothing else of theirs.
+
+    A provider defined in their config is how a model they named is reached;
+    their instructions, plugins and agents are not wanted in the prompt.
+    """
+
+    home = Path(environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    try:
+        config = json.loads((home / "opencode" / "opencode.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(config, dict):
+        return {}
+    return {key: config[key] for key in ("provider", "enabled_providers", "disabled_providers") if key in config}
+
+
 class OpenCodeProvider(ModelProvider):
     """
     Uses your existing OpenCode authentication.
@@ -115,9 +133,8 @@ class OpenCodeProvider(ModelProvider):
         self,
         messages: list[dict[str, str]],
     ) -> Completion:
-        # argv cannot carry a NUL byte, so a prompt that somehow contains
-        # one would fail here rather than at the model. Drop them: the
-        # alternative is losing the whole run to an unrepresentable
+        # A NUL byte ends the prompt early for OpenCode. Drop them: the
+        # alternative is losing the rest of the prompt to an unrepresentable
         # character.
         prompt = (
             "\n\n".join(
@@ -128,9 +145,16 @@ class OpenCodeProvider(ModelProvider):
             .replace("\x00", "")
         )
 
+        # --pure: no plugins, which can rewrite the prompt.
+        # Errors go to stderr as they happen: OpenCode retries a spent usage
+        # limit without exiting, so its log is the only place that says so.
         command = [
             "opencode",
             "run",
+            "--pure",
+            "--print-logs",
+            "--log-level",
+            "ERROR",
             "--agent",
             "model-only",
         ]
@@ -143,15 +167,49 @@ class OpenCodeProvider(ModelProvider):
                 ]
             )
 
-        command.append(prompt)
+        # The prompt goes on stdin, not argv: a long run's transcript passes
+        # the operating system's argument-size limit, and the call would fail
+        # before reaching the model.
+
+        # OpenCode adds the person's own setup to every prompt: global and
+        # project AGENTS.md, ~/.claude instructions, skills, plugins and its
+        # own agent framing, in which this agent may call no tools. A model
+        # told that beside the runtime's tool list believes its tools are
+        # missing. So OpenCode runs from a folder of its own, with a config
+        # home of its own that keeps only the person's providers, and a
+        # system prompt that says nothing about tools. Sign-in lives in
+        # OpenCode's data folder, which is left alone.
+        isolated = Path(tempfile.gettempdir()) / "opencode-model-backend"
+        (isolated / "config" / "opencode").mkdir(parents=True, exist_ok=True)
+        (isolated / "work").mkdir(exist_ok=True)
 
         env = os.environ.copy()
         env["NO_COLOR"] = "1"
+        env["XDG_CONFIG_HOME"] = str(isolated / "config")
+        # OpenCode tells the model its working directory from PWD, not from
+        # where it was started: inherited, that names the host's own checkout
+        # as "the workspace", and an agent whose tools act on another folder
+        # concludes it is in the wrong repository.
+        env["PWD"] = str(isolated / "work")
+        # Its own session store, too: every call is a session, and the
+        # person's OpenCode history is neither the place for thousands of
+        # them nor a database to contend with while they use OpenCode.
+        env["OPENCODE_DB"] = str(isolated / "opencode.db")
+        # OpenCode's default plugins stay on: they include its ChatGPT
+        # sign-in, without which a model reached only through that sign-in
+        # is "not found". --pure already keeps out the person's own plugins.
+        for switch in (
+            "OPENCODE_DISABLE_PROJECT_CONFIG",
+            "OPENCODE_DISABLE_CLAUDE_CODE",
+            "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+        ):
+            env[switch] = "1"
 
         # Provider-specific implementation detail.
         # The rest of the agent system knows nothing about this.
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             {
+                **opencode_providers(os.environ),
                 "agent": {
                     "model-only": {
                         "description": (
@@ -159,32 +217,58 @@ class OpenCodeProvider(ModelProvider):
                             "external agent runtime"
                         ),
                         "mode": "primary",
+                        "prompt": (
+                            "Answer the request below exactly as it asks. Any working directory or "
+                            "environment details you are given describe this model host, not the "
+                            "workspace the request is about."
+                        ),
                         "permission": {
                             "*": "deny",
                         },
                     }
-                }
+                },
             }
         )
 
         process = await asyncio.create_subprocess_exec(
             *command,
-            cwd=self.cwd,
+            cwd=isolated / "work",
             env=env,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
+        async def exchange() -> tuple[bytes, bytes]:
+            reading = asyncio.create_task(process.stdout.read())
+            try:
+                process.stdin.write(prompt.encode())
+                await process.stdin.drain()
+                process.stdin.close()
+                errors = []
+                while line := await process.stderr.readline():
+                    errors.append(line)
+                    # A usage limit is a wait, and OpenCode would otherwise
+                    # keep the call open until the timeout says nothing more.
+                    text = line.decode(errors="replace").strip()
+                    if RATE_LIMITED.search(text):
+                        raise ProviderError("rate_limited", f"OpenCode usage limit reached: {text}")
+                stdout = await reading
+            finally:
+                reading.cancel()
+            await process.wait()
+            return stdout, b"".join(errors)
+
         try:
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+                exchange(),
                 timeout=self.timeout,
             )
 
-        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        except (asyncio.TimeoutError, asyncio.CancelledError, ProviderError) as exc:
             process.kill()
-            await process.communicate()
-            if isinstance(exc, asyncio.CancelledError):
+            await process.wait()
+            if isinstance(exc, (asyncio.CancelledError, ProviderError)):
                 raise
             raise ProviderError("timeout", "OpenCode model call timed out") from exc
 
@@ -194,6 +278,27 @@ class OpenCodeProvider(ModelProvider):
         return Completion(
             text=stdout.decode().strip()
         )
+
+
+# How a backend says it will not answer until a quota resets.
+RATE_LIMITED = re.compile(r"usage limit|rate limit|too many requests", re.IGNORECASE)
+# Codex logs a refused call to one of its own tools through its tool router.
+NATIVE_TOOL_CALL = re.compile(r"codex_core::tools::router")
+NATIVE_TOOL_ATTEMPTS = 3
+# Only the backend's own functions are ruled out: a model told not to call
+# tools at all stops using the caller's, which reach it as JSON actions.
+NATIVE_TOOL_REMINDER = (
+    "Your previous reply called a built-in function such as exec. Built-in "
+    "functions do not run here. The tools listed in your instructions still "
+    "work: use one by writing its JSON tool action as your text reply."
+)
+
+
+def _json_object(text: str) -> bool:
+    try:
+        return isinstance(json.JSONDecoder().raw_decode(text.strip())[0], dict)
+    except (json.JSONDecodeError, ValueError):
+        return False
 
 
 class CodexProvider(ModelProvider):
@@ -221,18 +326,99 @@ class CodexProvider(ModelProvider):
             "-c", 'forced_login_method="chatgpt"',
             "-c", 'approval_policy="never"',
             "-c", 'web_search="disabled"',
+            # The sandbox and approval policy above confine Codex's own tools,
+            # which are disabled. Codex would still tell the model it may only
+            # read files and never ask for approval, and the model reads that
+            # as a limit on the caller's tools: a step granted write_file
+            # then refuses to write. Keep both notes out of the prompt.
+            "-c", "include_permissions_instructions=false",
+            "-c", "include_environment_context=false",
         ]
+        # Current models are catalogued as code-mode only, so Codex always
+        # offers them an `exec` tool however its features are set. Disabling
+        # the code-mode host makes that tool fail closed instead of running
+        # JavaScript, and `complete` catches a model that reaches for it.
         for feature in (
             "shell_tool", "unified_exec", "apply_patch_freeform",
             "view_image", "multi_agent", "js_repl", "apps", "plugins",
             "hooks", "codex_hooks", "memories", "memory_tool",
             "browser_use", "computer_use", "image_generation",
+            "code_mode_host", "multi_agent_v2", "sleep_tool", "goals",
+            "tool_suggest", "tool_search", "request_permissions_tool",
+            "default_mode_request_user_input",
         ):
             command.extend(["--disable", feature])
         if self.model:
             command.extend(["--model", self.model])
         command.append("-")
 
+        # A reply is one action, and a turn can hold several messages. Whatever
+        # the model writes after its first JSON object was written without that
+        # action's result, so it is a guess: often a final reply saying no
+        # result came back. The first JSON object is therefore the reply.
+        # A code-mode model also tries to run its reply through Codex's own
+        # exec tool; that call fails, and what follows answers the failure,
+        # not the caller. A native call without a JSON object is asked again,
+        # reminded how tools run here.
+        for _ in range(NATIVE_TOOL_ATTEMPTS):
+            process, stdout, stderr = await self._turn(command, prompt)
+            messages, usage = self._read(process, stdout, stderr)
+            for message in messages:
+                if _json_object(message):
+                    return Completion(text=message, usage=usage)
+            if not NATIVE_TOOL_CALL.search(stderr.decode(errors="replace")):
+                return Completion(text=messages[-1], usage=usage)
+            prompt = f"{prompt}\n\nSYSTEM:\n{NATIVE_TOOL_REMINDER}"
+        raise ProviderError("backend_error", "The Codex model kept calling its own tools, which do not run here")
+
+    @staticmethod
+    def _read(process, stdout: bytes, stderr: bytes) -> tuple[list[str], Usage | None]:
+        """The turn's assistant messages, in order, and its token usage."""
+
+        # Codex reports why a turn failed as an event and then exits non-zero,
+        # so the events are read before the exit status: a usage limit is a
+        # wait, not a broken command, and only the event says which it was.
+        for line in stdout.decode().splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") in {"error", "turn.failed"}:
+                message = str(event.get("message") or (event.get("error") or {}).get("message") or "")
+                if RATE_LIMITED.search(message):
+                    raise ProviderError("rate_limited", f"Codex usage limit reached: {message}")
+
+        if process.returncode != 0:
+            raise ProviderError("command_failed", stderr.decode().strip() or "Codex failed")
+
+        messages = []
+        usage = None
+        try:
+            for line in stdout.decode().splitlines():
+                event = json.loads(line)
+                if event["type"] == "item.completed":
+                    item = event["item"]
+                    # A turn can end with an empty message after its
+                    # reply; that blank is not the model's answer.
+                    if item["type"] == "agent_message" and item["text"].strip():
+                        messages.append(item["text"])
+                elif event["type"] == "turn.completed":
+                    counts = event.get("usage")
+                    if counts is not None:
+                        usage = Usage(
+                            input_tokens=counts.get("input_tokens"),
+                            output_tokens=counts.get("output_tokens"),
+                        )
+                elif event["type"] in {"error", "turn.failed"}:
+                    raise ProviderError("backend_error", f"Codex failed: {event}")
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise ProviderError("unreadable", f"Codex output could not be read: {error!r}") from error
+
+        if not messages:
+            raise ProviderError("unreadable", "Codex returned no assistant message")
+        return messages, usage
+
+    async def _turn(self, command: list[str], prompt: str):
         # Never load a caller repository's config, instructions, or MCP servers.
         with tempfile.TemporaryDirectory(prefix="conclave-codex-") as cwd:
             process = await asyncio.create_subprocess_exec(
@@ -252,34 +438,7 @@ class CodexProvider(ModelProvider):
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 raise ProviderError("timeout", "Codex model call timed out") from exc
-
-        if process.returncode != 0:
-            raise ProviderError("command_failed", stderr.decode().strip() or "Codex failed")
-
-        text = None
-        usage = None
-        try:
-            for line in stdout.decode().splitlines():
-                event = json.loads(line)
-                if event["type"] == "item.completed":
-                    item = event["item"]
-                    if item["type"] == "agent_message":
-                        text = item["text"]
-                elif event["type"] == "turn.completed":
-                    counts = event.get("usage")
-                    if counts is not None:
-                        usage = Usage(
-                            input_tokens=counts.get("input_tokens"),
-                            output_tokens=counts.get("output_tokens"),
-                        )
-                elif event["type"] in {"error", "turn.failed"}:
-                    raise ProviderError("backend_error", f"Codex failed: {event}")
-        except (json.JSONDecodeError, KeyError, TypeError) as error:
-            raise ProviderError("unreadable", f"Codex output could not be read: {error!r}") from error
-
-        if text is None:
-            raise ProviderError("unreadable", "Codex returned no assistant message")
-        return Completion(text=text, usage=usage)
+        return process, stdout, stderr
 
 
 class OllamaProvider(ModelProvider):

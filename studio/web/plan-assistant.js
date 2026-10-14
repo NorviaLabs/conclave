@@ -13,7 +13,7 @@ function targetStep(d,label){
   return oneMatch(d.workflow,label,'step');
 }
 export function proposePlanChange(definition,prompt){
-  validateDefinition(definition);if(typeof prompt!=='string'||!prompt.trim()||prompt.length>1000)throw new Error('Enter a plan command of 1–1000 characters.');
+  validateDefinition(definition);if(typeof prompt!=='string'||!prompt.trim()||prompt.length>1000)throw new Error(prompt?.trim?.()?'Shorten the change to 1,000 characters or fewer.':'Describe the change you want to make.');
   const text=normal(prompt);let next,changes=[],match;
   if((match=text.match(new RegExp(manualPlanning.commands.move)))){
     const step=targetStep(definition,match[1]),target=targetStep(definition,match[3]);if(step.id===target.id)throw new Error('Choose two different steps.');
@@ -36,11 +36,11 @@ export function proposePlanChange(definition,prompt){
     }
   }
   changes.push(...describeDefinitionChanges(definition,next).filter(change=>change.startsWith('Connect')||change.startsWith('Disconnect')));
-  validateDefinition(next);if(JSON.stringify(next)===JSON.stringify(definition))throw new Error('The plan already has that configuration.');return {prompt:prompt.trim(),base:JSON.stringify(definition),definition:next,changes};
+  validateDefinition(next);if(JSON.stringify(next)===JSON.stringify(definition))throw new Error('Nothing to change: the plan already works that way.');return {prompt:prompt.trim(),base:JSON.stringify(definition),definition:next,changes};
 }
 export function parseImportedDefinition(text){
-  if(typeof text!=='string'||new TextEncoder().encode(text).length>200000)throw new Error('Use an application JSON file below 200 KB.');
-  let definition;try{definition=JSON.parse(text);}catch{throw new Error('The definition is not valid JSON.');}validateDefinition(definition);return structuredClone(definition);
+  if(typeof text!=='string'||new TextEncoder().encode(text).length>200000)throw new Error('This file is too large. Application files must be under 200 KB.');
+  let definition;try{definition=JSON.parse(text);}catch{throw new Error('This file is not valid JSON. Choose an application file exported from Studio.');}validateDefinition(definition);return structuredClone(definition);
 }
 export function describeDefinitionChanges(before,next){
   validateDefinition(before);validateDefinition(next);const changes=[];

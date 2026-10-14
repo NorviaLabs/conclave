@@ -62,6 +62,12 @@ def test_extract_json_wrapped_in_prose():
     assert extract_json(text) == {"a": 3}
 
 
+def test_extract_json_takes_the_first_of_several_actions():
+    text = '{"type": "tool", "name": "a"}\n{"type": "tool", "name": "b"}'
+
+    assert extract_json(text) == {"type": "tool", "name": "a"}
+
+
 def test_extract_json_without_json_raises():
     with pytest.raises(
         RuntimeError,
@@ -519,6 +525,62 @@ def test_run_corrects_an_unknown_action(runtime):
             "delegate and final"
         )
         in prompt
+        for _, prompt in provider.prompts
+    )
+
+
+def test_run_names_a_missing_action_type(runtime):
+    """A reply holding only the final answer's fields is told what it lacks;
+    restating the JSON-only rule left a model resending the same object."""
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                {"text": "the specification"},
+                FINAL,
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        runtime(provider).run(
+            AGENTS["repo-researcher"],
+            "task",
+        )
+    )
+
+    assert result.content == "researcher summary"
+
+    assert any(
+        'Your reply had no "type" field' in prompt
+        and '"type": "final"' in prompt
+        for _, prompt in provider.prompts
+    )
+
+
+def test_final_review_is_read_once_and_continues_the_run(runtime):
+    """A caller that doubts a final answer sends one observation back; the
+    agent's next final answer ends the run even if the caller still doubts it."""
+    import dataclasses
+    seen = []
+    def review(action):
+        seen.append(action["content"])
+        return "Are you sure?"
+    spec = dataclasses.replace(AGENTS["repo-researcher"], review_final=review)
+    provider = ScriptedProvider(
+        {
+            "repo-researcher": [
+                {"type": "final", "content": "first answer"},
+                FINAL,
+            ]
+        }
+    )
+
+    result = asyncio.run(runtime(provider).run(spec, "task"))
+
+    assert result.content == "researcher summary"
+    assert seen == ["first answer"]
+    assert any(
+        prompt.startswith("FINAL CHECK") and "Are you sure?" in prompt
         for _, prompt in provider.prompts
     )
 
@@ -1153,3 +1215,9 @@ def test_a_stage_that_runs_out_of_time_writes_up_what_it_has(runtime):
     assert result.content == FINAL["content"], "the stage still answers"
     assert result.exhausted_by == "wall_clock_seconds", "and the record says why it had to"
     assert WRITE_UP_RULE in provider.prompts[-1][1], "asked for with nothing left to offer"
+
+
+def test_the_json_rule_does_not_tell_an_agent_its_tools_will_not_run():
+    from conclave.protocol import JSON_ONLY_RULE
+    assert "cannot call tools" not in JSON_ONLY_RULE
+    assert "tool action" in JSON_ONLY_RULE and "native tool calls" in JSON_ONLY_RULE

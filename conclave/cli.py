@@ -52,7 +52,10 @@ def host_settings(args):
 
 
 async def execute(args):
-    host = configured_host(workspace=Path.cwd(), source_dir=getattr(args, "source_dir", None))
+    # The terminal reads a run after it finishes and has no way to answer a
+    # permission question, so this host tells the truth: refuse, do not wait.
+    host = configured_host(workspace=Path.cwd(), source_dir=getattr(args, "source_dir", None),
+                           interactive_approvals=False)
     try:
         if args.command == "run":
             definition = read_json(args.definition)

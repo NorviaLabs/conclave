@@ -12,7 +12,10 @@ No approver means denial, not implicit authorization from connection setup.
 Set `CONCLAVE_INTEGRATION_KEY` to a Fernet key generated and stored by the
 operator. It must survive restarts; losing it makes existing credentials
 unreadable. Credentials are encrypted at rest in `connections.sqlite` (0600).
-Never commit the key or send it to Studio. `CONCLAVE_INTEGRATION_HOSTS` is a
+Never commit the key or send it to Studio. For local work, `uv run python dev.py`
+generates the key into the ignored `studio/.studio-local/integration.key` on its
+first run and reuses it after that, so no setting is needed there.
+`CONCLAVE_INTEGRATION_HOSTS` is a
 comma-separated deployment allowlist for custom service and retrieval hosts.
 Native API hosts are fixed by the adapter; browser configuration cannot change
 native API paths. HTTPS only, port 443, no userinfo, no redirects; DNS is checked
@@ -23,6 +26,13 @@ The existing Studio proxy is a deployment gateway, not a multi-user login
 system. Hosted deployments must protect it with authentication and supply a
 verified Conclave principal. A public proxy with one shared backend bearer token
 must not be used to manage private account credentials.
+
+Nothing here is switched on by a setting. The bundled write tools are registered
+with the read tools and bound to the source folder a run was authorized to use,
+so they appear in Studio's tool list and in `/api/runtime` without configuration.
+A host built with `configured_host(interactive_approvals=False)` — a terminal, a
+headless control plane — refuses a destructive call instead of waiting for a
+person who cannot answer.
 
 ## Management API
 
@@ -78,7 +88,7 @@ not met, even when native HTTP operations are contract-tested.
 | Zendesk (partial) | zendesk; manual credentials | search_tickets, read_ticket, read_history | prepare_reply | Config/assign/disconnect | Contract + boundary | No |
 | HubSpot CRM (partial) | bearer; manual credentials | search_companies, search_contacts, search_deals, read_record | update_record | Config/assign/disconnect | Contract + boundary | No |
 | Jira (partial) | atlassian; manual credentials | search_issues, read_issue | create_issue, update_issue | Config/assign/disconnect | Contract + boundary | No |
-| GitHub (partial) | bearer; manual credentials | search_repositories, search_issues, read_content, read_issue, read_pull_request | create_issue | Config/assign/disconnect | Contract + boundary | No |
+| GitHub (partial) | bearer; manual credentials | search_repositories, search_issues, read_content, read_issue, read_pull_request, read_branches, read_checks | create_issue, create_branch, write_content, create_pull_request, merge_pull_request | Config/assign/disconnect | Contract + boundary | No |
 | Linear (partial) | bearer; manual credentials | search_issues, read_projects | create_issue | Config/assign/disconnect | Contract + boundary | No |
 | Trello (partial) | trello; manual credentials | read_boards, read_lists, read_cards | create_card, update_card | Config/assign/disconnect | Contract + boundary | No |
 | Reddit (partial) | bearer; manual credentials | read_posts, read_comments, read_community | None | Config/assign/disconnect | Contract + boundary | No |
@@ -216,8 +226,11 @@ this opt-in OAuth lifecycle where a compatible provider is configured.
 Studio now displays pending connection-tool actions with agent, tool,
 destination/content arguments, and explicit **Approve this action / Reject**
 controls. The decision applies to that exact pending invocation once, never to
-an agent or workflow generally. Non-connection destructive tools retain their
-existing default denial. Five-minute approval expiry denies the action. Cancel
+an agent or workflow generally. Every destructive tool asks the person, not only
+a connection operation: a host with an approval surface waits for the answer, and
+a host built with `configured_host(interactive_approvals=False)` refuses
+immediately instead of holding the run open.
+Five-minute approval expiry denies the action. Cancel
 or process restart discards pending requests; external actions are never
 replayed automatically. Arguments are available only to the authenticated run
 owner via the pending-approval endpoint and are not persisted in activity logs.
@@ -279,6 +292,40 @@ retried. `tests/test_live_integrations.py` holds the opt-in live checks; they
 skip unless `CONCLAVE_LIVE_TESTS=1` and that provider's credential are present.
 Skipped live checks are not evidence that a provider works. No provider has been
 live verified in this work.
+
+## Repository writes: the issue-to-merge flow
+
+Reading an issue, changing the repository, opening a pull request and merging it
+is available in two shapes, and a definition may use either. Both are gated the
+same way: a destructive call waits for one person's approval of that exact call.
+
+- **Connection operations.** A GitHub connection grants `read_branches` (the
+  base branch's current commit, which a new branch is created from),
+  `read_checks` (each CI check run of a commit or branch: name, status and
+  conclusion),
+  `create_branch`, `write_content` (the host base64-encodes plain `text` and
+  sends the blob `sha` when replacing an existing file), `create_pull_request`
+  and `merge_pull_request` (merge, squash or rebase). `read_content` takes an optional `ref`
+  (branch, tag or commit) and returns a
+  text file as `text` (decoded from GitHub's base64), a binary file as
+  `binary: true` without its bytes, and a directory as its entries. `read_content` and
+  `write_content` are the only operations whose path field may contain `/`:
+  empty, `.` and `..` segments are refused, and every other placeholder stays a
+  single segment. The write reaches GitHub directly, with no checkout on the
+  host.
+- **Local write tools.** `write_file`, `edit_file` (one exact passage replaced), `run_tests`, `git_commit`,
+  `push_branch`, `open_pull_request` and `merge_pull_request` are registered
+  with the read tools and bound to the source folder the run was authorized to
+  use, so a run changes the folder it may already read and no other — chosen in
+  Studio's source settings, not by a deployment setting. Every path is resolved
+  and checked back into that folder; hidden paths such as `.git` are refused;
+  `push_branch` creates the branch when it does not exist; and `git push`/`gh`
+  use the accounts this machine is already signed in to, so the host owns the
+  credentials exactly as it does for the read tools. This is the shape to
+  choose when the agent should run the tests it just wrote.
+
+Neither shape merges anything a person did not approve: the merge is the last
+approved call, not the end of the gate.
 
 ## Where integrations appear in the catalogue
 

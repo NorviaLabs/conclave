@@ -248,7 +248,8 @@ def test_parallel_failure_identifies_responsible_stage(failure):
             if failure == "exception":
                 raise RuntimeError("private credential must not leak")
             yield RunFinished(run_id="test", agent="writer", status="stopped" if failure == "stopped" else "completed",
-                              result=AgentResult(content="Done", private=PrivateState(CONFIG), data={}))
+                              # No text and no prose answer: an output that cannot be used.
+                              result=AgentResult(content="", private=PrivateState(CONFIG), data={}))
 
     events = collect(run_application(definition, None, ToolRegistry(20000), original["task"], inputs=original["inputs"], loop=ParallelLoop))
     assert [event["stage"] for event in events if event["type"] == "StageStarted"] == ["draft", "sibling"]
@@ -567,7 +568,7 @@ def wrapped(error):
     (RuntimeError("unexpected boom"),
      "Agent execution failed on the runtime host (RuntimeError)", "failed"),
 ])
-def test_a_failed_stage_records_why_without_recording_provider_output(tmp_path, error, reason, status):
+def test_a_failed_stage_records_why_without_recording_provider_output(tmp_path, error, reason, status, caplog):
     """A failure is diagnosable from the record, and the backend's own text is not kept."""
 
     tools = ToolRegistry(20000)
@@ -579,11 +580,14 @@ def test_a_failed_stage_records_why_without_recording_provider_output(tmp_path, 
     recorded = json.dumps(events)
     assert "12345" not in recorded
     assert "unexpected boom" not in recorded
+    # The operator's terminal gets the backend's own words; the record does not.
+    assert str(error) in caplog.text
 
 
 @pytest.mark.parametrize("error", [
     ProviderError("timeout", "no answer in 300 seconds"),
     ProviderError("unreachable", "connection refused"),
+    ProviderError("rate_limited", "usage limit reached; try again at 12:39 AM"),
 ])
 def test_a_backend_that_is_not_answering_stops_the_run_rather_than_failing_it(tmp_path, error):
     """A condition of the moment must not cost the stages that already finished.

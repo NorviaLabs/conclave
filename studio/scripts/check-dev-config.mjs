@@ -42,12 +42,12 @@ assert.throws(() => hostConfig({...process.env, CONCLAVE_API_URL: 'http://user:p
 
 console.log('PASS: a login deployment points the page at the API with credentials; a token deployment keeps the proxy.');
 
-// A wall clock that stops a normal application is a trap, not a guard. Work is
-// already bounded by the action limits, so a new application starts with no time
-// limit and a person who wants one sets it.
+// A limit a person did not choose stops real work part way and reads as a
+// finished run. A new application starts with no limit on time or on how much
+// work it does; a person who wants one sets it.
 {
   const defaults = JSON.parse(await readFile(new URL('../../conclave/application/data/defaults.json', import.meta.url), 'utf8'));
   assert.equal(defaults.run_budget.wall_clock_seconds, null, 'a new application is not put on a clock');
-  assert.ok(defaults.run_config.max_tool_steps > 0, 'the work itself is still bounded');
-  assert.ok(defaults.run_budget.tool_calls > 0, 'and so is the run');
+  assert.equal(defaults.run_config.max_tool_steps, null, 'nor is a stage capped at a number of actions');
+  assert.ok(Object.values(defaults.run_budget).every(value => value === null), 'nor is the run');
 }

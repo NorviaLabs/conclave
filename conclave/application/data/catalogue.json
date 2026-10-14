@@ -4658,6 +4658,46 @@
       "origin": "host"
     },
     {
+      "id": "edit_file",
+      "name": "Edit a file",
+      "category": "Creation and modification",
+      "description": "Replace one exact passage of a file within an approved scope.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "git_commit",
+      "name": "Commit changes",
+      "category": "Creation and modification",
+      "description": "Stage the repository's changes and commit them.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "push_branch",
+      "name": "Push a branch",
+      "category": "Creation and modification",
+      "description": "Put committed work on a branch of the origin remote.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "open_pull_request",
+      "name": "Open a pull request",
+      "category": "Creation and modification",
+      "description": "Open a pull request from a pushed branch.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
+      "id": "merge_pull_request",
+      "name": "Merge a pull request",
+      "category": "Creation and modification",
+      "description": "Merge a reviewed pull request.",
+      "permission": "write",
+      "origin": "host"
+    },
+    {
       "id": "prepare_patch",
       "name": "Prepare code changes",
       "category": "Creation and modification",
@@ -5128,7 +5168,8 @@
         "ids": [
           "generate_artifact",
           "prepare_patch",
-          "write_file"
+          "write_file",
+          "edit_file"
         ]
       }
     },

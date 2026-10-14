@@ -17,6 +17,8 @@ assert.equal(applicationTypes.length,18);
 registerHostTools([{id:'custom_lookup',name:'Custom lookup',description:'Host registered',permission:'read',category:'Host tools'}]);
 assert.ok(toolDescriptors.some(tool=>tool.id==='custom_lookup'));
 const d=emptyDefinition();d.agents[0].tools=['custom_lookup'];validateDefinition(d);
+for(const value of [true,false]){const autonomous=emptyDefinition();autonomous.autonomous_execution=value;validateDefinition(autonomous);}
+for(const value of ['true',1,null,{}]){const autonomous=emptyDefinition();autonomous.autonomous_execution=value;assert.throws(()=>validateDefinition(autonomous));}
 for(const key of Object.keys(d.run_config)){const unlimited=emptyDefinition();unlimited.run_config[key]=null;validateDefinition(unlimited);unlimited.run_config[key]=0;assert.throws(()=>validateDefinition(unlimited));}
 const studioSource=await readFile(new URL('../web/studio.js',import.meta.url),'utf8');
 const fieldCode=studioSource.slice(studioSource.indexOf('function field('),studioSource.indexOf('// What runs one member or step.'));
@@ -30,6 +32,12 @@ for(const input of ['', '50000']){
  assert.equal(context.object.max_tool_output_chars,input===''?null:50000,'runtime limit editing stores numbers or null');
 }
 d.agents[0].tools=['<script>'];assert.throws(()=>validateDefinition(d));d.agents[0].tools=[];
+for(const input of ['true','false']){
+ const context={path:'autonomous_execution',value:input,object:{},key:'autonomous_execution'};
+ runInNewContext(conversion,context);
+ assert.equal(context.object.autonomous_execution,input==='true');
+}
+assert.match(studioSource,/data-path="autonomous_execution"/);
 const source=(await readFile(new URL('../web/advanced.js',import.meta.url),'utf8'))
   .replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href))
   .replace("'/canvas-ui.js'",JSON.stringify(new URL('../web/canvas-ui.js',import.meta.url).href));

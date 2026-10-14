@@ -72,6 +72,58 @@ def test_repository_tools_are_scoped_and_keep_capabilities(tmp_path, monkeypatch
     assert alpha.tool('github_issue').capabilities == frozenset({Capability.READ, Capability.SHELL, Capability.NETWORK})
 
 
+def test_write_tools_are_bound_to_the_folder_the_run_may_read(tmp_path):
+    from conclave import Capability
+
+    tools, resources, first, second = setup_resources(tmp_path)
+    assert tools.tool('write_file').destructive
+    bound = bind_resources(tools, resources, source_request(), {'.md'})
+
+    async def exercise():
+        assert await bound.execute('write_file', {'path': 'src/app.py', 'content': 'one\ntwo\n'}) == 'Wrote 2 lines to src/app.py'
+        for path in ('../second/app.py', str(second / 'app.py'), '.git/config'):
+            with pytest.raises(ValueError):
+                await bound.execute('write_file', {'path': path, 'content': 'private'})
+        with pytest.raises(ValueError, match='Select a source'):
+            await tools.execute('write_file', {'path': 'app.py', 'content': 'private'})
+
+    asyncio.run(exercise())
+    assert (first / 'src/app.py').read_text() == 'one\ntwo\n'
+    assert not (second / 'app.py').exists()
+    assert bound.tool('merge_pull_request').capabilities == frozenset({Capability.WRITE, Capability.SHELL, Capability.NETWORK})
+
+
+def test_a_definition_that_changes_the_repository_needs_an_authorized_source(tmp_path):
+    tools, resources, _, _ = setup_resources(tmp_path)
+    value = request()
+    value['definition']['agents'][0]['tools'] = ['write_file', 'git_commit']
+    assert 'resources' not in value
+    with pytest.raises(ValueError, match='no source folder is authorized'):
+        bind_resources(tools, resources, value, {'.md'})
+    value['resources'] = {'source': 'alpha'}
+    bound = bind_resources(tools, resources, value, {'.md'})
+    assert bound.tool('git_commit').destructive
+    assert bound.tool('git_commit').func is not tools.tool('git_commit').func
+
+
+def test_the_write_tools_must_stay_destructive(tmp_path):
+    from conclave import Capability, Tool
+    from conclave.application.definition import validate_host_tools
+    from conclave.tools.changes import CHANGE_TOOL_NAMES
+
+    tools, _, _, _ = setup_resources(tmp_path)
+    definition = {'agents': [{'id': 'writer', 'tools': sorted(CHANGE_TOOL_NAMES)}]}
+    validate_host_tools(definition, tools)
+
+    async def merge():
+        return 'merged'
+
+    # A host that re-registers one of them as a read would run it ungated.
+    tools.register(Tool('merge_pull_request', 'Merge a pull request', {}, merge, frozenset({Capability.READ})))
+    with pytest.raises(ValueError, match='destructive'):
+        validate_host_tools(definition, tools)
+
+
 def test_saved_source_selection_and_web_only_agents(tmp_path):
     tools, resources, _, _ = setup_resources(tmp_path)
     value = source_request('beta')
@@ -198,9 +250,43 @@ def test_extension_capabilities_are_not_replaced_by_resource_binding(tmp_path):
 @pytest.mark.parametrize('config', [[], {'bad/id': {'path': '.'}}, {'ok': {}},
                                    {'ok': {'path': '.', 'credential': 'secret'}},
                                    {'ok': {'path': '.', 'applications': 'app'}},
-                                   {'ok': {'path': '.', 'name': ''}}])
+                                   {'ok': {'path': '.', 'name': ''}},
+                                   {'ok': {'path': '.', 'extensions': 'rs'}},
+                                   {'ok': {'path': '.', 'extensions': ['rs']}},
+                                   {'ok': {'path': '.', 'extensions': []}}])
 def test_invalid_host_resource_configuration(tmp_path, config):
     filename = tmp_path / 'resources.json'
     filename.write_text(json.dumps(config))
     with pytest.raises(ValueError):
         load_resources(filename)
+
+
+def test_a_code_checkout_source_reads_its_code_and_still_refuses_hidden_files(tmp_path):
+    """A source may name the files its tools read; a repository's code is not
+    a document, and an application that changes it must be able to read it."""
+    checkout = tmp_path / 'checkout'
+    (checkout / 'src').mkdir(parents=True)
+    (checkout / 'src' / 'main.rs').write_text('fn main() {}\n')
+    (checkout / '.env').write_text('TOKEN=secret')
+    (checkout / 'logo.png').write_bytes(b'\x89PNG\x00')
+    tools = ToolRegistry(None)
+    register_source_tools(tools)
+    value = source_request('code')
+    for extensions, readable in (('*', True), (['.rs'], True), (None, False)):
+        settings = {'path': str(checkout)}
+        if extensions is not None:
+            settings['extensions'] = extensions
+        resources = load_resources(None, configured={'code': settings})
+        bound = bind_resources(tools, resources, value, {'.md'})
+
+        async def exercise():
+            if readable:
+                assert 'fn main' in await bound.execute('read_file', {'path': 'src/main.rs'})
+                assert 'src/main.rs' in (await bound.execute('list_files', {})).splitlines()
+            else:
+                with pytest.raises((ValueError, RuntimeError)):
+                    await bound.execute('read_file', {'path': 'src/main.rs'})
+            with pytest.raises((ValueError, RuntimeError)):
+                await bound.execute('read_file', {'path': '.env'})
+            assert '.env' not in await bound.execute('list_files', {})
+        asyncio.run(exercise())

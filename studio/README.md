@@ -316,6 +316,13 @@ replaces it.
 
 ## Application workflows
 
+**Controls → Tool authorization** offers **Autonomous execution** for trusted
+applications. Save this opt-in to authorize declared tools up front instead of
+approving each write. It includes commands and remote writes; explicit human
+workflow steps still pause. Source and connection restrictions remain active,
+and unknown capabilities are not pre-authorized. Existing applications retain
+per-call approval until enabled. Command tools are not an OS sandbox.
+
 **Settings → Limits and approvals** exposes workload limits as well as spending
 limits. Blank means unlimited for action steps, notes, tool/report text,
 concurrency, delegations and budgets. Finite runtime configuration limits must
@@ -583,11 +590,14 @@ Conclave and are never saved in the workflow definition or browser storage.
 Select operations explicitly in connection setup, then check the granted tools
 for an agent. Shared-member tool changes affect all steps using that member.
 
-The host must configure `CONCLAVE_INTEGRATION_KEY`. Custom API/feed endpoint
+The host must configure `CONCLAVE_INTEGRATION_KEY`; the local launcher
+(`uv run python dev.py`) generates and keeps one for you, so only a real
+deployment needs to set it. Custom API/feed endpoint
 hosts require `CONCLAVE_INTEGRATION_HOSTS`. Manual tokens are currently used;
-Studio OAuth sign-in and per-tool write approval are not yet implemented. Reads
-can run within their connection grants. Writes are denied unless a trusted host
-supplies an approver. Protocol/database/S3 adapters use deployment-owned
+Studio OAuth sign-in is not yet implemented. Reads can run within their
+connection grants. Every write — a connection operation or a host tool such as
+`write_file` — waits for the person's approval in the run view; `conclave run`
+has no approval surface and refuses instead. Protocol/database/S3 adapters use deployment-owned
 `CONCLAVE_INTEGRATION_ADAPTERS_FILE` configuration; missing drivers or unconfigured
 adapters are shown as unavailable,
 not as connected accounts. See [status matrix](../INTEGRATIONS.md).
