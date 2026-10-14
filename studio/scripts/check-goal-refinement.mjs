@@ -56,7 +56,7 @@ assert.deepEqual(calls.find(call => call.notify), {notify: 'Made the criteria ex
 assert.equal(state.refinement, undefined, 'no suggestion is kept: it was applied');
 
 await assert.rejects(() => load({dialogState: {kind: 'goal', goal: '  '}}, 'refineGoal').refineGoal(), /Describe your goal/);
-await assert.rejects(() => load({runtime: {available: false}}, 'refineGoal').refineGoal(), /no AI provider/);
+await assert.rejects(() => load({runtime: {available: false}}, 'refineGoal').refineGoal(), /needs an AI provider/);
 
 // Refining is wording only, so it is offered where the goal is written and
 // nowhere else, and the old accept/discard handlers are gone with the panel.

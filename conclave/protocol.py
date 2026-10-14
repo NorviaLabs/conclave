@@ -26,13 +26,19 @@ from .providers import (
 # =============================================================================
 
 
+# Native tool-call syntax is what this forbids, not tools: an agent told it
+# "cannot call tools" concluded that its listed tools would not run, and gave
+# up on work it had been given the tools to do.
 JSON_ONLY_RULE = (
     "Reply with exactly one JSON object and "
     "nothing else. Never emit tool-call "
     "markup, XML tags or function-call "
     "syntax such as DSML, antml, invoke or "
-    "parameter elements. The Python runtime "
-    "owns all tools; you cannot call tools."
+    "parameter elements: native tool calls "
+    "do not run here. The Python runtime runs "
+    "a tool only when you reply with the JSON "
+    "tool action your instructions describe, "
+    "and returns its result to you."
 )
 
 
@@ -110,6 +116,17 @@ def extract_json(
 
     except json.JSONDecodeError as exc:
         start = text.find("{")
+
+        # Several actions in one reply: the first is the one to take, and the
+        # rest are answered in turn, rather than refusing the whole reply.
+        if start >= 0:
+            try:
+                first, _ = json.JSONDecoder().raw_decode(text, start)
+            except json.JSONDecodeError:
+                first = None
+            if isinstance(first, dict):
+                return first
+
         end = text.rfind("}")
 
         if (

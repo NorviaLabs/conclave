@@ -174,6 +174,30 @@ class ConnectionStore:
         if not changed:
             raise IntegrationError('Connection was disconnected')
 
+    def update_grants(self, identifier, value, tenant, owner):
+        """Change which operations and applications a connection allows.
+
+        The credentials and endpoint stay as they were stored: a person can
+        widen or narrow a grant without handing the secret over again."""
+        if not isinstance(value, dict) or not value or set(value) - {'operations', 'applications'}:
+            raise IntegrationError('Only operations and applications can be updated')
+        record = self._read(identifier, tenant, owner)
+        known = {operation.name: operation for operation in self.service_for(record).operations}
+        for key in value:
+            items = value[key]
+            if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
+                raise IntegrationError('Choose explicit operations and authorized application IDs')
+        if 'operations' in value:
+            if any(name not in known for name in value['operations']):
+                raise IntegrationError('Unknown connection operation')
+            if any(set(known[name].scopes) - set(record['scopes']) for name in value['operations']):
+                raise IntegrationError('Required operation scopes are missing')
+            record['operations'] = sorted(set(value['operations']))
+        if 'applications' in value:
+            record['applications'] = value['applications']
+        self._save(record, tenant, owner)
+        return self.public(record)
+
     async def revoke(self, identifier, tenant, owner):
         async with self.locks.setdefault(identifier, asyncio.Lock()):
             record = self._read(identifier, tenant, owner)

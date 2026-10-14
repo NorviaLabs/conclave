@@ -19,6 +19,14 @@ import dev
 from dev import busy_ports, port, port_error, stop_children, wait_ready
 
 
+@pytest.fixture(autouse=True)
+def local_folder(tmp_path, monkeypatch):
+    """Keep everything the launcher generates inside this test's own folder."""
+    folder = tmp_path / "studio" / ".studio-local"
+    monkeypatch.setattr(dev, "local_folder", lambda root: folder)
+    return folder
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "65536"])
 def test_launcher_rejects_invalid_ports(value):
     with pytest.raises(argparse.ArgumentTypeError):
@@ -233,6 +241,32 @@ def test_the_page_origin_is_allowed_and_the_login_is_passed_on():
     assert plain["CONCLAVE_UI_ORIGINS"] == "http://127.0.0.1:8787,http://localhost:8787"
 
 
+# --- Connections without any setting -----------------------------------------
+
+def test_the_launcher_generates_one_connections_key_and_keeps_it(local_folder):
+    """Credentials have to stay readable across restarts, so the key is written once."""
+
+    from cryptography.fernet import Fernet
+
+    first = dev.integration_environment({}, local_folder)
+    path = local_folder / "integration.key"
+    assert first["CONCLAVE_INTEGRATION_KEY"] == path.read_text().strip()
+    assert path.stat().st_mode & 0o777 == 0o600
+    Fernet(first["CONCLAVE_INTEGRATION_KEY"].encode())  # A key the connection store accepts.
+
+    # Restarting reuses it: a fresh key would orphan the connections already stored.
+    assert dev.integration_environment({}, local_folder) == first
+
+    # A key already in the environment wins, and nothing is written for it.
+    elsewhere = local_folder / "elsewhere"
+    assert dev.integration_environment({"CONCLAVE_INTEGRATION_KEY": "given"}, elsewhere) == {}
+    assert not elsewhere.exists()
+
+    # An empty file is no key at all.
+    path.write_text("\n")
+    assert dev.integration_environment({}, local_folder)["CONCLAVE_INTEGRATION_KEY"] != first["CONCLAVE_INTEGRATION_KEY"]
+
+
 def test_the_launcher_names_the_redirect_uri_google_must_allow():
     matching = dev.sign_in_lines(Path("login.json"), {"tenant": "acme", "redirect_uri": "http://127.0.0.1:8080/auth/google/callback"},
                                  backend_port=8080, studio_port=8787)
@@ -271,7 +305,7 @@ def test_readiness_still_waits_for_a_service_that_never_answers(monkeypatch):
         wait_ready("http://127.0.0.1:8080/api/health", [], threading.Event(), timeout=0.3)
 
 
-def test_the_launcher_starts_the_hosted_adapter_with_the_login(monkeypatch, tmp_path, capsys):
+def test_the_launcher_starts_the_hosted_adapter_with_the_login(monkeypatch, tmp_path, capsys, local_folder):
     started = []
     login = login_file(tmp_path)
 
@@ -291,6 +325,7 @@ def test_the_launcher_starts_the_hosted_adapter_with_the_login(monkeypatch, tmp_
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **keywords: (started.append((argv, keywords)), Service())[1])
     monkeypatch.delenv("CONCLAVE_SESSION_KEY", raising=False)
     monkeypatch.delenv("CONCLAVE_UI_ORIGINS", raising=False)
+    monkeypatch.delenv("CONCLAVE_INTEGRATION_KEY", raising=False)
 
     assert dev.main(["--backend-port", "18080", "--studio-port", "18787", "--login", str(login)]) == 1
     backend, frontend = started
@@ -300,9 +335,11 @@ def test_the_launcher_starts_the_hosted_adapter_with_the_login(monkeypatch, tmp_
         assert keywords["env"]["CONCLAVE_GOOGLE_LOGIN_FILE"] == str(login)
         assert "http://127.0.0.1:18787" in keywords["env"]["CONCLAVE_UI_ORIGINS"]
         assert len(keywords["env"]["CONCLAVE_SESSION_KEY"]) >= 32
+        assert keywords["env"]["CONCLAVE_INTEGRATION_KEY"] == (local_folder / "integration.key").read_text().strip()
     printed = capsys.readouterr().out
     assert "Sign in at http://127.0.0.1:18787/" in printed
     assert "Google must allow http://127.0.0.1:18080/auth/google/callback" in printed
+    assert "Connections are on" in printed
 
 
 def test_the_launcher_refuses_a_login_file_that_is_not_there(monkeypatch, tmp_path, capsys):

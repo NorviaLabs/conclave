@@ -73,3 +73,7 @@ class AgentSpec:
     )
     provider: str = ""
     model: str = ""
+    # Read once per run with the agent's first final action. Text it returns
+    # goes back to the agent as an observation in place of ending the run, so
+    # a caller can ask for a second look at an answer it doubts.
+    review_final: Callable[[dict[str, Any]], str | None] | None = None

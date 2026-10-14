@@ -10,6 +10,10 @@ page gets what a deployment has: the hosted routes, the origin allowlist and —
 `studio/.studio-local/login.json` exists, or `--login` names one — Google sign-in.
 The page is served from its own port, so that origin is allowed to call the adapter
 here rather than left to be discovered as a 403 on the first write.
+
+Connections work here without any setting: the first run generates a key into
+`studio/.studio-local/` and every run after it reuses that key, so stored
+credentials stay encrypted and readable across restarts.
 """
 import argparse
 import os
@@ -33,6 +37,16 @@ def port(value):
     return number
 
 
+def local_folder(root):
+    """What this launcher generates for this machine: the ignored local folder.
+
+    The backend keeps its own data here too, so the files this launcher writes
+    sit beside the database they belong to.
+    """
+
+    return Path(root) / "studio" / ".studio-local"
+
+
 def login_file(root, *, chosen=None, off=False):
     """The login file this run should use: what was asked for, or the local one."""
 
@@ -40,7 +54,7 @@ def login_file(root, *, chosen=None, off=False):
         return None
     if chosen:
         return Path(chosen)
-    default = Path(root) / "studio" / ".studio-local" / "login.json"
+    default = local_folder(root) / "login.json"
     return default if default.exists() else None
 
 
@@ -76,6 +90,32 @@ def login_environment(environ, *, login, studio_port, session_key=None):
         settings["CONCLAVE_GOOGLE_LOGIN_FILE"] = str(login)
         settings["CONCLAVE_SESSION_KEY"] = environ.get("CONCLAVE_SESSION_KEY") or session_key or secrets.token_urlsafe(32)
     return settings
+
+
+def integration_environment(environ, folder):
+    """The connections key: generated once, kept, and reused after that.
+
+    The backend stores connection credentials encrypted, and refuses to store any
+    at all without a key. So the first run writes one into the local folder —
+    beside the database it decrypts — and every later run reads the same key
+    back: a new key would make the connections already stored under the old one
+    unreadable. A key already in the environment wins.
+    """
+
+    if environ.get("CONCLAVE_INTEGRATION_KEY"):
+        return {}
+    path = Path(folder) / "integration.key"
+    try:
+        key = path.read_text().strip()
+    except OSError:
+        key = ""
+    if not key:
+        from cryptography.fernet import Fernet
+        key = Fernet.generate_key().decode()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(key + "\n")
+        path.chmod(0o600)
+    return {"CONCLAVE_INTEGRATION_KEY": key}
 
 
 def sign_in_lines(login, details, *, backend_port, studio_port):
@@ -224,8 +264,10 @@ def main(argv=None):
         for sig in stop_signals:
             signal.signal(sig, handle_signal)
         api_url = f"http://127.0.0.1:{args.backend_port}"
+        local = local_folder(root)
+        connections = integration_environment(os.environ, local)
         environment = {**os.environ, "CONCLAVE_API_URL": api_url, "STUDIO_PORT": str(args.studio_port),
-                       **login_environment(os.environ, login=login, studio_port=args.studio_port)}
+                       **login_environment(os.environ, login=login, studio_port=args.studio_port), **connections}
         backend = [sys.executable, "-m", "conclave", "serve", "--hosted", "--port", str(args.backend_port)]
         if args.provider:
             backend += ["--provider", args.provider]
@@ -244,6 +286,8 @@ def main(argv=None):
               "\nThe backend serves the Studio page too, unless CONCLAVE_API_TOKEN is set.")
         for line in sign_in_lines(login, details, backend_port=args.backend_port, studio_port=args.studio_port):
             print(line)
+        if connections:
+            print(f"Connections are on: credentials are encrypted with the key kept at {local / 'integration.key'}.")
         print("Press Ctrl+C to stop both services.", flush=True)
         while not stopped.wait(0.25):
             if any(child.poll() is not None for child in children):

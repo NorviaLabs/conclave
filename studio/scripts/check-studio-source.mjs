@@ -200,4 +200,8 @@ assert.ok(!/data-live-history/.test(source), 'no request picker survives in the 
 for (const action of ['run', 'back-to-plan', 'set-up']) {
   assert.match(source, new RegExp(`action==='${action}'`), `${action} is handled`);
 }
+// Readiness counts a step's connection tools as this host's tools only once the
+// connections are loaded, so they arrive with the first page data; fetched on
+// demand, every connected step read as needing attention until one was opened.
+assert.match(source, /Promise\.allSettled\(\[request\('\/api\/applications'\)[^\]]*loadIntegrationConnections\(\)\]\)/, 'connections load with the first page data');
 console.log(`PASS: the page markup interpolates ${used.length} identifiers, all declared, with one screen, one play/stop control and no view switch.`);

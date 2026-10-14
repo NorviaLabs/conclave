@@ -8,7 +8,9 @@ from conclave.integrations.transport import Transport, IntegrationError
 class Response:
     status = 200
     data = b'{"ok":true}'
+    headers = {}
     def read(self, limit): return self.data[:limit]
+    def getheader(self, name): return self.headers.get(name)
 
 
 class Connection:
@@ -38,6 +40,50 @@ def test_pinned_transport_redirect_size_and_rate_limit(monkeypatch):
         monkeypatch.setattr(Response, 'status', 200)
         monkeypatch.setattr(Response, 'data', b'x' * 101)
         with pytest.raises(IntegrationError, match='size limit'): await transport.request('GET', 'https://example.com')
+    asyncio.run(exercise())
+
+
+def test_refusal_names_what_the_token_needs_from_headers_only(monkeypatch):
+    from conclave.integrations import transport as module
+    monkeypatch.setattr(module, 'public_addresses', lambda host: ['93.184.216.34'])
+    monkeypatch.setattr(module, 'PinnedHTTPS', Connection)
+    monkeypatch.setattr(Response, 'status', 403)
+    monkeypatch.setattr(Response, 'data', b'{"message":"secret body"}')
+    transport = Transport({'example.com'})
+    async def refused(headers):
+        monkeypatch.setattr(Response, 'headers', headers)
+        with pytest.raises(IntegrationError) as caught:
+            await transport.request('POST', 'https://example.com/pulls')
+        return str(caught.value)
+    async def exercise():
+        assert await refused({'X-Accepted-GitHub-Permissions': 'pull_requests=write'}) == (
+            'Provider request failed (HTTP 403); the token needs pull_requests=write')
+        assert await refused({'X-GitHub-SSO': 'required; url=https://github.com/orgs/x/sso?token=abc'}) == (
+            'Provider request failed (HTTP 403); the token needs SSO authorization for this organization')
+        # Anything outside a plain permission list is not repeated.
+        assert await refused({'X-Accepted-GitHub-Permissions': 'ghp_leaked <script>'}) == 'Provider request failed (HTTP 403)'
+        assert 'secret body' not in await refused({})
+        # GitHub names permissions on every response; a missing file is not a refusal.
+        monkeypatch.setattr(Response, 'status', 404)
+        assert await refused({'X-Accepted-GitHub-Permissions': 'contents=read'}) == 'Provider request failed (HTTP 404)'
+    asyncio.run(exercise())
+
+
+def test_transport_identifies_itself_and_a_service_may_override(monkeypatch):
+    from conclave.integrations import transport as module
+    monkeypatch.setattr(module, 'public_addresses', lambda host: ['93.184.216.34'])
+    monkeypatch.setattr(module, 'PinnedHTTPS', Connection)
+    Connection.instances = []
+    transport = module.Transport({'example.com'})
+    async def exercise():
+        # GitHub answers 403 to a request with no User-Agent, so every call
+        # carries one and a service that needs its own still wins.
+        await transport.request('GET', 'https://example.com/api')
+        headers = Connection.instances[-1].call[3]
+        assert headers['User-Agent'] == 'Conclave/0.1 (authorized API integration)'
+        assert headers['Accept'] == 'application/json'
+        await transport.request('GET', 'https://example.com/api', headers={'User-Agent': 'Reddit/1'})
+        assert Connection.instances[-1].call[3]['User-Agent'] == 'Reddit/1'
     asyncio.run(exercise())
 
 

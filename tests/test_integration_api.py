@@ -191,3 +191,24 @@ def test_pause_and_resume_over_rest(tmp_path):
         assert (await api.dispatch('POST', f"/api/runs/{record['id']}/pause", {'extra': 1}))[0] == 400
         await host.close()
     asyncio.run(exercise())
+
+
+def test_connection_grants_update_without_resending_credentials(tmp_path):
+    from conclave.integrations import ConnectionStore
+    principal = Principal('alice', 'team')
+    host = LocalRunHost(RunRepository(tmp_path / 'runs.sqlite'), None, ToolRegistry(1000), reviewer='alice', principal=principal)
+    host.connections = ConnectionStore(tmp_path / 'connections.sqlite', Fernet.generate_key())
+    api = ApplicationAPI(host, Workspace(tmp_path / 'apps.sqlite'))
+    value = {'id': 'code', 'name': 'Code', 'integration': 'github', 'applications': ['app'],
+             'operations': ['read_issue'], 'scopes': [], 'credentials': {'access_token': 'PRIVATE_TOKEN'}}
+    async def exercise():
+        assert (await api.dispatch('POST', '/api/connections', value))[0] == 201
+        status, result = await api.dispatch('PUT', '/api/connections/code', {'operations': ['read_issue', 'read_checks']})
+        assert status == 200 and result['operations'] == ['read_checks', 'read_issue'] and 'PRIVATE_TOKEN' not in json.dumps(result)
+        # The stored token is kept: the widened grant still authenticates.
+        assert host.connections._read('code', 'team', 'alice')['credentials'] == {'access_token': 'PRIVATE_TOKEN'}
+        for bad in ({'operations': ['delete_repository']}, {'credentials': {'access_token': 'other'}}, {'operations': []}, {}):
+            assert (await api.dispatch('PUT', '/api/connections/code', bad))[0] == 400
+        assert (await api.dispatch('PUT', '/api/connections/code', {'applications': ['other']}, principal=Principal('bob', 'team')))[0] == 400
+        assert (await api.dispatch('GET', '/api/connections'))[1]['connections'][0]['operations'] == ['read_checks', 'read_issue']
+    asyncio.run(exercise())

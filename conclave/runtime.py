@@ -250,6 +250,7 @@ class ToolAgentRuntime:
         last_check = started
 
         step = 0
+        reviewed = False
         while self.config.max_tool_steps is None or step < self.config.max_tool_steps:
             messages[0][
                 "content"
@@ -324,7 +325,12 @@ class ToolAgentRuntime:
 
             step += 1
 
-            if kind == "final":
+            review = None
+            if kind == "final" and spec.review_final is not None and not reviewed:
+                reviewed = True
+                review = spec.review_final(dict(action))
+
+            if kind == "final" and not review:
                 result = AgentResult(
                     content=str(
                         action.get(
@@ -467,6 +473,26 @@ class ToolAgentRuntime:
                 observation = event.observation
 
                 yield event
+
+            elif review:
+                label = "FINAL CHECK"
+
+                observation = review
+
+            elif action is not None and "type" not in action:
+                # An object that leaves out "type" is usually the final
+                # answer's fields on their own. Repeating the JSON-only rule
+                # does not say what is wrong, and the model resends it.
+                label = "FORMAT ERROR"
+
+                observation = (
+                    'Your reply had no "type" field. '
+                    "Every reply needs one of tool, note, "
+                    'delegate and final. When finished, add '
+                    '"type": "final" and "content" to the '
+                    "fields your instructions name.\n\n"
+                    + JSON_ONLY_RULE
+                )
 
             elif kind is None:
                 label = "FORMAT ERROR"

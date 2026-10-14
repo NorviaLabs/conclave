@@ -342,7 +342,10 @@ Changing document contents is permitted; this is not a document snapshot.
 file tools are requested without an explicit selection. It is not necessary when
 using named resources or the working folder. Source tools are `list_files`, `read_file`, `search_files`
 and `knowledge_search`. All enforce resolved path containment, hidden-file denial
-and `CONCLAVE_SOURCE_EXTENSIONS` (default `.txt,.md,.csv,.html`). Built-in knowledge
+and `CONCLAVE_SOURCE_EXTENSIONS` (default `.txt,.md,.csv,.html`). A source may
+name its own instead, as `"extensions": [".rs", ".toml"]` or `"extensions": "*"`
+for any text file that is not hidden; a code checkout an application changes
+needs this to be readable as code. Built-in knowledge
 search is keyword search over the selected documents, not semantic retrieval;
 trusted extensions can replace it without losing their capability declarations.
 
@@ -527,6 +530,7 @@ returns 503. No live verification is implied by a configured connection.
 |---|---|---|
 | GET | `/api/integrations` | Exactly 23 service/protocol descriptors with implemented operations |
 | GET / POST | `/api/connections` | List redacted connections / create explicit application and operation grants |
+| PUT | `/api/connections/{id}` | `{operations?, applications?}`; change what the connection grants, keeping its stored credentials |
 | DELETE | `/api/connections/{id}` | Disconnect and remove encrypted local credentials |
 | POST | `/api/connections/{id}/health` | `{}`; probe a safe granted read when possible |
 | POST | `/api/integrations/recommend` | `{goal, application_id}`; suggestions, never grants |
@@ -534,10 +538,35 @@ returns 503. No live verification is implied by a configured connection.
 Tool assignments use `connection.<id>.<operation>` in the existing agent `tools`
 array. Each execution resolves the encrypted connection server-side and rechecks
 ownership, tenant, application, operation, scopes and revocation. Mutations
-remain WRITE capabilities, so no configured approver means denial. The current
-Studio host does not provide a per-tool approval dialog; trusted Python callers
-can use the existing approver callback. In-process run events include
-`connection_id` and `operation` without credentials or raw arguments.
+remain WRITE capabilities. The Studio host asks the person before any
+destructive call runs — a connection operation or a host tool such as
+`write_file` — through the pending-approval endpoints below. A host with no
+approval surface refuses instead: `conclave run`, and any host built with
+`configured_host(interactive_approvals=False)`. Trusted Python callers can pass
+their own approver callback. In-process run events include `connection_id` and
+`operation` without credentials or raw arguments.
+
+An optional definition field, `"autonomous_execution": true`, authorizes declared
+tools up front in the application host, including hosts without an interactive
+approval surface. Missing or `false` keeps per-call approvals. The host records
+`ToolAuthorizationGranted` with the authorizer and per-agent tool allowlists.
+Unknown capabilities remain denied; connection ownership, scopes, revocation,
+source containment, budgets, and explicit human workflow gates remain enforced.
+Enable only for trusted definitions: this grants commands and remote writes,
+and command tools are not an OS sandbox. Direct `run_application` callers still
+supply their own approver; a definition alone does not change core policy.
+
+A GitHub connection can run the repository half of an issue-to-merge flow:
+`read_branches`, `read_checks` (each CI check run's name, status and
+conclusion for a commit or branch), `create_branch`, `write_content` (plain `text` in, base64 out,
+with the current blob `sha` when replacing a file), `create_pull_request` and
+`merge_pull_request` (merge, squash or rebase). Each is a granted operation and
+each write needs per-call approval unless autonomous execution was authorized.
+`read_content` takes an optional `ref` (branch, tag or commit), returns a text file's decoded `text`, marks a binary file
+`binary: true`, and lists a directory's entries.
+`read_content` and `write_content` are the only
+operations whose declared path field may contain `/`; empty, `.` and `..`
+segments are refused, as they are for every other placeholder.
 
 OAuth lifecycle is opt-in via `CONCLAVE_INTEGRATION_OAUTH_FILE`; see
 [OAuth setup and limitations](INTEGRATIONS.md#oauth-lifecycle-update).
@@ -575,7 +604,12 @@ Provider failures return one generic message; provider text is never forwarded.
 member's own limits is `stopped`, and the reason names the member, the limit and
 the stage that was never completed — `market_researcher: used all 12 action steps
 without completing Research opportunities` — rather than reporting only that a
-stage did not complete. The limits themselves are the application's:
+stage did not complete. A step that could not do its task adds `"blocker"` to
+its final answer; its output is kept, the steps after it do not run, and the run
+is `failed` with the reason `<member> is blocked: <blocker>`. A member with
+tools that reports a blocker is asked once, in the same conversation, to repeat
+it if it holds or to continue; a blocker it repeats stands. The limits
+themselves are the application's:
 `run_config.max_tool_steps` ("Agent action steps" in Setup) bounds the actions one
 member may take in a stage before it must answer, and `run_budget.*` bounds the
 whole run.
@@ -594,10 +628,11 @@ mistaken for one that finished early. `run_budget.wall_clock_seconds` is
 absolute: it is not exceeded to rescue a stage, which is why a new application
 does not start with one.
 
-The runtime's own default for every dimension is no limit. The bundled
-application defaults (`conclave/application/data/defaults.json`, replaceable with
-`DEFAULTS_FILE`) bound the work rather than the clock: 12 action steps per stage,
-40 tool calls per run, no time limit.
+The runtime's own default for every dimension is no limit, and so are the
+bundled application defaults (`conclave/application/data/defaults.json`,
+replaceable with `DEFAULTS_FILE`): no cap on action steps, tool calls,
+delegations or time. They bound only the size of each tool response and note,
+and how many steps run at once.
 
 ## What runs each step
 

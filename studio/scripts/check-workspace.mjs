@@ -113,7 +113,7 @@ assert.match(source,/node\.classList\.toggle\('muted',query&&!hit\)/,'and the re
 assert.match(source,/if\(event\.key==='Enter'\)\{event\.preventDefault\(\);stepThroughSearch\(event\.shiftKey\?-1:1\)/,'Enter steps through the matches');
 assert.match(source,/if\(button\.hasAttribute\('data-plan-search-next'\)\)\{stepThroughSearch\(\);return;\}/,'and the button stands for the same thing');
 assert.match(inspector,/data-plan-search value="\$\{e\(ctx\.search\|\|''\)\}"/);
-assert.match(inspector,/placeholder="Find a step by name, member or output"/);
+assert.match(inspector,/placeholder="Find a step" title="Find a step by name, member or output"/);
 assert.match(inspector,/data-plan-search-count/);
 assert.match(css,/\.graph-canvas \.plan-node\.match\{border-color:var\(--mint\)/);
 

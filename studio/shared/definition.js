@@ -12,6 +12,7 @@ function identifier(value,label){str(value,label,64);if(!/^[a-z][a-z0-9_-]*$/.te
 function array(value,label,max=24){if(!Array.isArray(value)||value.length<1||value.length>max)fail(`${label} needs 1–${max} entries.`)}
 function unique(items,field,label){const values=items.map(x=>x[field]);if(new Set(values).size!==values.length)fail(`${label} must be unique.`)}
 export function validateDefinition(d){
+ if(d?.autonomous_execution!==undefined&&typeof d.autonomous_execution!=='boolean')fail('Autonomous execution must be a boolean.');
  if(!d||typeof d!=='object'||Array.isArray(d)||d.version!==1)fail('Unsupported application definition.');
  if(d.resources!==undefined){if(!d.resources||typeof d.resources!=='object'||Array.isArray(d.resources)||Object.keys(d.resources).some(key=>key!=='source'))fail('Application resources must select a named source.');if(d.resources.source!==undefined)identifier(d.resources.source,'Source resource');}
  str(d.name,'Application name',100);str(d.description,'Purpose',2000,false);array(d.agents,'Agents',16);array(d.state,'State collections',12);array(d.workflow,'Workflow stages',24);array(d.views,'Views',12);
@@ -217,7 +218,7 @@ export function preflightIssues(d){
   if(member?.kind!=='human'){
    const tools=member?.tools||[];
    const executable=tools.some(id=>['run_tests','run_code','execute_command','shell','bash'].includes(id)||/\b(?:execute commands|execute code|run tests)\b/i.test(toolDescriptors.find(tool=>tool.id===id)?.description||''));
-   const writable=tools.some(id=>['write_file','apply_patch'].includes(id)||/\b(?:create or edit files|apply patches)\b/i.test(toolDescriptors.find(tool=>tool.id===id)?.description||''));
+   const writable=tools.some(id=>['write_file','edit_file','apply_patch'].includes(id)||/\b(?:create or edit files|apply patches)\b/i.test(toolDescriptors.find(tool=>tool.id===id)?.description||''));
    const positive=sentences.filter(sentence=>! /\b(?:do not|don't|never|cannot|can't|proposed|propose|unverified|without executing)\b/i.test(sentence));
    const execute=positive.find(sentence=>/\b(?:run|execute)\s+(?:the\s+)?(?:tests|test suite|commands|test command)\b/i.test(sentence));
    const write=positive.find(sentence=>/\b(?:apply|write|modify|edit)\s+(?:the\s+)?(?:patch|code|files|source files)\b/i.test(sentence));

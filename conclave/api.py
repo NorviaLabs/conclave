@@ -354,6 +354,8 @@ class ApplicationAPI:
                 if len(parts) == 3 and method == 'DELETE':
                     store.disconnect(parts[2], actor.tenant, actor.name)
                     return 204, None
+                if len(parts) == 3 and method == 'PUT':
+                    return 200, store.update_grants(parts[2], value, actor.tenant, actor.name)
                 if len(parts) == 4 and parts[3] == 'health' and method == 'POST':
                     self.fields(value, set())
                     return 200, await store.health(parts[2], actor.tenant, actor.name)
@@ -364,12 +366,22 @@ class ApplicationAPI:
             return 405, {"error": "Method not allowed"}
         if method == "GET" and path == "/api/health":
             return 200, {"status": "ok", "api_version": 1}
+        # Who the page is. A hosted transport answers this itself, before
+        # dispatch; reaching here means no sign-in exists, so the host's own
+        # operator is the actor and there is nothing to sign in to.
+        if method == "GET" and path == "/api/me":
+            return 200, {"principal": {"name": actor.name, "tenant": actor.tenant,
+                                       "source": actor.source, "label": actor.label},
+                         "login": None}
         if method == "GET" and path == "/api/runtime":
             return await self.host.handle("runtime", {}, streaming=streaming)
         if path == "/api/settings/sources":
             if method == "GET":
                 return 200, {"sources": {key: {"name": item["name"], "path": str(item["path"]),
-                                              "applications": item["applications"]}
+                                              "applications": item["applications"],
+                                              # Returned so a settings round trip keeps it.
+                                              **({"extensions": "*" if item["extensions"] is None else sorted(item["extensions"])}
+                                                 if "extensions" in item else {})}
                                           for key, item in (self.host.resources or {}).items()}}
             if method == "PUT":
                 self.fields(value, {"sources"})

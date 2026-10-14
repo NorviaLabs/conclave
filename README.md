@@ -74,7 +74,10 @@ deployment has: the hosted routes, the origin allowlist, and Google sign-in when
 and `--no-login` leaves sign-in off. `--backend-port`, `--studio-port` and
 `--node` override ports and the Node executable, `--provider`/`--model` override
 the detected backend, and existing `CONCLAVE_*` settings are inherited by both
-services. Or start them by hand:
+services. Connections work here without a setting: the first run generates the
+credential key into the ignored `studio/.studio-local/integration.key` and every
+run after that reuses it, so stored credentials stay readable. Or start them by
+hand:
 
 ```sh
 # Terminal 1, repository root. --hosted is the deployment's adapter, and the
@@ -117,12 +120,27 @@ on this computer is used, and Ollama's own installed model is chosen.
 Runs persist in the same local database as Studio by default. Use `--database
 /absolute/path/runs.sqlite` to select another database consistently across commands.
 The same `CONCLAVE_SOURCE_DIR`, `CONCLAVE_EXTENSIONS` and custom provider
-factory settings apply. Bundled tools are registered automatically. Applications
-whose agents read files, Git or GitHub use a source folder: with nothing
+factory settings apply. Bundled tools are registered automatically, including
+the repository write tools (`write_file`, `edit_file`, `run_tests`, `git_commit`,
+`push_branch`, `open_pull_request`, `merge_pull_request`). Applications
+whose agents read or change files, Git or GitHub use a source folder: with nothing
 configured, that is the folder the command runs in, and `--source-dir <folder>`
 or `--source <resource-id>` choose another for one run. Path containment,
-hidden-file denial and the document filters apply inside it. Agent allowlists and
-write/unknown capability approvals retain their existing gates.
+hidden-file denial and the document filters apply inside it, and a write tool
+may change only that folder. Agent allowlists and write/unknown capability
+approvals retain their existing gates. A terminal run has no way to ask, so
+`conclave run` refuses a destructive call instead of waiting for an answer;
+`conclave serve` and Studio ask the person and wait.
+
+For a trusted application, choose **Controls → Tool authorization → Autonomous
+execution** and save, or set `"autonomous_execution": true` in its definition.
+The application host then authorizes its declared tools up front instead of
+asking on each write, including terminal runs. Missing or `false` retains the
+existing behavior. Authorization is recorded as `ToolAuthorizationGranted`;
+unknown capabilities are not pre-authorized. Agent allowlists, source and
+connection checks, budgets, and explicit human workflow steps remain active.
+This authorizes commands and remote writes, not just file edits: command tools
+are not an OS sandbox, so enable it only for trusted applications and resources.
 
 ```bash
 uv run conclave status RUN_ID
@@ -199,8 +217,9 @@ them: edit the definition, or pass the same file to `conclave run`.
 
 Exit codes: `0` success, `1` error, `130` interrupted.
 
-None of the bundled tools declares `WRITE`, so approval is only needed once you
-add a tool that does.
+The bundled tools that declare `WRITE` are the repository write tools, and they
+only act inside the source folder the run was authorized with. Every call they
+make is approved by a person before it runs.
 
 ### Use a ChatGPT subscription
 
@@ -402,7 +421,7 @@ enforces it.
 | `conclave/events.py` | The frozen event vocabulary |
 | `conclave/store.py` | `StoreSchema` and `SharedStore` |
 | `conclave/runtime.py` | `ToolAgentRuntime` and `fan_out` |
-| `conclave/tools/` | The 14 bundled tools |
+| `conclave/tools/` | The 14 bundled read tools, and `changes.py` for the write tools |
 | `conclave/application/` | Runs, steps, gates, approvals, the shared store, resources, REST host |
 | `conclave/application/presentation.py` | A run as text, for a terminal |
 | `conclave/application/data/catalogue.json` | Starters, role presets, output kinds and tool descriptors |
@@ -475,11 +494,13 @@ lines, so a loop attempt is visible instead of silent.
   "Binary file" notice and `search_files` skips them. A NUL byte is valid
   UTF-8 but cannot survive a subprocess argument, so a decoded binary used to
   take down a whole agent run at the model boundary.
-- GitHub tools are read-only (`gh ... view` / `gh ... search`), and `web_fetch`
-  allows only `http`/`https`.
+- The GitHub tools registered by default are read-only (`gh ... view` /
+  `gh ... search`), and `web_fetch` allows only `http`/`https`.
 - Capabilities are declared per tool and never inferred from names. `WRITE`, or
   no declaration at all, means destructive: refused unless an approver allows
-  it. The bundled tools declare `read`/`network`/`shell` and never `write`.
+  it. The read tools declare `read`/`network`/`shell` and never `write`; the
+  repository write tools in `conclave.tools.changes` are the one bundled family
+  that declares `WRITE`, and each of their calls needs an approval.
 - Every limit belongs to the application that declared it, in the definition's
   `run_config` and `run_budget`. The library has no opinion on any of them: it
   refuses to guess, and a definition that leaves a required number out is

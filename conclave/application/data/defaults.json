@@ -61,17 +61,17 @@
     }
   ],
   "run_config": {
-    "max_tool_steps": 12,
+    "max_tool_steps": null,
     "max_notes": 12,
     "max_note_chars": 300,
     "max_tool_output_chars": 20000,
     "fan_out_limit": 3
   },
   "run_budget": {
-    "max_delegations": 15,
-    "max_per_agent": 4,
-    "max_depth": 2,
-    "tool_calls": 40,
+    "max_delegations": null,
+    "max_per_agent": null,
+    "max_depth": null,
+    "tool_calls": null,
     "wall_clock_seconds": null,
     "tokens": null,
     "cost_usd": null

@@ -14,7 +14,7 @@ import re
 import sys
 from pathlib import Path
 
-from conclave import ToolRegistry
+from conclave import Capability, ToolRegistry
 from conclave.providers import OLLAMA_DEFAULT_URL, LocalBackends, resolve_provider
 from .definition import stage_backend, validate_host_tools
 from .runs import RunRepository, validate_run_request
@@ -56,7 +56,7 @@ def public_record(record):
 class LocalRunHost:
     def __init__(self, repository, provider, tools, *, reviewer, provider_name=None, provider_source=None,
                  unavailable=None, adapters=(), resources=None, source_extensions=(), profile=None,
-                 principal=None, paths=None, sandbox=None, loop=None, backends=None):
+                 principal=None, paths=None, sandbox=None, loop=None, backends=None, interactive_approvals=True):
         self.repository, self.provider, self.tools = repository, provider, tools
         # `provider` is the backend this host runs by default. `backends` is the
         # router a run gets when a member or a step names its own, and it is
@@ -83,6 +83,10 @@ class LocalRunHost:
         self.tasks = {}
         # Runs a person asked to pause; each stops between steps, never mid-call.
         self.pauses = set()
+        # A host with an approval surface asks the person before a destructive
+        # call runs. One without it — a terminal that only reads a finished run —
+        # refuses instead of holding the run open for an answer nobody can give.
+        self.interactive_approvals = interactive_approvals
         from .tool_approvals import ToolApprovals
         self.tool_approvals = ToolApprovals(repository)
         self.adapters = tuple(adapters)
@@ -126,11 +130,25 @@ class LocalRunHost:
                 raise ValueError("This request is already running")
             self.tasks.pop(run_id)
         owner = self.connections.run_owner(run_id, self.principal.tenant) if getattr(self, 'connections', None) else None
-        tools = self.run_tools(self.repository.get(run_id)["request"], owner=owner)
+        saved_request = self.repository.get(run_id)["request"]
+        definition = saved_request["definition"]
+        tools = self.run_tools(saved_request, owner=owner)
+        autonomous = definition.get("autonomous_execution", False)
+        grants = {agent["id"]: set(agent["tools"]) for agent in definition["agents"]
+                  if agent.get("kind", "ai") == "ai"}
         # A run may mix backends, so it is handed the router when there is one.
         provider = self.backends or self.provider
         async def approver(request):
-            if not request.tool.startswith('connection.') or not getattr(self, 'connections', None):
+            if autonomous:
+                # Up-front authorization is limited to declared tools with known
+                # capabilities. Resource and connection boundaries still apply.
+                return (request.tool in grants.get(request.agent, set())
+                        and bool(request.capabilities)
+                        and request.capabilities <= frozenset(Capability))
+            # A destructive call is answered by the person running it: the
+            # connection's owner when a connection is involved, the run's owner
+            # otherwise. Every write tool asks, not only a connected service.
+            if not self.interactive_approvals:
                 return False
             return await self.tool_approvals.approver(run_id, owner or self.principal.name)(request)
         # A resumed run is no longer paused, or it would stop again immediately.
@@ -145,6 +163,10 @@ class LocalRunHost:
         except BaseException:
             await stream.aclose()
             raise
+        if autonomous:
+            self.repository._append(run_id, {"type": "ToolAuthorizationGranted",
+                "mode": "autonomous", "authorizer": owner or self.principal.name,
+                "tools": {agent: sorted(names) for agent, names in grants.items()}})
         task = asyncio.create_task(self._consume(stream))
         self.tasks[run_id] = (task, stream)
 
@@ -428,7 +450,7 @@ def configured_paths(principal) -> StoragePaths:
                         applications=Path(setting("DATABASE")) if setting("DATABASE") else runs.parent / "studio.sqlite")
 
 
-def configured_host(*, workspace=None, source_dir=None, principal=None):
+def configured_host(*, workspace=None, source_dir=None, principal=None, interactive_approvals=True):
     profile = resolve_profile(setting("PROFILE"))
     principal = principal or resolve_principal(setting("PRINCIPAL"), setting("TENANT"))
     paths = configured_paths(principal)
@@ -513,7 +535,8 @@ def configured_host(*, workspace=None, source_dir=None, principal=None):
     host = LocalRunHost(repository, provider, tools,
                         reviewer=principal.name, provider_name=name, unavailable=reason, adapters=adapters,
                         resources=resources, source_extensions=source_extensions, provider_source=source,
-                        profile=profile, principal=principal, paths=paths, backends=backends)
+                        profile=profile, principal=principal, paths=paths, backends=backends,
+                        interactive_approvals=interactive_approvals)
     key = setting('INTEGRATION_KEY')
     if key:
         from conclave.integrations import ConnectionStore

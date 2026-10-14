@@ -242,7 +242,7 @@ try {
     await shot(`run-${width}`);await page.keyboard.press('Escape');
   }
   run.status='failed';run.events.push(event(101,{type:'ApplicationFinished',stage:workflow[0],status:'failed',reason:'Recorded failure'}));
-  await page.waitForTimeout(1500);assert.match(await page.locator('.run-overview').innerText(),/Request failed/);
+  await page.waitForTimeout(1500);assert.match(await page.locator('.run-overview').innerText(),/Run failed/);
   await shot('run-failed-mobile');
   assert.deepEqual(errors, [], 'the page reported no errors');
   console.log('PASS: plan gestures; canvas-first run, delegation, handoffs, on-demand inspector, activity dock, stable live DOM/scroll/selection, follow suspension, tablet/mobile and failure status.');

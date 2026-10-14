@@ -21,7 +21,10 @@ def make_api(tmp_path, provider=None):
 def test_source_settings_are_validated_persisted_and_applied(tmp_path, monkeypatch):
     from conclave.application.service import configured_host
     monkeypatch.setenv('CONCLAVE_DATA_DIR', str(tmp_path))
-    sources = {'documents': {'name': 'Documents', 'path': str(tmp_path), 'applications': []}}
+    # A code checkout keeps the files its tools read through a settings round trip.
+    sources = {'documents': {'name': 'Documents', 'path': str(tmp_path), 'applications': []},
+               'code': {'name': 'Code', 'path': str(tmp_path), 'applications': None, 'extensions': '*'},
+               'rust': {'name': 'Rust', 'path': str(tmp_path), 'applications': None, 'extensions': ['.rs', '.toml']}}
 
     async def exercise():
         api = make_api(tmp_path)
@@ -30,11 +33,12 @@ def test_source_settings_are_validated_persisted_and_applied(tmp_path, monkeypat
         assert json.loads((tmp_path / 'sources.json').read_text()) == sources
         invalid = {'broken': {'path': str(tmp_path / 'missing')}}
         assert (await api.dispatch('PUT', '/api/settings/sources', {'sources': invalid}))[0] == 400
-        assert set(api.host.resources) == {'documents'}
+        assert set(api.host.resources) == {'documents', 'code', 'rust'}
         await api.host.close()
     asyncio.run(exercise())
     host = configured_host()
-    assert set(host.resources) == {'documents'}
+    assert set(host.resources) == {'documents', 'code', 'rust'}
+    assert host.resources['code']['extensions'] is None and host.resources['rust']['extensions'] == {'.rs', '.toml'}
 
 
 def test_rest_named_resource_binding_is_pinned_and_paths_are_not_accepted(tmp_path):
@@ -77,6 +81,15 @@ def test_saved_application_source_is_pinned_without_runtime_selection(tmp_path):
         assert record['request']['resources'] == {'source': 'beta', 'source_revision': resources['beta']['revision']}
         await api.host.close()
     asyncio.run(exercise())
+
+
+def test_local_host_answers_who_the_page_is_without_a_sign_in(tmp_path):
+    # Studio asks /api/me first and shows Google sign-in when nobody answers;
+    # a local host has one operator and no login, so it must say so.
+    status, payload = asyncio.run(make_api(tmp_path).dispatch("GET", "/api/me"))
+    assert status == 200
+    assert payload["login"] is None
+    assert payload["principal"]["tenant"] == "local" and payload["principal"]["label"]
 
 
 def test_rest_application_revision_run_events_reviews_and_restart(tmp_path):

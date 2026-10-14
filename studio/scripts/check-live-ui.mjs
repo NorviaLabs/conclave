@@ -28,7 +28,7 @@ assert.match(blocked,/Pre-run checks/);
 assert.match(blocked,/Make optional and save/);
 assert.match(blocked,/Edit step instructions/);
 assert.match(blocked,/data-action="start-live" disabled/,'conflicts block the UI run button');
-assert.match(liveRunMarkup(resolved,null,preflightContext),/No known output-contract conflicts found/);
+assert.match(liveRunMarkup(resolved,null,preflightContext),/No problems found/);
 assert.doesNotMatch(liveRunMarkup(resolved,null,preflightContext),/data-action="start-live" disabled/);
 assert.doesNotMatch(liveRunMarkup(conflicting,null,{...preflightContext,warningsReviewed:true}),/data-action="start-live" disabled/,'reviewed heuristics do not block Run');
 const budgetPlan=emptyDefinition();budgetPlan.run_budget.max_delegations=0;budgetPlan.run_budget.max_per_agent=0;
@@ -150,7 +150,7 @@ console.log('PASS: named resource selection, authorization filtering, escaping, 
 // otherwise, and a host that reports no profile is local by default.
 const hostedRuntime={available:true,tools:[],profile:'hosted'};
 const hosted=liveRunMarkup(d,null,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:hostedRuntime});
-assert.match(hosted,/HOSTED RUN/);assert.match(hosted,/configured for this workspace/);
+assert.match(hosted,/HOSTED RUN/);assert.match(hosted,/this workspace’s AI provider/);
 assert.ok(!hosted.includes('on this computer'));
 assert.match(liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:hostedRuntime}),/HOSTED RUN/,'an open run still states the profile it runs under');
 assert.ok(!liveRunMarkup(d,projected,{escape,requestForm:'',outputs:'',human:'',progress:'',busy:false,error:'',runtime:hostedRuntime}).includes('on this computer'));

@@ -15,6 +15,10 @@ class Operation:
     capability: str
     parameters: dict
     scopes: tuple = ()
+    # Path placeholders that address a resource *inside* a collection, such as a
+    # file path. Declaring one is what lets a nested value reach the path; every
+    # other placeholder stays a single segment.
+    segments: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -44,14 +48,15 @@ CATEGORIES = {
 }
 
 
-def op(name, method, path, fields=(), *, required=(), scope=(), description=None):
+def op(name, method, path, fields=(), *, required=(), scope=(), description=None, segments=()):
     properties = {field: {'type': 'string', 'maxLength': 10000} for field in fields}
     for field in ('values', 'properties', 'payload'):
         if field in properties:
             properties[field] = {'type': 'array' if field == 'values' else 'object'}
     return Operation(name, description or name.replace('_', ' ').capitalize(), method, path,
                      'read' if method == 'GET' else 'write',
-                     {'type': 'object', 'properties': properties, 'required': list(required), 'additionalProperties': False}, tuple(scope))
+                     {'type': 'object', 'properties': properties, 'required': list(required), 'additionalProperties': False}, tuple(scope),
+                     tuple(segments))
 
 
 def integrations():
@@ -105,10 +110,18 @@ def integrations():
         Integration('github','GitHub','https://api.github.com','bearer',(
             op('search_repositories','GET','/search/repositories',['query'],required=['query']),
             op('search_issues','GET','/search/issues',['query'],required=['query']),
-            op('read_content','GET','/repos/{owner}/{repo}/contents/{path}',['owner','repo','path'],required=['owner','repo','path']),
+            op('read_content','GET','/repos/{owner}/{repo}/contents/{path}',['owner','repo','path','ref'],required=['owner','repo','path'],segments=['path'],
+               description='Read a file or list a directory; ref names a branch, tag or commit, the default branch when omitted'),
             op('read_issue','GET','/repos/{owner}/{repo}/issues/{issue_number}',['owner','repo','issue_number'],required=['owner','repo','issue_number']),
             op('read_pull_request','GET','/repos/{owner}/{repo}/pulls/{number}',['owner','repo','number'],required=['owner','repo','number']),
-            op('create_issue','POST','/repos/{owner}/{repo}/issues',['owner','repo','title','body'],required=['owner','repo','title']),)),
+            op('read_branches','GET','/repos/{owner}/{repo}/git/refs/heads',['owner','repo'],required=['owner','repo']),
+            op('read_checks','GET','/repos/{owner}/{repo}/commits/{ref}/check-runs',['owner','repo','ref'],required=['owner','repo','ref'],segments=['ref'],
+               description='Read the CI check runs of a commit or branch: each name, status and conclusion'),
+            op('create_issue','POST','/repos/{owner}/{repo}/issues',['owner','repo','title','body'],required=['owner','repo','title']),
+            op('create_branch','POST','/repos/{owner}/{repo}/git/refs',['owner','repo','branch','sha'],required=['owner','repo','branch','sha']),
+            op('write_content','PUT','/repos/{owner}/{repo}/contents/{path}',['owner','repo','path','message','text','branch','sha'],required=['owner','repo','path','message','text','branch'],segments=['path']),
+            op('create_pull_request','POST','/repos/{owner}/{repo}/pulls',['owner','repo','title','head','base','body'],required=['owner','repo','title','head','base']),
+            op('merge_pull_request','PUT','/repos/{owner}/{repo}/pulls/{number}/merge',['owner','repo','number','merge_method'],required=['owner','repo','number']),)),
         Integration('linear','Linear','https://api.linear.app','bearer',(
             Operation('search_issues','Search issues','POST','/graphql','read',op('x','GET','',['query'],required=['query']).parameters),
             Operation('read_projects','Read projects','POST','/graphql','read',op('x','GET','').parameters),
@@ -159,6 +172,13 @@ async def invoke(service, operation, config, secrets, arguments, transport):
     path = operation.path
     for key in re.findall(r'\{(\w+)\}', path):
         value = args.pop(key)
+        if key in operation.segments:
+            # A declared path field addresses a resource inside a collection: the
+            # caller chooses the file, never the shape of the path.
+            if any(part in ('', '.', '..') or '\\' in part for part in str(value).split('/')):
+                raise IntegrationError('Resource path cannot contain empty, current or parent segments')
+            path = path.replace('{'+key+'}', quote(str(value), safe='/'))
+            continue
         if value in ('.','..') or '/' in value or '\\' in value:
             raise IntegrationError('Resource identifier cannot contain path segments')
         if key == 'object_type' and value not in ('companies','contacts','deals'):
@@ -195,6 +215,19 @@ async def invoke(service, operation, config, secrets, arguments, transport):
     if service.id == 'github':
         headers.update({'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
         if operation.name.startswith('search_'):params={'q':args['query'],'per_page':100}
+        elif operation.name == 'read_branches':params={'per_page':100}
+        elif operation.name == 'create_branch':body={'ref':'refs/heads/'+args['branch'],'sha':args['sha']}
+        elif operation.name == 'write_content':
+            body={'message':args['message'],'content':base64.b64encode(args['text'].encode()).decode(),'branch':args['branch']}
+            # Contents are updated by the blob's own revision; a new file has none.
+            if args.get('sha'):body['sha']=args['sha']
+        elif operation.name == 'create_pull_request':
+            body={'title':args['title'],'head':args['head'],'base':args['base']}
+            if args.get('body'):body['body']=args['body']
+        elif operation.name == 'merge_pull_request':
+            method=args.get('merge_method') or 'squash'
+            if method not in ('merge','squash','rebase'):raise IntegrationError('Choose merge, squash or rebase')
+            body={'merge_method':method}
     if service.id == 'linear':
         if operation.name == 'search_issues': body={'query':'query($term:String!){issues(filter:{title:{containsIgnoreCase:$term}},first:50){nodes{id identifier title description} pageInfo{hasNextPage endCursor}}}', 'variables':{'term':args['query']}}
         elif operation.name == 'read_projects':body={'query':'query{projects(first:50){nodes{id name description} pageInfo{hasNextPage endCursor}}}'}
@@ -240,4 +273,32 @@ async def invoke(service, operation, config, secrets, arguments, transport):
     if service.id=='slack' and not result.get('ok'):raise IntegrationError('Slack rejected the operation')
     if service.id=='linear' and result.get('errors'):raise IntegrationError('Linear rejected the operation')
     if service.id=='web_search':return {'results':[{'url':item.get('url'),'title':item.get('title'),'snippet':item.get('description')} for item in result.get('web',{}).get('results',[])]}
+    if service.id=='github':
+        # A hundred provider objects are larger than a model can read, and the
+        # caller only needs what identifies a result and where to read it.
+        if operation.name=='search_issues':
+            return {'total_count':result.get('total_count'),'items':[{'number':item.get('number'),'title':item.get('title'),'state':item.get('state'),'html_url':item.get('html_url'),'updated_at':item.get('updated_at'),'is_pull_request':'pull_request' in item} for item in result.get('items',[])[:30]]}
+        if operation.name=='search_repositories':
+            return {'total_count':result.get('total_count'),'items':[{'full_name':item.get('full_name'),'html_url':item.get('html_url'),'description':item.get('description'),'default_branch':item.get('default_branch'),'private':item.get('private')} for item in result.get('items',[])[:30]]}
+        if operation.name=='read_pull_request':
+            # Most of the provider object is links, and a model reads it against
+            # a bounded output: keep state and mergeability ahead of the body.
+            return {'number':result.get('number'),'title':result.get('title'),'state':result.get('state'),'draft':result.get('draft'),'merged':result.get('merged'),'mergeable':result.get('mergeable'),'mergeable_state':result.get('mergeable_state'),'merge_commit_sha':result.get('merge_commit_sha'),'html_url':result.get('html_url'),'head':{'ref':(result.get('head') or {}).get('ref'),'sha':(result.get('head') or {}).get('sha')},'base':{'ref':(result.get('base') or {}).get('ref'),'sha':(result.get('base') or {}).get('sha')},'user':(result.get('user') or {}).get('login'),'created_at':result.get('created_at'),'updated_at':result.get('updated_at'),'merged_at':result.get('merged_at'),'body':result.get('body')}
+        if operation.name=='read_content':
+            # GitHub sends a file as base64 among a dozen links: a model reads
+            # neither, and the encoding alone makes a file a third larger. A
+            # text file comes back as its text, a directory as its entries.
+            if isinstance(result,list):
+                return [{'name':item.get('name'),'path':item.get('path'),'type':item.get('type'),'size':item.get('size')} for item in result]
+            if result.get('encoding')=='base64' and isinstance(result.get('content'),str):
+                shaped={'path':result.get('path'),'sha':result.get('sha'),'size':result.get('size')}
+                try:
+                    shaped['text']=base64.b64decode(result['content']).decode('utf-8')
+                except (ValueError,UnicodeDecodeError):
+                    shaped['binary']=True
+                return shaped
+        if operation.name=='read_checks':
+            return {'total_count':result.get('total_count'),'check_runs':[{'name':item.get('name'),'status':item.get('status'),'conclusion':item.get('conclusion'),'html_url':item.get('html_url'),'completed_at':item.get('completed_at')} for item in result.get('check_runs',[])[:100]]}
+        if operation.name=='read_branches' and isinstance(result,list):
+            return [{'ref':item.get('ref'),'sha':(item.get('object') or {}).get('sha')} for item in result[:100]]
     return result
