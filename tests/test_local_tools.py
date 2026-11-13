@@ -461,6 +461,10 @@ def test_github_pr(local, recorded):
         "view",
         "3",
     ]
+    # Verification and merge decisions bind evidence to the head commit and
+    # its checks, so the bundled read must return them.
+    fields = recorded[0][recorded[0].index("--json") + 1].split(",")
+    assert {"headRefOid", "baseRefName", "mergeStateStatus", "statusCheckRollup"} <= set(fields)
 
 
 def test_github_search_issues_clamps_limit(

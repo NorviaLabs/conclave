@@ -1,5 +1,6 @@
 import bundledCatalogue from '../../conclave/application/data/catalogue.json' with {type:'json'};
 export const applicationTypes = structuredClone(bundledCatalogue.applicationTypes);
+export const audiences = structuredClone(bundledCatalogue.audiences||[]);
 export const connectorDescriptors = structuredClone(bundledCatalogue.connectorDescriptors);
 export const featuredApplications = structuredClone(bundledCatalogue.featuredApplications);
 export const outputPresets = structuredClone(bundledCatalogue.outputPresets);

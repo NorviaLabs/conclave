@@ -172,7 +172,7 @@ def build_tool_registry(
 
     add(
         "github_pr",
-        "Read a GitHub pull request in the current repository.",
+        "Read a GitHub pull request in the current repository, with its head commit, mergeability and CI check runs.",
         {
             "number": "integer",
         },

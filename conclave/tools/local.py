@@ -456,7 +456,10 @@ class LocalTools:
                     "number,title,state,"
                     "body,author,comments,"
                     "reviews,commits,"
-                    "files,url"
+                    "files,url,"
+                    "baseRefName,headRefName,headRefOid,"
+                    "mergeable,mergeStateStatus,"
+                    "statusCheckRollup"
                 ),
             ]
         )

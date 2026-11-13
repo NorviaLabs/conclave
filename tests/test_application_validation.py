@@ -4,9 +4,10 @@ import json
 
 import pytest
 
-from conclave.application.catalogue import configured_data, validate_catalogue, validate_member
+from conclave.application.catalogue import configured_data, starter_definitions, validate_catalogue, validate_member
 from conclave.application.definition import (_execution_order, plan_connections,
                                             record_fields, validate_definition, validate_fields)
+from conclave.application.resources import SOURCE_TOOLS
 from test_studio_runs import request
 
 
@@ -167,3 +168,20 @@ def test_canvas_groups_arrange_the_plan_without_changing_it():
     many["canvas"]["groups"] = [{"id": f"group{i}", "name": f"Group {i}"} for i in range(21)]
     with pytest.raises(ValueError, match="up to 20 canvas groups"):
         validate_definition(many)
+
+
+def test_software_delivery_starter_runs_on_bundled_repository_tools():
+    catalogue = configured_data("catalogue")
+    starters = {starter["id"]: starter["definition"] for starter in starter_definitions(catalogue, configured_data("defaults"))}
+    definition = starters["software-delivery"]
+    # Every tool is bound to the run's selected repository, so the starter
+    # needs no named connection before its first run.
+    assert {tool for agent in definition["agents"] for tool in agent["tools"]} <= SOURCE_TOOLS
+    assert [field["id"] for field in definition["inputs"] if field["required"]] == ["issue"]
+    assert [stage["id"] for stage in _execution_order(definition)] == [
+        "plan_ticket", "implement_pr", "verify_tests_ci", "verify_acceptance", "review_pr", "decide_merge"]
+    assert "autonomous_execution" not in definition
+    featured = [app["id"] for app in catalogue["applicationTypes"] if app.get("featured")]
+    assert featured[0] == "software-delivery"
+    audiences = {item["id"] for item in catalogue["audiences"]}
+    assert all(app["audience"] in audiences for app in catalogue["applicationTypes"] if "audience" in app)
