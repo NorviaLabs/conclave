@@ -136,7 +136,7 @@ export function planShape(d){
   const depth=Object.keys(counts).length?Math.max(...Object.keys(counts).map(Number))+1:1;
   return {levels:depth,columns:rows};
 }
-export function canvasPositions(d){const positions={},levels={},counts={};for(const id of executionOrder(d)){const parents=planConnections(d).filter(e=>e.to===id).map(e=>e.from);const level=parents.length?Math.max(...parents.map(p=>levels[p]))+1:0;levels[id]=level;const column=counts[level]||0;counts[level]=column+1;const saved=d.canvas?.positions?.[id];positions[id]=saved?{x:Number(saved.x)||0,y:Number(saved.y)||0}:{x:canvasMetrics.padX+level*(canvasMetrics.nodeWidth+canvasMetrics.gapX),y:canvasMetrics.padY+column*(canvasMetrics.nodeHeight+canvasMetrics.gapY)};}return positions;}
+export function canvasPositions(d){const positions={},levels={},counts={};for(const id of executionOrder(d)){const parents=planConnections(d).filter(e=>e.to===id).map(e=>e.from);const level=parents.length?Math.max(...parents.map(p=>levels[p]))+1:0;levels[id]=level;const column=counts[level]||0;counts[level]=column+1;const saved=d.canvas?.positions?.[id];const {perRow=Infinity,bandHeight=0,bandGap=0}=canvasMetrics,band=Number.isFinite(perRow)?Math.floor(level/perRow):0,slot=Number.isFinite(perRow)?level%perRow:level;positions[id]=saved?{x:Number(saved.x)||0,y:Number(saved.y)||0}:{x:canvasMetrics.padX+slot*(canvasMetrics.nodeWidth+canvasMetrics.gapX),y:canvasMetrics.padY+band*(bandHeight+bandGap)+column*(canvasMetrics.nodeHeight+canvasMetrics.gapY)};}return positions;}
 // Both canvases draw dependencies from the right of one node to the left of
 // the next, so geometry lives here rather than in either view.
 export let canvasNodeWidth=350,canvasNodeHeight=240;
@@ -146,18 +146,30 @@ export let canvasNodeWidth=350,canvasNodeHeight=240;
 // and its badge, a two-line backend. 220 cut the last line of the title.
 let canvasMetrics={nodeWidth:350,nodeHeight:240,gapX:60,gapY:60,padX:60,padY:50};
 export function currentCanvasMetrics(){return canvasMetrics;}
-export function setCanvasMetrics({width,height,levels,columns}){
+export function setCanvasMetrics({width,height,levels,columns,narrow=false}){
   const rows=Math.max(1,columns),cols=Math.max(1,levels);
-  const nodeWidth=350,nodeHeight=240,gapX=60,gapY=60;
+  const nodeWidth=350,nodeHeight=240,gapX=60,gapY=60,bandGap=110;
+  // A long chain wraps into rows, like text, at the row length that lets the
+  // whole plan show at the largest zoom; a phone reads one column, top down.
+  const bandHeight=nodeHeight*rows+gapY*(rows-1),fit=perRow=>{const bands=Math.ceil(cols/perRow),w=nodeWidth*perRow+gapX*(perRow-1)+80,h=bandHeight*bands+bandGap*(bands-1)+100;return Math.min(1,width/w,height/h);};
+  let perRow=narrow?1:cols;
+  if(!narrow)for(let k=cols;k>=1;k--)if(fit(k)>fit(perRow)+.02)perRow=k;
+  const bands=Math.ceil(cols/perRow),across=Math.min(cols,perRow);
   // Centre what there is, so a short plan looks placed rather than abandoned.
-  const spanX=nodeWidth*cols+gapX*(cols-1),spanY=nodeHeight*rows+gapY*(rows-1);
-  canvasMetrics={nodeWidth,nodeHeight,gapX,gapY,padX:Math.max(40,Math.round((width-spanX)/2)),padY:Math.max(50,Math.round((height-spanY)/2)),width,height};
+  const spanX=nodeWidth*across+gapX*(across-1),spanY=bandHeight*bands+bandGap*(bands-1);
+  canvasMetrics={nodeWidth,nodeHeight,gapX,gapY,perRow,bandHeight,bandGap,padX:Math.max(40,Math.round((width-spanX)/2)),padY:Math.max(50,Math.round((height-spanY)/2)),width,height};
   canvasNodeWidth=canvasMetrics.nodeWidth;canvasNodeHeight=canvasMetrics.nodeHeight;
   return canvasMetrics;
 }
-export function canvasEdgeCurve(from,to){if(!from||!to)return '';const x1=from.x+canvasNodeWidth,y1=from.y+canvasNodeHeight/2,x2=to.x,y2=to.y+canvasNodeHeight/2,bend=Math.max(40,Math.abs(x2-x1)/2);return `M ${x1} ${y1} C ${x1+bend} ${y1}, ${x2-bend} ${y2}, ${x2} ${y2}`;}
+// An edge to a step that sits behind its source (a wrapped row, or a step
+// placed there by hand) runs in the gap beside the row instead of across the
+// cards: out of the source, along the gap, and into the target from its left.
+const returnLane=(from,to)=>to.x<from.x+canvasNodeWidth+24?(to.y>from.y?to.y-(canvasMetrics.bandGap||canvasMetrics.gapY)/2:from.y-(canvasMetrics.bandGap||canvasMetrics.gapY)/2):null;
+export function canvasEdgeCurve(from,to){if(!from||!to)return '';const x1=from.x+canvasNodeWidth,y1=from.y+canvasNodeHeight/2,x2=to.x,y2=to.y+canvasNodeHeight/2,lane=returnLane(from,to);
+  if(lane!==null){const r=24,out=x1+r,into=x2-r,d1=lane>y1?1:-1,d2=y2>lane?1:-1;return `M ${x1} ${y1} Q ${out} ${y1} ${out} ${y1+d1*r} L ${out} ${lane-d1*r} Q ${out} ${lane} ${out-r} ${lane} L ${into+r} ${lane} Q ${into} ${lane} ${into} ${lane+d2*r} L ${into} ${y2-d2*r} Q ${into} ${y2} ${x2} ${y2}`;}
+  const bend=Math.max(40,Math.abs(x2-x1)/2);return `M ${x1} ${y1} C ${x1+bend} ${y1}, ${x2-bend} ${y2}, ${x2} ${y2}`;}
 // The point halfway along that curve, where a handle on the edge belongs.
-export function canvasEdgeMidpoint(from,to){if(!from||!to)return null;const x1=from.x+canvasNodeWidth,y1=from.y+canvasNodeHeight/2,x2=to.x,y2=to.y+canvasNodeHeight/2;return {x:(x1+x2)/2,y:(y1+y2)/2};}
+export function canvasEdgeMidpoint(from,to){if(!from||!to)return null;const x1=from.x+canvasNodeWidth,y1=from.y+canvasNodeHeight/2,x2=to.x,y2=to.y+canvasNodeHeight/2,lane=returnLane(from,to);return lane!==null?{x:(x1+x2)/2,y:lane}:{x:(x1+x2)/2,y:(y1+y2)/2};}
 
 export function emptyWorkspaceCatalogue(){return {version:1,roles:[],starters:[],outputs:[]};}
 export function validateWorkspaceCatalogue(value){

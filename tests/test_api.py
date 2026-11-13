@@ -966,3 +966,23 @@ def test_a_client_that_went_away_is_not_an_error(tmp_path, monkeypatch):
     assert writer.written.startswith(b"HTTP/1.1 200 Response"), "the answer is still written"
     assert writer.closed, "and the connection is still closed"
 
+
+
+def test_studio_serves_images_and_fonts_with_their_types(tmp_path):
+    # Images and fonts under studio/web are served with the type a browser
+    # needs to draw them.
+    web, shared = tmp_path / "web", tmp_path / "shared"
+    (web / "images").mkdir(parents=True)
+    shared.mkdir()
+    for module in ("definition.js", "catalogue.js"):
+        (shared / module).write_text("export {};")
+    for name in ("manifest.json", "mark.webp", "mark.png", "mark.jpg", "mark.avif"):
+        (web / "images" / name).write_bytes(b"x")
+    (web / "fonts").mkdir()
+    (web / "fonts" / "jost.woff2").write_bytes(b"wOF2")
+    assets = studio_assets(tmp_path)
+    # Studio's fonts are self-hosted and served as fonts.
+    assert assets["/fonts/jost.woff2"] == (b"wOF2", "font/woff2")
+    assert assets["/images/manifest.json"][1].startswith("application/json")
+    assert {assets[f"/images/mark.{ext}"][1] for ext in ("webp", "png", "jpg", "avif")} == {
+        "image/webp", "image/png", "image/jpeg", "image/avif"}

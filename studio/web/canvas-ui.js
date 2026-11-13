@@ -1,7 +1,7 @@
 // One canvas surface and card anatomy; modes supply data and permitted actions.
 export function uiIcon(name){
   const paths={
-    minus:'M5 12h14',plus:'M5 12h14M12 5v14',
+    minus:'M5 12h14',check:'M5 12.5l4.5 4.5L19 7.5',warning:'M12 4 2.5 20h19zM12 10v4.5M12 17.2h.01',plus:'M5 12h14M12 5v14',
     fit:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8h8v8H8z',
     expand:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5',
     collapse:'M3 8h5V3m8 0v5h5M8 21v-5H3m18 0h-5v5',
@@ -24,8 +24,11 @@ export function uiIcon(name){
   };
   return `<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${paths[name]}"></path></svg>`;
 }
+// The dock and the zoom control float over the bottom of the canvas; a fitted
+// plan sits above them.
+export const CANVAS_DOCK_SPACE=84;
 export function canvasFitZoom(viewWidth,viewHeight,boardWidth,boardHeight){
-  return Math.min(1,Math.max(1,viewWidth-64)/Math.max(1,boardWidth),Math.max(1,viewHeight-112)/Math.max(1,boardHeight));
+  return Math.min(1,Math.max(1,viewWidth-64)/Math.max(1,boardWidth),Math.max(1,viewHeight-CANVAS_DOCK_SPACE-40)/Math.max(1,boardHeight));
 }
 export function canvasStepMarkup({id,index,human,selected,position,escape:e,mode,header='',content='',footer='',stale=false,status='waiting',tested=false,branch=false,connectTarget=false}){
   const run=mode==='run';

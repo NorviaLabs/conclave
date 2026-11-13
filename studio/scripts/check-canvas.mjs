@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
-import {canvasFitZoom, canvasDockMarkup} from '../web/canvas-ui.js';
+import {canvasFitZoom, canvasDockMarkup,CANVAS_DOCK_SPACE} from '../web/canvas-ui.js';
 // A web module loads in node once its absolute browser specifiers point at the
 // file they are served from. Modules that import each other become data: URLs,
 // so each one carries its own rewritten specifiers.
@@ -46,7 +46,7 @@ const flow = {style: {width: '2800px', height: '1200px'}, closest: () => area};
 assert.doesNotMatch(studioSource, /dockOffsets|dockDrag|applyDockOffset/);
 const level = {};
 const app = {querySelector: selector => selector.includes('canvas-flow') ? flow : selector.includes('canvas-view-level') ? level : area};
-const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0,addEventListener(){}}, canvasFitZoom, runCanvasZoom: null};
+const sizing = {$: () => app, window: {innerHeight: 1000, scrollY: 0,addEventListener(){}}, canvasFitZoom, CANVAS_DOCK_SPACE, currentCanvasMetrics: () => ({nodeWidth: 350, padX: 60, padY: 50}), runCanvasZoom: null};
 runInNewContext(`${runPanning}\n${runSizing}\nsizeRunCanvas();`, sizing);
 assert.equal(area.clientHeight, 694, 'the run canvas fills the remaining browser height');
 assert.equal(flow.style.zoom, canvasFitZoom(1800, 694, 2800, 1200), 'the whole run board fits on first render');
@@ -194,7 +194,11 @@ rewired.connections = [{from: 'step_1', to: 'step_3'}];
 // both steps now describe a plan that no longer exists.
 assert.deepEqual([...staleRunSteps(plan, rewired)].sort(), ['step_2', 'step_3'], 'rewiring marks both ends whose input changed');
 // The curve and the handle agree on where the middle of an edge is.
-assert.match(canvasEdgePaths(plan, {step_1: {x: 60, y: 50}, step_2: {x: 60, y: 450}, step_3: {x: 60, y: 850}}, escape, 'step_1|step_2'), /M 410 170 C 585 170, -115 570, 60 570/);
+// A step placed under its source is reached by the gap between them, not by a
+// curve that swings off the board and across the cards.
+const stacked = {step_1: {x: 60, y: 50}, step_2: {x: 60, y: 450}, step_3: {x: 60, y: 850}};
+assert.match(canvasEdgePaths(plan, stacked, escape, 'step_1|step_2'), /M 410 170 Q 434 170 434 194 L 434 396 Q 434 420 410 420 L 60 420 Q 36 420 36 444 L 36 546 Q 36 570 60 570/);
+assert.match(canvasEdgeHandle(plan, stacked, escape, 'step_1|step_2'), /left:235px;top:420px/, 'the handle sits on that lane');
 // A connection the canvas cannot draw must be refused before it is saved: the
 // plan is drawn from its own edges, so a loop would leave nothing to render.
 assert.throws(() => connectPlanSteps(plan, 'step_3', 'step_1'), /That connection creates a loop. Remove it so work can finish./);
@@ -583,6 +587,18 @@ assert.ok(filled.nodeWidth >= 300, 'a step stays readable rather than shrinking 
 const leftGap = Math.min(...filledPositions.map(p => p.x)), rightGap = 1200 - (Math.max(...filledPositions.map(p => p.x)) + filled.nodeWidth);
 assert.ok(Math.abs(leftGap - rightGap) <= filled.gapX + 1, 'the plan is centred, not left in a corner');
 
+// A long chain wraps into rows rather than shrinking to fit one line: eight
+// steps in a row would show at 38% on a laptop canvas; wrapped, far larger.
+const chain = {...structuredClone(plan), workflow: Array.from({length: 8}, (_, i) => ({...plan.workflow[0], id: `chain_${i}`, name: `Step ${i + 1}`})), connections: Array.from({length: 7}, (_, i) => ({from: `chain_${i}`, to: `chain_${i + 1}`}))};
+delete chain.canvas;
+const wrapped = setCanvasMetrics({width: 990, height: 680, ...planShape(chain)});
+assert.ok(wrapped.perRow > 1 && wrapped.perRow < 8, `a long chain wraps into rows (${wrapped.perRow} a row)`);
+const chainPositions = canvasPositions(chain), rowsUsed = new Set(Object.values(chainPositions).map(p => p.y)).size;
+assert.equal(rowsUsed, Math.ceil(8 / wrapped.perRow), 'every row but the last is full');
+assert.ok(chainPositions.chain_1.x > chainPositions.chain_0.x, 'a row still reads left to right');
+assert.equal(setCanvasMetrics({width: 480, height: 420, ...planShape(chain), narrow: true}).perRow, 1, 'a phone reads one column');
+setCanvasMetrics({width: 1200, height: 760, ...planShape(plan)});
+
 // A step's drawn size must be the size the layout, the edges and the drop point
 // are computed from, or every arrow lands off its box.
 assert.match(planMarkup, /--node-width:\d+px;--node-height:\d+px/, 'the board publishes the measured step size');
@@ -612,7 +628,8 @@ for(const mode of ['plan','run']){
 assert.match(canvas,/data-canvas-mode="run"/);
 assert.equal(canvasFitZoom(1000,700,400,220),1);
 assert.equal(canvasFitZoom(1000,700,12000,600),936/12000,'wide saved layouts fit below the manual zoom minimum');
-assert.equal(canvasFitZoom(1000,700,600,10000),588/10000,'tall layouts and delegations fit');
+// A fitted plan stops above the dock and zoom control floating over the canvas.
+assert.equal(canvasFitZoom(1000,700,600,10000),(700-CANVAS_DOCK_SPACE-40)/10000,'tall layouts and delegations fit above the dock');
 for(const mode of ['plan','run']){
   const attribute=mode==='run'?'data-run-zoom':'data-canvas-zoom';
   const frame=canvasMarkup({mode,width:12000,height:10000,metrics:{nodeWidth:350,nodeHeight:220},edges:'',nodes:'',
@@ -681,7 +698,7 @@ zoomCanvasAt(board,300,250,2);globalThis.capped=runCanvasZoom;`, moving);
   const planArea = areaFor('plan'), runArea = areaFor('run');
   const node = {getBoundingClientRect: () => ({left: 4000, right: 4400, top: 3000, bottom: 3200}), closest: () => runArea};
   const app = {querySelector: selector => selector.includes('data-run-node') ? node : selector.includes('"run"') ? runArea : planArea};
-  const fitting = {$: () => app, board, planArea, runArea, CSS: {escape: value => value}, canvasFitZoom, canvasZoom: null, runCanvasZoom: null, rendered: [],
+  const fitting = {$: () => app, board, planArea, runArea, CSS: {escape: value => value}, canvasFitZoom, CANVAS_DOCK_SPACE, currentCanvasMetrics: () => ({nodeWidth: 350, padX: 60, padY: 50}), canvasZoom: null, runCanvasZoom: null, rendered: [],
     applyCanvasZoom() { fitting.rendered.push('plan'); }, applyRunZoom() { fitting.rendered.push('run'); }};
   runInNewContext(`${runPanning}\n${fitSource}\n${centreSource}\n${focusSource}
 fitCanvas('plan');globalThis.plan={...canvasOffsets.plan,zoom:canvasZoom};
@@ -692,7 +709,7 @@ canvasOffsets.run={x:0,y:0};focusRunNode('step_1');globalThis.followed={...canva
   const zoom = canvasFitZoom(1000, 800, 400, 200);
   assert.equal(fitting.plan.zoom, zoom, 'fit uses the board it measured');
   assert.equal(Math.round((fitting.plan.x + 200) * zoom), 500, 'and puts the board in the middle of the view, horizontally');
-  assert.equal(Math.round((fitting.plan.y + 100) * zoom), 400, 'and vertically');
+  assert.equal(Math.round((fitting.plan.y + 100) * zoom), Math.round((800 - CANVAS_DOCK_SPACE) / 2), 'and vertically, in the space above the dock');
   assert.equal(fitting.run.zoom, zoom, 'the run canvas fits the same way');
   assert.deepEqual(fitting.rendered, ['plan', 'run'], 'and each fit redraws its own canvas');
   // A box whose middle is at (200,150) has to end up at the view's middle (500,400).

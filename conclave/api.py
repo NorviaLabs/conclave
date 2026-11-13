@@ -27,6 +27,10 @@ CONTENT_TYPES = {
     ".json": "application/json;charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".avif": "image/avif",
+    ".woff2": "font/woff2",
 }
 
 # The browser loads its modules from absolute paths, so the page and its

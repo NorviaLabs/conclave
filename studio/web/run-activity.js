@@ -11,7 +11,7 @@ export function runActivities(d,run,{agentName,capabilityName}){
       case 'ApplicationStateChanged':{
         const value=event.patch,label=d.state.find(item=>item.key===step?.output)?.label||'output';
         text=`${agent} completed ${step?.name||event.stage}`;
-        detail=Array.isArray(value)?`${value.length} ${label.toLowerCase()}`:typeof value==='string'?`${value.trim().split(/\s+/).filter(Boolean).length} words produced`:'Output recorded';break;
+        detail=Array.isArray(value)?`${value.length} ${label.toLowerCase()}`:typeof value==='string'?(count=>`${count} ${count===1?'word':'words'} produced`)(value.trim().split(/\s+/).filter(Boolean).length):'Output recorded';break;
       }
       case 'Delegation':text=`${agentName(d,event.delegated_by||step?.agent)} delegated work to ${agent}`;detail=event.task||event.reason||'';break;
       case 'ToolCalled':text=`${agent} used ${capabilityName(event.tool)}`;routine=event.ok!==false;important=event.ok===false;if(important)text=`${agent}: ${capabilityName(event.tool)} failed`;break;

@@ -67,6 +67,8 @@ console.log('PASS: typed record fields and removed fixture catalogs.');
 const {manualPlanning,recommendGoal,makeCatalogueDefinition}=await import('../shared/catalogue.js');
 assert.equal(recommendGoal('Investigate an outage').template,'incident-response');
 assert.equal(recommendGoal('Research a brief').template,'research-brief');
+assert.equal(recommendGoal('Implement GitHub issue #42 and open a pull request').template,'software-delivery');
+assert.equal(recommendGoal('Resolve ticket CS-9 with a refund reply').template,'case-resolution');
 assert.equal(recommendGoal('Unmatched words').template,'research-desk');
 const oldRules=structuredClone(manualPlanning);
 manualPlanning.goalRules.unshift({application:'data-analysis',pattern:'custom domain',flags:'i',priority:true,weight:1});

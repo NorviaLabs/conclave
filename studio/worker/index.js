@@ -29,5 +29,5 @@ const aliases={'/catalogue/defaults.json':'/api/config/defaults','/catalogue/bun
  if(!['GET','HEAD'].includes(request.method))return new Response('Method not allowed',{status:405});
  const key=path==='/'?'/index.html':path;
  const asset=ASSETS[key];if(!asset)return new Response('Not found',{status:404});
- return new Response(request.method==='HEAD'?null:asset.body,{headers:{'content-type':asset.type,'cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'same-origin',...(key.endsWith('.py')?{'content-disposition':'attachment; filename="conclave_application.py"'}:{})}});
+ return new Response(request.method==='HEAD'?null:asset.binary?Uint8Array.from(atob(asset.body),c=>c.charCodeAt(0)):asset.body,{headers:{'content-type':asset.type,'cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'same-origin',...(key.endsWith('.py')?{'content-disposition':'attachment; filename="conclave_application.py"'}:{})}});
 }};

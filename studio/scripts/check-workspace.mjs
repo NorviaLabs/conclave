@@ -115,7 +115,7 @@ assert.match(source,/if\(button\.hasAttribute\('data-plan-search-next'\)\)\{step
 assert.match(inspector,/data-plan-search value="\$\{e\(ctx\.search\|\|''\)\}"/);
 assert.match(inspector,/placeholder="Find a step" title="Find a step by name, member or output"/);
 assert.match(inspector,/data-plan-search-count/);
-assert.match(css,/\.graph-canvas \.plan-node\.match\{border-color:var\(--mint\)/);
+assert.match(css,/\.graph-canvas \.plan-node\.match\{border-color:var\(--action\)/);
 
 const groupSource=inspector.slice(inspector.indexOf('export function canvasGroupBoxes('),inspector.indexOf('// What a connection means'));
 const groupFn=new Function('canvasNodeWidth','canvasNodeHeight','return '+groupSource.slice(groupSource.indexOf('export ')+7).trim().replace(/\}$/,'}'))(350,220);

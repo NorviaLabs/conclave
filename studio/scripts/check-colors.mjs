@@ -17,9 +17,9 @@ function check(foreground,background,minimum=4.5){
 for(const foreground of ['--text','--muted','--dim']){
  for(const background of ['--bg','--panel','--rail','--panel2'])check(foreground,background);
 }
-for(const action of ['--mint','--action-hover'])check('--on-action',action);
-for(const [text,surface] of [['--success','--success-surface'],['--info','--info-surface'],['--idle','--idle-surface'],['--mint','--working-surface'],['--amber','--warning-surface'],['--red','--error-surface']])check(text,surface);
-for(const foreground of ['--mint','--action-hover']){
+for(const action of ['--action','--action-hover'])check('--on-action',action);
+for(const [text,surface] of [['--success','--success-surface'],['--info','--info-surface'],['--idle','--idle-surface'],['--action','--working-surface'],['--amber','--warning-surface'],['--red','--error-surface']])check(text,surface);
+for(const foreground of ['--action','--action-hover']){
  for(const background of ['--bg','--panel','--rail'])check(foreground,background,3);
 }
 assert.match(css,/\.prose\{[^}]*color:var\(--text\)/);
