@@ -142,7 +142,7 @@ def test_execute_test_records_a_failure_without_exposing_provider_text(tmp_path)
     fixture = store.save('app-1', 'owner-a', 'fixture', fixture_preview(source_record(), 'draft'))
 
     async def explode(messages):
-        raise RuntimeError('secret credential sk-abcdefghijklmnop')
+        raise RuntimeError('secret credential sk-provider-text-must-not-leak')
 
     class Broken:
         async def complete(self, messages):
@@ -152,7 +152,7 @@ def test_execute_test_records_a_failure_without_exposing_provider_text(tmp_path)
     asyncio.run(execute_test(store, 'app-1', 'owner-a', record, fixture, Broken(), ToolRegistry(20000)))
     assert record['status'] == 'failed'
     # The provider's own words never reach the record, and no credential shape does either.
-    assert 'sk-abcdefghijklmnop' not in json.dumps(record['events'])
+    assert 'sk-provider-text-must-not-leak' not in json.dumps(record['events'])
     assert record['events'][-1]['event']['type'] == 'TestFinished'
 
 
