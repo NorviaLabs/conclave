@@ -4,6 +4,7 @@ import importlib.util
 from urllib.parse import urlsplit
 
 from .services import CATEGORIES, Integration, Operation
+from .pagination import paged
 from .connections import redact, validate_arguments
 from .transport import IntegrationError, Transport, endpoint
 
@@ -51,7 +52,7 @@ class HostAdapters:
                 client = S3(bucket=config['bucket'], prefix=config['prefix'], region=config.get('region'), role_arn=config.get('role_arn'))
                 for operation, required in [('list_objects',[]),('metadata',['key']),('read_object',['key'])]:
                     fields = {'key':{'type':'string'}} if required else {'continuation_token':{'type':'string'}}
-                    operations.append(Operation(operation, operation.replace('_',' '), 'GET','', 'read', {'properties':fields,'required':required}))
+                    operations.append(paged('s3', Operation(operation, operation.replace('_',' '), 'GET','', 'read', {'properties':fields,'required':required})))
             if not operations:
                 raise IntegrationError('Host adapter must approve at least one operation')
             import re

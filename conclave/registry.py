@@ -9,6 +9,7 @@ The output cap is required: how much text a tool may put into a prompt is a
 decision about the system, not something a library should pick.
 """
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -27,6 +28,20 @@ from .spec import (
 
 
 TRUNCATION_MARKER = "\n...[truncated]"
+
+# The output limit of the tool call now running, so a tool that shapes its own
+# result (a read following pages) fits it to the limit it will be held to.
+_CALL_OUTPUT_LIMIT: ContextVar[int | None] = ContextVar(
+    "conclave_tool_output_limit",
+    default=None,
+)
+
+
+def current_output_limit() -> int | None:
+    """The limit the tool call now running is held to; None outside a call
+    or when the call is unlimited."""
+
+    return _CALL_OUTPUT_LIMIT.get()
 
 
 @dataclass(frozen=True)
@@ -144,30 +159,61 @@ class ToolRegistry:
                 f"Unknown tool: {name}"
             )
 
-        if self.executor is None:
-            result = await self.tools[
-                name
-            ].func(**arguments)
+        limit = self.output_limit(
+            self.tools[name],
+            arguments,
+        )
 
-        else:
-            result = await self.executor.execute(
-                ToolInvocation(
-                    name=name,
-                    arguments=arguments,
-                    run_id=run_id,
-                    agent=agent,
+        token = _CALL_OUTPUT_LIMIT.set(limit)
+
+        try:
+            if self.executor is None:
+                result = await self.tools[
+                    name
+                ].func(**arguments)
+
+            else:
+                result = await self.executor.execute(
+                    ToolInvocation(
+                        name=name,
+                        arguments=arguments,
+                        run_id=run_id,
+                        agent=agent,
+                    )
                 )
-            )
+
+        finally:
+            _CALL_OUTPUT_LIMIT.reset(token)
 
         if (
-            self.max_output_chars is not None
-            and len(result) > self.max_output_chars
+            limit is not None
+            and len(result) > limit
         ):
             result = (
                 result[
-                    :self.max_output_chars
+                    :limit
                 ]
-                + "\n...[truncated]"
+                + TRUNCATION_MARKER
             )
 
         return result
+
+    def output_limit(
+        self,
+        tool: Tool,
+        arguments: dict[str, Any],
+    ) -> int | None:
+        """The cap for one call: the tool's own, when it names one, else the
+        registry's. The tool is told the registry's cap so it can scale from
+        a limit a person chose rather than ignore it."""
+
+        if tool.output_limit is not None:
+            own = tool.output_limit(
+                arguments,
+                self.max_output_chars,
+            )
+
+            if own is not None:
+                return own
+
+        return self.max_output_chars

@@ -123,13 +123,13 @@ assert.match(source, /function resetRuns\(\)\{workspaceMode='build';stepExamples
 
 // One way to do one thing: a control per action, a handler per action, and no
 // second name for something that already has one.
-const web = await Promise.all(['studio.js', 'live.js', 'workbench-ui.js', 'integrations-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js', 'menu-ui.js']
+const web = await Promise.all(['studio.js', 'live.js', 'workbench-ui.js', 'integrations-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js', 'menu-ui.js', 'approval-ui.js']
   .map(name => readFile(new URL(`../web/${name}`, import.meta.url), 'utf8')));
 const all = web.join('\n');
 // An icon-only control has no visible label, so it must carry both a hovertext
 // and an accessible name: a mouse user and a screen reader each need one.
 const iconOnly = [], unnamed = [];
-for (const [index, name] of ['studio.js', 'live.js', 'workbench-ui.js', 'integrations-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js'].entries()) {
+for (const [index, name] of ['studio.js', 'live.js', 'workbench-ui.js', 'integrations-ui.js', 'run-canvas.js', 'run-activity.js', 'canvas-ui.js', 'advanced.js', 'plan.js', 'catalogue-ui.js', 'menu-ui.js', 'approval-ui.js'].entries()) {
   for (const match of web[index].matchAll(/<button([^>]*?)>((?:[^<]|<span[^>]*>)*?)<\/button>/g)) {
     const [, attrs, body] = match;
     const iconOnlyBody = (body.includes('uiIcon(') || ['×', '⨯'].includes(body.trim())) && !/>[^<]*[A-Za-z]{2}/.test(body);

@@ -263,6 +263,8 @@ node scripts/check-studio-source.mjs  # the page markup and the controls that sw
 node scripts/check-step-tests.mjs  # pinned fixtures, isolated tests and comparison
 node scripts/check-config.mjs      # host configuration and catalogues
 node scripts/check-api-proxy.mjs   # the same-origin proxy and its token
+node scripts/check-pagination.mjs  # reads that followed pages: activity, step card, connection tag
+node scripts/check-notion-publish.mjs  # Notion publish: approval preview, outcome card, allowed pages
 ```
 
 `scripts/check-canvas-browser.mjs` is an optional real-browser check for the two
@@ -271,6 +273,14 @@ through request interception, so it needs no Conclave server and no provider:
 
 ```sh
 STUDIO_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node scripts/check-canvas-browser.mjs
+```
+
+`scripts/check-approval-browser.mjs` is the same kind of optional check for a
+pending approval's preview: filled once, and left alone by the renders polling
+causes.
+
+```sh
+STUDIO_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node scripts/check-approval-browser.mjs
 ```
 
 See [Conclave REST API](../REST_API.md) for the complete

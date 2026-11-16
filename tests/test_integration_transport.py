@@ -130,3 +130,51 @@ def test_transport_refuses_bad_requests_and_closes_on_failure(monkeypatch):
     Connection.getresponse = lambda self: Body()
     assert asyncio.run(module.Transport({'example.com'}).request('GET', 'https://example.com')) == {}
     Connection.getresponse = lambda self: Response()
+
+
+def test_s3_a_cancelled_request_is_aborted_not_left_running(monkeypatch):
+    """A request abandoned by its caller (a paginated read at its 60-second
+    limit) must stop: its connection is shut, so the blocked worker thread
+    ends at once instead of reaching the provider for another 20 seconds."""
+    import threading
+    import time
+    from conclave.integrations import transport as module
+
+    released, ended = threading.Event(), []
+
+    class Hanging(Connection):
+        def __init__(self, host, address, timeout):
+            super().__init__(host, address, timeout)
+            self.sock = self
+
+        def getresponse(self):
+            released.wait(5)
+            ended.append(time.monotonic())
+            raise OSError('connection closed')
+
+        def shutdown(self, how):
+            released.set()
+
+        def close(self):
+            self.closed = True
+            released.set()
+
+    monkeypatch.setattr(module, 'public_addresses', lambda host: ['93.184.216.34'])
+    monkeypatch.setattr(module, 'PinnedHTTPS', Hanging)
+    transport = Transport({'example.com'})
+
+    async def exercise():
+        started = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(transport.request('GET', 'https://example.com/slow'), 0.2)
+            for _ in range(100):
+                if ended:
+                    break
+                await asyncio.sleep(0.01)
+            return started
+        finally:
+            released.set()
+
+    started = asyncio.run(exercise())
+    assert ended and ended[0] - started < 1.0, 'the abandoned request ended with its caller'

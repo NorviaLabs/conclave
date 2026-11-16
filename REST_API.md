@@ -579,7 +579,8 @@ provider revocation is separate from ordinary local disconnect.
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/hooks/{connection_id}` | A signed inbound delivery starts one authorized run |
-| GET | `/api/runs/{id}/tool-approvals` | Pending external actions for this run |
+| GET | `/api/runs/{id}/tool-approvals` | Pending external actions for this run; a preview is summarised (`detail: true`) |
+| GET | `/api/runs/{id}/tool-approvals/{approval_id}` | One pending action in full: its arguments and whole preview; owner-bound |
 | POST | `/api/runs/{id}/tool-approvals` | `{approval_id,approved}`; one-shot, owner-bound |
 
 `/api/hooks/` is exempt from `CONCLAVE_API_TOKEN` only when `CONCLAVE_HOOKS=1`

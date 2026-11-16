@@ -79,7 +79,7 @@ const labels = spec => [...spec.items.filter(item => !item.separator).map(item =
 const actions = spec => [...spec.items.filter(item => !item.separator).map(item => `${Object.keys(item.attrs)[0]}=${Object.values(item.attrs)[0]}`)];
 
 const node = menuContext.specs.planNodeMenu('draft', 'Draft the brief');
-assert.deepEqual(labels(node), ['Edit step', 'Advanced limits', 'Add step after', 'Add parallel branch', 'Move earlier', 'Move later', 'Duplicate step',
+assert.deepEqual(labels(node), ['Edit step', 'Test this step', 'Advanced limits', 'Add step after', 'Add parallel branch', 'Move earlier', 'Move later', 'Duplicate step',
   'New member for this step', 'Edit the shared member', 'Make a copy for this step', 'Edit output structure in setup',
   'Connect to another step', 'Remove what this step depends on', 'Centre in view', 'Remove step'], 'the step menu holds the step commands');
 assert.equal(node.items.find(item => item.label === 'Move earlier').disabled, true, 'a first step cannot move earlier');

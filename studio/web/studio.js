@@ -1,4 +1,5 @@
-import {integrationManagerMarkup,connectionAssignmentMarkup} from '/integrations-ui.js';
+import {integrationManagerMarkup,connectionAssignmentMarkup,pagesConfig} from '/integrations-ui.js';
+import {toolApprovalMarkup,fillApprovalPreviews} from '/approval-ui.js';
 import {updateRunDOM} from '/run-dom.js';
 import {currentCanvasMetrics,templates,toolCatalog,emptyDefinition,validateDefinition,initialState,emptyWorkspaceCatalogue,validateWorkspaceCatalogue,installWorkspaceCatalogue,validateRecordFields,validateRecordValues} from '/definition.js';
 import {advancedMarkup,contractMarkup} from '/advanced.js';
@@ -25,6 +26,10 @@ const requestInputs={live:{}};
 const requestResources={};
 let workspaceCatalogue={catalogue:emptyWorkspaceCatalogue(),revision:0};
 let pendingToolApprovals=[];
+// Which view each pending approval shows: its preview, its Markdown or the raw request.
+const approvalViews={};
+// Each pending approval's full preview, fetched once; and the fetches in flight.
+const approvalDetails={},approvalFetches=new Set();
 let integrationCatalogue=[],integrationConnections=[],integrationEnabled=false,oauthProviders=[];
 let runtime={local:false,available:false,tools:[],backends:[]},liveBusy=false,liveError='',liveTimer=null,liveWatch=null,liveClock=null;
 const liveRuns=new Map(),liveHistory=new Map();
@@ -226,6 +231,7 @@ function render(){
     ${view==='plan'?workspaceModesMarkup():''}<div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():workspaceMode==='results'?resultsWorkspaceMarkup():viewingRun?runMarkup():workspaceMode==='run'?`<section class="panel"><h2>Run the saved application</h2><p>${dirty()?'You have unsaved changes. A run uses the last saved version, so save first if you want them included. ':''}A run uses real inputs and the access you granted; tests use sample inputs.</p><button class="button primary" data-action="run">Set up a run</button></section>`:planMarkup(draft())}</div></main></div><div id="app-menu" class="canvas-menu-host" hidden></div>`;
   const stableRun=view==='plan'&&workspaceMode!=='results'&&(viewingRun?renderedRunId===preview.runId&&$('app').querySelector('[data-run-canvas]'):renderedPlanId===currentId&&$('app').querySelector('[data-canvas-drop]'));
   if(stableRun)updateRunDOM($('app'),markup);else $('app').innerHTML=markup;
+  fillApprovalPreviews($('app'),pendingToolApprovals,{escape,details:approvalDetails,views:approvalViews});
   renderedPlanId=!viewingRun&&view==='plan'?currentId:null;
   renderedRunId=viewingRun&&view==='plan'?preview.runId:null;
   for(const disclosure of disclosures){const element=$('app').querySelector(`[data-disclosure="${CSS.escape(disclosure.key)}"]`);if(element)element.open=disclosure.open;}
@@ -663,7 +669,13 @@ function selectLiveRecord(record){
   if(old?.runId!==run.runId){selectedRunStepId=null;activityExpanded=false;activityFilter='';followActive=true;lastFollowedStep=null;runCanvasZoom=renderedPlanId===currentId?canvasZoom:null;}
   if(preview?.runId!==run.runId)workspaceMode='run';
   preview=run;liveError='';
-  if(run.mode==='running'){request(`/api/runs/${run.runId}/tool-approvals`).then(result=>{if(preview?.runId!==run.runId)return;const changed=JSON.stringify(pendingToolApprovals)!==JSON.stringify(result.approvals);pendingToolApprovals=result.approvals;if(changed)render();}).catch(()=>{});}else pendingToolApprovals=[];
+  if(run.mode==='running'){request(`/api/runs/${run.runId}/tool-approvals`).then(result=>{if(preview?.runId!==run.runId)return;
+    // IDs, not the whole payload: a pending preview's summary never changes.
+    const changed=pendingToolApprovals.map(item=>item.id).join()!==result.approvals.map(item=>item.id).join();pendingToolApprovals=result.approvals;
+    for(const id of Object.keys(approvalDetails))if(!pendingToolApprovals.some(item=>item.id===id))delete approvalDetails[id];
+    // A preview's blocks and report come once, from the approval's own address.
+    for(const item of pendingToolApprovals)if(item.detail&&!approvalDetails[item.id]&&!approvalFetches.has(item.id)){approvalFetches.add(item.id);request(`/api/runs/${run.runId}/tool-approvals/${encodeURIComponent(item.id)}`).then(detail=>{approvalDetails[item.id]=detail;render();}).catch(()=>{}).finally(()=>approvalFetches.delete(item.id));}
+    if(changed)render();}).catch(()=>{});}else pendingToolApprovals=[];
   const url=new URL(location.href);url.searchParams.set('application',currentId);url.searchParams.set('run',run.runId);history.replaceState(null,'',url);
   render();followLiveRun();
 }
@@ -744,7 +756,7 @@ function studioLiveMarkup(requestOnly=false){
   const requestForm=`<div class="field"><label for="live-request">What do you need the team to do?</label><textarea id="live-request" data-request="live" rows="2" maxlength="20000" required>${escape(requests.live)}</textarea></div>${(saved.inputs||[]).length?`<details class="quiet-details" data-disclosure="live-context" open><summary>Context and sources · ${(saved.inputs||[]).length} ${(saved.inputs||[]).length===1?'field':'fields'}</summary>${generatedRequestMarkup(saved,'live')}</details>`:''}`;
   const visible=d.views.filter(view=>Array.isArray(state[view.collection])?state[view.collection].length:!!state[view.collection]);
   const outputs=visible.length?`<details class="run-results" data-disclosure="live-results"><summary>Results · ${visible.length}</summary>${visible.map(view=>`<details class="quiet-details" data-disclosure="live-output-${escape(view.id)}"><summary>${escape(view.title)}</summary>${viewMarkup(view,state,d)}</details>`).join('')}</details>`:'<div class="empty">Results will appear as the team completes its work.</div>';
-const approvalPanel=pendingToolApprovals.length?`<section class="tool-approval-panel" role="region" aria-label="External action approval"><h3>Review external action</h3><p>Approval applies to this call only. Check the destination and content before proceeding.</p>${pendingToolApprovals.map(item=>`<article><strong>${escape(item.agent)} · ${escape(item.tool)}</strong><pre class="code">${escape(JSON.stringify(item.arguments,null,2))}</pre><button class="button primary" data-tool-approval="${escape(item.id)}" data-approved="true">Approve this action</button><button class="button remove" data-tool-approval="${escape(item.id)}" data-approved="false">Reject</button></article>`).join('')}</section>`:'';
+const approvalPanel=toolApprovalMarkup(pendingToolApprovals,{escape,views:approvalViews});
   const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{controls:runControllerMarkup(),toolsDisabled:runInFlight(),provider:runtime.provider||'',list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,activityExpanded,activityFilter,followActive,detail:selectedRunStepId?executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'',escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
   return `${dirty()&&requestOnly?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${approvalPanel}${liveRunMarkup(saved,preview?.live?preview:null,{escape,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime:readinessRuntime(),busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion()})}`;
 }
@@ -1541,6 +1553,11 @@ $('app').addEventListener('change',event=>{
   if(!connectionTools().includes(name)){notify('This connection is not available to this application.');return;}
   member.tools=event.target.checked?[...new Set([...member.tools,name])]:member.tools.filter(tool=>tool!==name);markDirty();render();
 });
+// Another allowed page for a Notion connection: a blank row like the first.
+$('record-detail').addEventListener('click',event=>{
+  const button=event.target.closest('[data-action]');if(button?.dataset.action!=='add-notion-page')return;
+  if(button.dataset.action==='add-notion-page'){const row=button.closest('[data-notion-pages]').querySelector('.notion-page-row').cloneNode(true);for(const input of row.querySelectorAll('input'))input.value='';button.before(row);row.querySelector('input').focus();}
+});
 $('record-detail').addEventListener('input',event=>{
   if(!event.target.hasAttribute('data-integration-search'))return;
   for(const card of $('record-detail').querySelectorAll('[data-integration-card]'))card.hidden=!card.dataset.integrationCard.includes(event.target.value.toLowerCase());
@@ -1551,6 +1568,7 @@ $('record-detail').addEventListener('submit',async event=>{
   const credentials={};if(values.get('token'))credentials[service.auth==='api_key'?'api_key':service.auth==='google_oauth'?'access_token':'token']=values.get('token');
   if(values.get('email'))credentials.email=values.get('email');if(values.get('api_key'))credentials.api_key=values.get('api_key');
   const config={};if(service.integration)config.instance=service.id;if(values.get('base_url'))config.base_url=values.get('base_url');
+  if(service.id==='notion'){const pages=pagesConfig(values.getAll('page_name'),values.getAll('page_id'));if(pages.length)config.pages=pages;}
   const body={id:values.get('id'),name:values.get('name'),integration:service.integration||service.id,applications:[currentId],operations,scopes:[...new Set(service.operations.filter(op=>operations.includes(op.name)).flatMap(op=>op.scopes))],config,credentials};
   if(event.submitter?.dataset.oauthProvider){
     delete body.credentials;delete body.config;
@@ -1581,6 +1599,7 @@ $('record-detail').addEventListener('submit',async event=>{
 });
 
 $('app').addEventListener('click',async event=>{
+  const view=event.target.closest('[data-approval-view]');if(view){approvalViews[view.dataset.approvalId]=view.dataset.approvalView;render();return;}
   const button=event.target.closest('[data-tool-approval]');if(!button||!preview?.runId)return;
   button.disabled=true;
   try{await request(`/api/runs/${preview.runId}/tool-approvals`,{method:'POST',body:JSON.stringify({approval_id:button.dataset.toolApproval,approved:button.dataset.approved==='true'})});pendingToolApprovals=pendingToolApprovals.filter(item=>item.id!==button.dataset.toolApproval);render();}

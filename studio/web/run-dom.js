@@ -2,7 +2,7 @@
 // belong to the user, not to each incoming execution record.
 export function updateRunDOM(root,markup){
   const template=document.createElement('template');template.innerHTML=markup;
-  const key=node=>node.nodeType===1?(node.id||['runNode','runStep','planNode','planSelect','canvasPort','canvasEdge','path','disclosure','activityId','action','humanField','humanInput'].map(name=>node.dataset[name]?`${name}:${node.dataset[name]}`:'').find(Boolean)||''):'';
+  const key=node=>node.nodeType===1?(node.id||['runNode','runStep','planNode','planSelect','canvasPort','canvasEdge','path','disclosure','activityId','action','humanField','humanInput','renderKey'].map(name=>node.dataset[name]?`${name}:${node.dataset[name]}`:'').find(Boolean)||''):'';
   function sync(parent,next){
     const keyed=new Map([...parent.childNodes].filter(key).map(node=>[key(node),node]));
     let cursor=parent.firstChild;
@@ -12,7 +12,9 @@ export function updateRunDOM(root,markup){
       else{
         if(node!==cursor)parent.insertBefore(node,cursor);
         if(node.nodeType===3){if(node.data!==fresh.data)node.data=fresh.data;}
-        else if(node.nodeType===1){
+        // A keyed element whose key is unchanged holds content filled outside
+        // this markup (a large preview): it is left exactly as it is.
+        else if(node.nodeType===1&&!(node.dataset.renderKey&&node.dataset.renderKey===fresh.dataset.renderKey)){
           for(const attribute of [...node.attributes])if(!fresh.hasAttribute(attribute.name)&&!(node.tagName==='DETAILS'&&attribute.name==='open'))node.removeAttribute(attribute.name);
           for(const attribute of [...fresh.attributes])if(!(node.tagName==='DETAILS'&&attribute.name==='open')&&node.getAttribute(attribute.name)!==attribute.value)node.setAttribute(attribute.name,attribute.value);
           if(node!==document.activeElement||!['INPUT','TEXTAREA','SELECT'].includes(node.tagName))sync(node,fresh);

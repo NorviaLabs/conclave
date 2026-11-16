@@ -27,11 +27,30 @@ class ToolApprovals:
                 self.pending.pop(identifier, None)
         return approve
 
+    @staticmethod
+    def _entry(identifier, item, *, whole):
+        request = item['request']
+        preview = getattr(request, 'preview', None)
+        entry = {'id':identifier,'agent':request.agent,'tool':request.tool,'arguments':request.arguments,
+                 'preview':preview,'capabilities':sorted(str(cap) for cap in request.capabilities)}
+        if not whole and isinstance(preview, dict) and 'blocks' in preview:
+            # Polled every second or so: the summary only. The blocks and the
+            # report, which can be half a megabyte, come once from `get`.
+            entry['preview'] = {key: value for key, value in preview.items() if key != 'blocks'}
+            entry['arguments'] = {key: value for key, value in request.arguments.items() if key != 'markdown'}
+            entry['detail'] = True
+        return entry
+
     def list(self, run_id, owner):
-        return [{'id':identifier,'agent':item['request'].agent,'tool':item['request'].tool,
-                 'arguments':item['request'].arguments,
-                 'capabilities':sorted(str(cap) for cap in item['request'].capabilities)}
+        return [self._entry(identifier, item, whole=False)
                 for identifier,item in self.pending.items() if item['run_id']==run_id and item['owner']==owner]
+
+    def get(self, run_id, identifier, owner):
+        """One pending approval in full, for the person it is waiting on."""
+        item = self.pending.get(identifier)
+        if not item or item['run_id'] != run_id or item['owner'] != owner or item['future'].done():
+            raise ValueError('Approval is missing, expired, already decided or belongs to another user')
+        return self._entry(identifier, item, whole=True)
 
     def decide(self, run_id, identifier, owner, approved):
         item = self.pending.get(identifier)

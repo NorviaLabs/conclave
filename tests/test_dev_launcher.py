@@ -70,6 +70,30 @@ def test_launcher_stops_child_without_own_process_group(force):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Uses POSIX process groups")
+def group_running(pgid):
+    """Whether anything in a process group is still running.
+
+    A killed process whose parent never reaps it (PID 1 in some containers)
+    stays listed as a zombie until it is reaped; it holds no port, so it does
+    not count. Without /proc the signal check alone decides, as before.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return True
+    for stat in proc.glob("[0-9]*/stat"):
+        try:
+            state, _, group = stat.read_text().rsplit(")", 1)[1].split()[:3]
+        except (OSError, ValueError, IndexError):
+            continue
+        if int(group) == pgid and state != "Z":
+            return True
+    return False
+
+
 def test_launcher_leaves_nothing_that_can_hold_the_port(tmp_path):
     """A service that ignores SIGTERM, and the process it started, must both go."""
     marker = tmp_path / "started"
@@ -89,8 +113,11 @@ def test_launcher_leaves_nothing_that_can_hold_the_port(tmp_path):
         assert marker.exists()
         stop_children([child], grace=0.5)
         assert child.poll() is not None
-        with pytest.raises(ProcessLookupError):
-            os.killpg(child.pid, 0)
+        # The kill is delivered asynchronously, so allow it a moment to land.
+        deadline = time.monotonic() + 1
+        while group_running(child.pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not group_running(child.pid)
     finally:
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)

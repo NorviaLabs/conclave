@@ -1,9 +1,11 @@
 """Service API contracts: fixed routes and explicit operation authority."""
 from dataclasses import dataclass, replace
+import asyncio
 import base64
 import re
 from urllib.parse import quote, urlsplit
 from .transport import IntegrationError, endpoint, public_addresses
+from .notion_blocks import MAX_CHARS as NOTION_MAX_CHARS
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,18 @@ def integrations():
         Integration('notion','Notion','https://api.notion.com','bearer',(
             Operation('search','Search accessible pages and databases','POST','/v1/search','read',op('x','GET','',['query','start_cursor']).parameters),
             op('read_page','GET','/v1/pages/{page_id}',['page_id'],required=['page_id']),
-            op('read_content','GET','/v1/blocks/{block_id}/children',['block_id','start_cursor'],required=['block_id']),)),
+            op('read_content','GET','/v1/blocks/{block_id}/children',['block_id','start_cursor'],required=['block_id']),
+            # Publishing a report: both are external changes, so each call waits
+            # for a person's approval like every other write.
+            Operation('create_page','Create report page','POST','/v1/pages','write',
+                      {'type':'object','properties':{'parent_page_id':{'type':'string','maxLength':300},
+                                                     'title':{'type':'string','maxLength':2000},
+                                                     'markdown':{'type':'string','maxLength':NOTION_MAX_CHARS}},
+                       'required':['parent_page_id','title','markdown'],'additionalProperties':False}),
+            Operation('append_content','Append to page','PATCH','/v1/blocks/{target_page_id}/children','write',
+                      {'type':'object','properties':{'target_page_id':{'type':'string','maxLength':300},
+                                                     'markdown':{'type':'string','maxLength':NOTION_MAX_CHARS}},
+                       'required':['target_page_id','markdown'],'additionalProperties':False}),)),
         Integration('zendesk','Zendesk','','zendesk',(
             op('search_tickets','GET','/api/v2/search.json',['query'],required=['query']),
             op('read_ticket','GET','/api/v2/tickets/{ticket_id}.json',['ticket_id'],required=['ticket_id']),
@@ -145,7 +158,92 @@ def integrations():
     ]
     for identifier, name in [('mcp','MCP'),('http_openapi','HTTP / OpenAPI'),('postgres','PostgreSQL'),('mysql','MySQL'),('s3','Amazon S3')]:
         items.append(Integration(identifier,name,'','host_adapter',()))
-    return {item.id: replace(item, category=CATEGORIES.get(item.id, item.category)) for item in items}
+    # Reads that can follow pages gain their optional paging arguments here, in
+    # the one place every native operation passes through.
+    from .pagination import paged
+    return {item.id: replace(item, category=CATEGORIES.get(item.id, item.category),
+                             operations=tuple(paged(item.id, operation) for operation in item.operations))
+            for item in items}
+
+
+NOTION_VERSION = '2022-06-28'
+NOTION_WRITES = ('create_page', 'append_content')
+# The conversion is linear, so this is a safety net: it never runs on the event
+# loop, and a report it cannot convert in this time is refused, not retried.
+CONVERT_SECONDS = 10
+# Notion's API allows about three requests a second on average: a long report's
+# requests are spaced so a publish does not end half-written on a rate limit.
+NOTION_REQUEST_GAP = 0.35
+
+
+async def converted(name, arguments):
+    """The destination and converted report, worked out in a worker thread."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(notion_conversion, name, arguments), CONVERT_SECONDS)
+    except TimeoutError:
+        raise IntegrationError('The report took too long to convert') from None
+
+
+def notion_conversion(name, arguments):
+    """The destination and the converted report of one Notion write; refused
+    here, before anything is sent, when it cannot succeed."""
+    from .notion_blocks import convert, normalize_page_id
+    if name == 'create_page':
+        page = normalize_page_id(arguments.get('parent_page_id'))
+        title = arguments.get('title')
+        if not isinstance(title, str) or not title.strip():
+            raise IntegrationError('Give the new page a title')
+        conversion = convert(arguments.get('markdown'), title=title.strip())
+    else:
+        page = normalize_page_id(arguments.get('target_page_id'))
+        conversion = convert(arguments.get('markdown'))
+        if not conversion.chunks:
+            raise IntegrationError('Nothing to append: the report has no content')
+    return page, conversion
+
+
+async def publish_to_notion(name, arguments, base, headers, transport):
+    """Create a page or append to one, in as many requests as Notion needs.
+
+    A write is never retried. A failure on the first request fails the call; a
+    later one returns what was written and where the agent can resume, so a
+    follow-up append (which needs a new approval) does not repeat it."""
+    from .notion_blocks import count_blocks, normalize_page_id
+    page, conversion = await converted(name, arguments)
+    chunks, written, requests = conversion.chunks, 0, 0
+    if name == 'create_page':
+        title = arguments['title'].strip()
+        requests = 1
+        created = await transport.request('POST', base + '/v1/pages', headers=headers, body={
+            'parent': {'page_id': page},
+            'properties': {'title': {'title': [{'type': 'text', 'text': {'content': title[:2000]}}]}},
+            'children': chunks[0].blocks if chunks else []})
+        try:
+            page_id = normalize_page_id(created.get('id') if isinstance(created, dict) else None)
+        except IntegrationError:
+            raise IntegrationError('Notion returned an unexpected page') from None
+        url = created.get('url') if isinstance(created.get('url'), str) else 'https://www.notion.so/' + page_id.replace('-', '')
+        written, remaining, status = (count_blocks(chunks[0].blocks) if chunks else 0), chunks[1:], 'created'
+    else:
+        page_id, url, remaining, status = page, 'https://www.notion.so/' + page.replace('-', ''), chunks, 'appended'
+    for chunk in remaining:
+        if requests:
+            await asyncio.sleep(NOTION_REQUEST_GAP)
+        requests += 1
+        try:
+            await transport.request('PATCH', f'{base}/v1/blocks/{page_id}/children', headers=headers,
+                                    body={'children': chunk.blocks})
+        except IntegrationError as error:
+            if requests == 1:
+                raise
+            return {'status': 'partial', 'page_id': page_id, 'url': url, 'blocks_written': written,
+                    'total_blocks': conversion.total, 'requests': requests, 'notes': conversion.notes,
+                    'error': str(error), 'unwritten_from_line': chunk.start_line,
+                    'next': (f'To finish, call append_content with target_page_id {page_id} and the report from '
+                             f'line {chunk.start_line} on; it needs a new approval.')}
+        written += count_blocks(chunk.blocks)
+    return {'status': status, 'page_id': page_id, 'url': url, 'blocks_written': written,
+            'total_blocks': conversion.total, 'requests': requests, 'notes': conversion.notes}
 
 
 async def invoke(service, operation, config, secrets, arguments, transport):
@@ -169,6 +267,9 @@ async def invoke(service, operation, config, secrets, arguments, transport):
         headers['Authorization'] = 'Basic ' + base64.b64encode(f'{email}:{token}'.encode()).decode()
     elif service.auth == 'trello':
         if not secrets.get('api_key') or not secrets.get('token'): raise IntegrationError('Configure Trello key and token')
+    if service.id == 'notion' and operation.name in NOTION_WRITES:
+        headers['Notion-Version'] = NOTION_VERSION
+        return await publish_to_notion(operation.name, args, base, headers, transport)
     path = operation.path
     for key in re.findall(r'\{(\w+)\}', path):
         value = args.pop(key)
@@ -199,7 +300,7 @@ async def invoke(service, operation, config, secrets, arguments, transport):
         elif operation.name == 'create_draft': body = {'message':{'raw':args['raw']}}
     if service.id == 'google_sheets' and operation.name == 'update_range':
         params={'valueInputOption':'RAW'};body={'values':args['values']}
-    if service.id == 'notion': headers['Notion-Version']='2022-06-28'
+    if service.id == 'notion': headers['Notion-Version']=NOTION_VERSION
     if service.id == 'confluence' and operation.name == 'read_page':params={'expand':'body.storage,version'}
     if service.id == 'slack':params={**params,'limit':100} if operation.name=='read_conversation' else params
     if service.id == 'hubspot' and operation.name.startswith('search_'):body={'query':args['query'],'limit':100}

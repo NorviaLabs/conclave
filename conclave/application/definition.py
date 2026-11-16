@@ -529,13 +529,109 @@ def public_runtime_event(event: Any) -> dict[str, Any] | None:
     if event_type in {"NoteRecorded", "AgentStep"}:
         return None
     visible = {"type": event_type}
-    for field in ("run_id", "parent_run_id", "agent", "depth", "status", "tool", "ok", "truncated", "output_chars", "dimension", "limit", "used", "delegated_by", "reason"):
+    for field in ("run_id", "parent_run_id", "agent", "depth", "status", "tool", "ok", "truncated", "output_chars", "dimension", "limit", "used", "delegated_by", "reason", "detail"):
         if hasattr(event, field):
             visible[field] = getattr(event, field)
     if hasattr(event, "capabilities"):
         visible["capabilities"] = sorted(str(capability) for capability in event.capabilities)
     return visible
 
+
+
+PAGING_PREFIX = '{"pagination": '
+PAGING_REASONS = {"exhausted", "max_items", "max_pages", "output_size", "time", "error"}
+
+
+def public_paging_summary(event: Any, tool: Any = None) -> dict[str, Any] | None:
+    """What a connection read that followed pages may tell the run record.
+
+    Counts, limits and why it stopped, checked field by field against an
+    allow-list. Never the cursor and never anything the service returned: the
+    record carries no tool arguments or outputs. Only Conclave's own paginated
+    reads are read — a bound tool carrying `paginated_output_limit` — so an
+    adapter whose operation happens to take `paginate` cannot present its
+    server's output as a summary. The block must open the result, which is
+    where the connection puts it ahead of any provider data.
+    """
+    from conclave.integrations.pagination import paginated_output_limit
+
+    if getattr(tool, "output_limit", None) is not paginated_output_limit:
+        return None
+    if type(event).__name__ != "ToolCalled" or not getattr(event, "ok", False):
+        return None
+    arguments = getattr(event, "arguments", None)
+    observation = getattr(event, "observation", None)
+    if not isinstance(arguments, dict) or arguments.get("paginate") is not True:
+        return None
+    if not isinstance(observation, str) or not observation.startswith(PAGING_PREFIX):
+        return None
+    try:
+        block, _ = json.JSONDecoder().raw_decode(observation, len(PAGING_PREFIX))
+    except ValueError:
+        return None
+    if not isinstance(block, dict) or block.get("stopped_because") not in PAGING_REASONS:
+        return None
+
+    def count(value, ceiling=100_000):
+        return type(value) is int and 0 <= value <= ceiling
+
+    summary: dict[str, Any] = {"stopped_because": block["stopped_because"]}
+    for key in ("pages", "max_pages"):
+        if count(block.get(key), 1000):
+            summary[key] = block[key]
+    for key in ("items", "max_items", "repeats"):
+        if count(block.get(key)):
+            summary[key] = block[key]
+    counts = block.get("page_items")
+    if isinstance(counts, list) and len(counts) <= 1000 and all(count(item) for item in counts):
+        summary["page_items"] = counts
+    if type(block.get("truncated")) is bool:
+        summary["truncated"] = block["truncated"]
+    if "next_cursor" in block:
+        # Whether the agent was handed a cursor, never the cursor itself.
+        summary["resumable"] = block["next_cursor"] is not None
+    seconds = block.get("seconds")
+    if type(seconds) in (int, float) and math.isfinite(seconds) and 0 <= seconds <= 86400:
+        summary["seconds"] = seconds
+    argument = block.get("cursor_argument")
+    if isinstance(argument, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", argument):
+        summary["cursor_argument"] = argument
+    error = block.get("error")
+    if summary["stopped_because"] == "error" and isinstance(error, str) and error.strip():
+        summary["error"] = error.strip()[:200]
+    return summary
+
+
+PUBLICATION_STATUSES = {"created", "appended", "partial"}
+NOTION_PAGE_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def public_publication_summary(event: Any, tool: Any = None) -> dict[str, Any] | None:
+    """What a Notion publish may tell the run record: whether it was written,
+    how much, in how many requests, and a link to the page when it is a Notion
+    page. Never the report: only Conclave's own Notion writes are read, and only
+    these allow-listed fields are kept."""
+    if getattr(getattr(tool, "func", None), "publishes_to", None) != "notion":
+        return None
+    if type(event).__name__ != "ToolCalled" or not getattr(event, "ok", False):
+        return None
+    try:
+        result = json.loads(getattr(event, "observation", ""))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(result, dict) or result.get("status") not in PUBLICATION_STATUSES:
+        return None
+    summary: dict[str, Any] = {"status": result["status"]}
+    for key in ("blocks_written", "total_blocks", "requests"):
+        value = result.get(key)
+        if type(value) is int and 0 <= value <= 100_000:
+            summary[key] = value
+    # The canonical link, built from the page ID: Notion's own link carries a
+    # slug of the page title, which is part of the report.
+    page_id = result.get("page_id")
+    if isinstance(page_id, str) and NOTION_PAGE_ID.fullmatch(page_id):
+        summary["url"] = "https://www.notion.so/" + page_id.replace("-", "")
+    return summary
 
 
 def plan_connections(definition):
@@ -825,6 +921,12 @@ async def run_application(definition: dict[str, Any], provider: Any, tools: Any,
                         if tool_name.startswith('connection.') and len(tool_name.split('.')) == 3:
                             _, connection_id, operation = tool_name.split('.')
                             projected.update(connection_id=connection_id, operation=operation)
+                            paging = public_paging_summary(event, tools.tool(tool_name))
+                            if paging is not None:
+                                projected["pagination"] = paging
+                            publication = public_publication_summary(event, tools.tool(tool_name))
+                            if publication is not None:
+                                projected["publication"] = publication
                         await queue.put({**projected, "stage": candidate["id"]})
                     for warning in _budget_warning_events(thresholds, budget, warned):
                         await queue.put({**warning, "stage": candidate["id"]})

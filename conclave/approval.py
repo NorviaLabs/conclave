@@ -44,6 +44,10 @@ class ApprovalRequest:
         Capability
     ]
 
+    # What the tool's precheck showed of the action: for a Notion publish, the
+    # destination and the blocks exactly as they will be written.
+    preview: dict[str, Any] | None = None
+
 
 Approver = Callable[
     [ApprovalRequest],
@@ -73,6 +77,7 @@ async def request_approval(
     arguments: dict[str, Any],
     approver: Approver | None,
     lock: asyncio.Lock | None = None,
+    preview: dict[str, Any] | None = None,
 ) -> Approval:
     """Decide whether one call may run.
 
@@ -93,6 +98,7 @@ async def request_approval(
         capabilities=(
             tool.capabilities
         ),
+        preview=preview,
     )
 
     if lock is None:

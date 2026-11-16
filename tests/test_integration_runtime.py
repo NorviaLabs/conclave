@@ -35,7 +35,9 @@ def test_connection_call_attributed_and_mutation_denied_until_approved(tmp_path)
         store.disconnect('product','tenant','alice')
         revoked=[event async for event in run_application(definition,provider(),tools,'Notify team',inputs={'sources':'evidence'},approver=lambda approval:True)]
         assert len(Transport.calls)==1
-        assert any(event['type']=='ToolCalled' and not event['ok'] for event in revoked)
+        # A revoked connection is refused before approval is even asked.
+        assert any(event['type']=='ToolDenied' and event['reason']=='refused' for event in revoked)
+        assert not any(event['type']=='ToolCalled' for event in revoked)
     asyncio.run(exercise())
 
 

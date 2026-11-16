@@ -85,6 +85,53 @@ function stepActivityMarkup(event,e,capabilityName){
   if(event.message)facts.push(event.message);
   return `<li><strong>${event.sequence!==undefined?`#${e(event.sequence)} · `:''}${e(event.type)}</strong>${facts.map(fact=>`<div>${e(fact)}</div>`).join('')}</li>`;
 }
+// A read that followed pages, from the summary the backend publishes: how many
+// pages and items, why it stopped and what the agent was given to continue.
+// The record never holds the cursor or any returned item, so neither is shown,
+// and the host's limits are named rather than restated here.
+const PAGING_OUTCOMES={exhausted:['complete','All pages read'],max_items:['cut','Cut short · item limit'],max_pages:['cut','Cut short · page limit'],
+  output_size:['cut','Cut short · output limit'],time:['cut','Cut short · time limit'],error:['partial','Partial · provider error']};
+const UNREAD_SHOWN=6;
+function pagingCardMarkup(paging,e){
+  const outcome=PAGING_OUTCOMES[paging?.stopped_because];
+  if(!outcome)return '';
+  const count=value=>Number.isInteger(value)&&value>=0?value:0;
+  const plural=(n,word)=>`${n.toLocaleString('en-US')} ${word}${n===1?'':'s'}`;
+  const reason=paging.stopped_because,counts=Array.isArray(paging.page_items)?paging.page_items.map(count):[];
+  const pages=count(paging.pages)||counts.length,items=count(paging.items),repeats=count(paging.repeats);
+  const maxPages=count(paging.max_pages),maxItems=count(paging.max_items),failed=reason==='error';
+  const cut=repeats>0&&['max_items','output_size'].includes(reason);
+  const cells=counts.map((n,i)=>i===counts.length-1&&cut?`<li class="cut" title="Page ${i+1}: ${n} kept, the rest left for the next call">${n}</li>`:`<li class="read" title="Page ${i+1}: ${plural(n,'item')}">${n}</li>`);
+  if(failed)cells.push(`<li class="error" title="Page ${pages+1} failed">✕</li>`);
+  const unread=reason==='exhausted'?0:Math.max(0,maxPages-cells.length);
+  for(let i=0;i<Math.min(unread,UNREAD_SHOWN);i++)cells.push('<li class="unread" title="Not read">·</li>');
+  if(unread>UNREAD_SHOWN)cells.push(`<li class="more-pages" title="${unread-UNREAD_SHOWN} more pages not read">+${unread-UNREAD_SHOWN}</li>`);
+  const again=repeats?` Continuing repeats ${plural(repeats,'item')} from page ${pages}.`:'';
+  const why={
+    exhausted:'The service reported no more items.',
+    max_items:cut?`Stopped at the ${maxItems.toLocaleString('en-US')}-item limit partway through page ${pages}; continuing repeats ${plural(repeats,'item')} from that page.`:`Stopped at the ${maxItems.toLocaleString('en-US')}-item limit. More items are available.`,
+    max_pages:`Stopped at the ${maxPages.toLocaleString('en-US')}-page limit. More items are available.`,
+    output_size:`The next items would not fit in the output limit for one call.${again}`,
+    time:`Stopped at the time limit for one call${typeof paging.seconds==='number'?`, after ${paging.seconds} s`:''}.`,
+    error:`Page ${pages+1} failed: ${e(paging.error||'the service returned an error')}. The ${plural(items,'item')} already read are kept; continuing retries that page.`,
+  }[reason];
+  const argument=paging.cursor_argument?`<code>${e(paging.cursor_argument)}</code>`:'cursor';
+  const next=!paging.truncated?'':paging.resumable===false?(repeats?`<p class="paging-continue">The agent can continue by starting again and skipping the first ${plural(repeats,'item')}.</p>`:''):`<p class="paging-continue">The agent received a ${argument} to continue.</p>`;
+  return `<section class="tool-paging" data-paging-outcome="${outcome[0]}"><span class="paging-chip">${outcome[1]}</span><p class="paging-facts">${plural(pages,'page')} · ${plural(items,'item')}${typeof paging.seconds==='number'?` · ${e(paging.seconds)} s`:''}</p>${maxPages&&maxItems?`<p class="paging-asked">Asked for ${plural(maxPages,'page')} / ${plural(maxItems,'item')}</p>`:''}<ol class="page-strip" aria-label="Pages read">${cells.join('')}</ol><p class="paging-why">${why}</p>${next}</section>`;
+}
+// A report published to Notion, from the summary the backend records: never
+// the report itself. Only a Notion page is linked.
+const PUBLICATION_LABELS={created:'Published to Notion',appended:'Appended in Notion',partial:'Partly written'};
+const NOTION_PAGE=/^https:\/\/www\.notion\.so\//;
+function publicationCardMarkup(publication,e){
+  const status=publication?.status,label=PUBLICATION_LABELS[status];
+  if(!label)return '';
+  const count=value=>Number.isInteger(value)&&value>=0?value:0,written=count(publication.blocks_written),total=count(publication.total_blocks),requests=count(publication.requests);
+  const facts=status==='partial'?`${written.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} blocks written; nothing was retried, and the agent can append the rest after a new approval.`
+    :`${written.toLocaleString('en-US')} ${written===1?'block':'blocks'} written${requests>1?` in ${requests} requests`:''}.`;
+  const link=typeof publication.url==='string'&&NOTION_PAGE.test(publication.url)?`<a class="open-in-notion" href="${e(publication.url)}" target="_blank" rel="noopener noreferrer">${status==='partial'?'Open the partly written page':'Open in Notion'} ↗</a>`:'';
+  return `<section class="tool-publication" data-publication-status="${status}"><span class="publication-chip">${label}</span><p>${facts}</p>${link}</section>`;
+}
 // The step's own record: what it received, what it produced and what happened
 // while it ran. The work plan and the run canvas show the same panel.
 export function executionDetailMarkup(d,run,selectedId,{escape:e,agentName,outputName,capabilityName,backends=[]}){
@@ -100,7 +147,7 @@ export function executionDetailMarkup(d,run,selectedId,{escape:e,agentName,outpu
   const output=trace?.output;
   const discoveries=Array.isArray(output)?output.map(item=>`<li><strong>${e(item.title||item.id||'Finding')}</strong>${item.body?`<p>${e(item.body)}</p>`:''}</li>`).join(''):output?`<li>${e(typeof output==='string'?output:JSON.stringify(output))}</li>`:'';
   const tools=events.filter(event=>['ToolCalled','ToolDenied'].includes(event.type)),delegations=events.filter(event=>event.type==='Delegation');
-  return `<aside class="execution-inspector"><span class="eyebrow">STEP ${index+1} · ${status(index).toUpperCase()}</span><h3>${e(selected.name)}</h3><p class="inspector-agent">${e(agentName(d,selected.agent))}</p>${status(index)==='Complete'&&run?.live?`<div class="step-test-actions">${[['pin','Pin output'],['step','Test step'],['downstream','Test from here'],['compare','Compare results']].map(([action,label])=>`<button data-step-test="${action}" data-test-step="${e(selected.id)}">${label}</button>`).join('')}</div>`:''}<h4>Responsibility</h4><p>${e(selected.task)}</p>${failure}<h4>What happened</h4>${meaningful.length?`<ul class="step-live-activity">${meaningful.slice(0,5).map(row=>`<li>${e(row.text)}${row.detail?`<p>${e(row.detail)}</p>`:''}</li>`).join('')}</ul>`:'<p>No activity recorded yet.</p>'}<h4>Discoveries and output</h4>${discoveries?`<ul class="step-discoveries">${discoveries}</ul>`:'<p>No output recorded yet.</p>'}${trace?data('Inputs available when this step started',trace.input):''}<details class="execution-data" data-disclosure="trace-${e(selected.id)}-tools"><summary>Tools used · ${tools.length}</summary>${tools.map(event=>`<section><strong>${e(capabilityName(event.tool))} · ${event.type==='ToolDenied'?'Not approved':event.ok===false?'Failed':'Recorded'}</strong><p>${e(event.observation||event.reason||'No result text recorded.')}</p><details data-disclosure="tool-${e(event.sequence)}"><summary>Arguments and execution details</summary><pre class="code">${e(JSON.stringify(event,null,2))}</pre></details></section>`).join('')||'<p>No tool calls recorded.</p>'}</details><details class="execution-data" data-disclosure="trace-${e(selected.id)}-delegations"><summary>Delegated subagents · ${delegations.length}</summary>${delegations.map(event=>`<p><strong>${e(agentName(d,event.agent))} · ${e(event.status)}</strong><br>${e(event.task)}${event.reason?`<br>${e(event.reason)}`:''}</p>`).join('')||'<p>No delegation recorded.</p>'}</details><details class="execution-data" data-disclosure="trace-${e(selected.id)}-advanced"><summary>Provider and advanced execution information</summary><dl><div><dt>Requested tools</dt><dd>${member.tools.length?e(member.tools.map(capabilityName).join(', ')):'None'}</dd></div>${member.kind==='human'?'':`<div><dt>Runs on</dt><dd>${e(backendLabel(backends,...(started?[started.provider||'',started.model||'']:stageBackend(member,selected))))}</dd></div>`}</dl>${output!==undefined&&output!==null?data('Results after this step',output):''}${activity}</details></aside>`;
+  return `<aside class="execution-inspector"><span class="eyebrow">STEP ${index+1} · ${status(index).toUpperCase()}</span><h3>${e(selected.name)}</h3><p class="inspector-agent">${e(agentName(d,selected.agent))}</p>${status(index)==='Complete'&&run?.live?`<div class="step-test-actions">${[['pin','Pin output'],['step','Test step'],['downstream','Test from here'],['compare','Compare results']].map(([action,label])=>`<button data-step-test="${action}" data-test-step="${e(selected.id)}">${label}</button>`).join('')}</div>`:''}<h4>Responsibility</h4><p>${e(selected.task)}</p>${failure}<h4>What happened</h4>${meaningful.length?`<ul class="step-live-activity">${meaningful.slice(0,5).map(row=>`<li>${e(row.text)}${row.detail?`<p>${e(row.detail)}</p>`:''}</li>`).join('')}</ul>`:'<p>No activity recorded yet.</p>'}<h4>Discoveries and output</h4>${discoveries?`<ul class="step-discoveries">${discoveries}</ul>`:'<p>No output recorded yet.</p>'}${trace?data('Inputs available when this step started',trace.input):''}<details class="execution-data" data-disclosure="trace-${e(selected.id)}-tools"><summary>Tools used · ${tools.length}</summary>${tools.map(event=>`<section><strong>${e(capabilityName(event.tool))} · ${event.type==='ToolDenied'?(event.reason==='refused'?'Refused before approval':'Not approved'):event.ok===false?'Failed':'Recorded'}</strong>${event.type==='ToolCalled'&&event.ok!==false&&event.pagination?pagingCardMarkup(event.pagination,e):event.type==='ToolCalled'&&event.ok!==false&&event.publication?publicationCardMarkup(event.publication,e):event.type==='ToolDenied'&&event.reason==='refused'?`<p>${e(event.detail||'The call was refused before approval.')}</p>`:`<p>${e(event.observation||event.reason||'No result text recorded.')}</p>`}<details data-disclosure="tool-${e(event.sequence)}"><summary>Arguments and execution details</summary><pre class="code">${e(JSON.stringify(event,null,2))}</pre></details></section>`).join('')||'<p>No tool calls recorded.</p>'}</details><details class="execution-data" data-disclosure="trace-${e(selected.id)}-delegations"><summary>Delegated subagents · ${delegations.length}</summary>${delegations.map(event=>`<p><strong>${e(agentName(d,event.agent))} · ${e(event.status)}</strong><br>${e(event.task)}${event.reason?`<br>${e(event.reason)}`:''}</p>`).join('')||'<p>No delegation recorded.</p>'}</details><details class="execution-data" data-disclosure="trace-${e(selected.id)}-advanced"><summary>Provider and advanced execution information</summary><dl><div><dt>Requested tools</dt><dd>${member.tools.length?e(member.tools.map(capabilityName).join(', ')):'None'}</dd></div>${member.kind==='human'?'':`<div><dt>Runs on</dt><dd>${e(backendLabel(backends,...(started?[started.provider||'',started.model||'']:stageBackend(member,selected))))}</dd></div>`}</dl>${output!==undefined&&output!==null?data('Results after this step',output):''}${activity}</details></aside>`;
 }
 export function executionPlanMarkup(d,run,selectedId,ctx){
   const {escape:e,agentName,outputName,capabilityName}=ctx;

@@ -235,3 +235,97 @@ def test_the_registry_can_name_a_tool(repo):
     assert registry.tool("nope") is None
     assert registry.tool(["read_file"]) is None
 
+
+
+# =============================================================================
+# A tool may name its own output limit for one call
+# =============================================================================
+
+
+def _echo_tool(size, output_limit=None):
+    async def func(**arguments):
+        return "x" * size
+
+    return Tool(
+        name="echo",
+        description="Echo",
+        parameters={"type": "object", "properties": {}},
+        func=func,
+        output_limit=output_limit,
+    )
+
+
+def test_a_tool_without_an_output_limit_uses_the_registry_cap():
+    registry = ToolRegistry(10)
+    registry.register(_echo_tool(40))
+
+    assert _echo_tool(1).output_limit is None
+    assert asyncio.run(registry.execute("echo", {})) == "x" * 10 + "\n...[truncated]"
+
+
+def test_a_tools_output_limit_replaces_the_cap_for_that_call():
+    seen = []
+
+    def limit(arguments, cap):
+        seen.append((arguments, cap))
+        return 100 if arguments.get("big") else None
+
+    registry = ToolRegistry(10)
+    registry.register(_echo_tool(40, limit))
+
+    # Raised for this call: the whole output is kept.
+    assert asyncio.run(registry.execute("echo", {"big": True})) == "x" * 40
+    # No opinion: the registry's cap still applies.
+    assert asyncio.run(registry.execute("echo", {})) == "x" * 10 + "\n...[truncated]"
+    # The tool is told the registry's own cap, so it can scale from it.
+    assert seen == [({"big": True}, 10), ({}, 10)]
+
+
+def test_a_tools_output_limit_still_truncates_above_it():
+    registry = ToolRegistry(1000)
+    registry.register(_echo_tool(40, lambda arguments, cap: 20))
+
+    assert asyncio.run(registry.execute("echo", {})) == "x" * 20 + "\n...[truncated]"
+
+
+def test_a_tools_output_limit_applies_to_an_executor_too():
+    class Executor:
+        async def execute(self, invocation):
+            return "y" * 40
+
+    registry = ToolRegistry(10, executor=Executor())
+    registry.register(_echo_tool(1, lambda arguments, cap: 100))
+
+    assert asyncio.run(registry.execute("echo", {})) == "y" * 40
+
+
+def test_a_copied_registry_keeps_each_tools_output_limit():
+    registry = ToolRegistry(10)
+    registry.register(_echo_tool(40, lambda arguments, cap: 100))
+
+    assert asyncio.run(registry.copy().execute("echo", {})) == "x" * 40
+
+
+def test_a_running_tool_can_read_the_limit_its_call_runs_under():
+    from conclave.registry import current_output_limit
+
+    seen = []
+
+    def tool(limit):
+        async def func(**arguments):
+            seen.append(current_output_limit())
+            return "ok"
+
+        return Tool(name="probe", description="Probe", parameters={"type": "object", "properties": {}},
+                    func=func, output_limit=limit)
+
+    registry = ToolRegistry(10)
+    registry.register(tool(lambda arguments, cap: 100 if arguments.get("big") else None))
+    asyncio.run(registry.execute("probe", {"big": True}))
+    asyncio.run(registry.execute("probe", {}))
+    unlimited = ToolRegistry(None)
+    unlimited.register(tool(None))
+    asyncio.run(unlimited.execute("probe", {}))
+
+    assert seen == [100, 10, None]
+    assert current_output_limit() is None, "outside a call there is no limit to report"

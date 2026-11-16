@@ -732,3 +732,60 @@ dialog>.icon-button .ui-icon{width:20px;height:20px}
 .flight-plate .checkpoint-task{color:var(--text);margin:0 0 14px}
 .flight-plate .button.primary{background:#b86a00;border-color:#b86a00;color:#fff}
 .flight-plate .button.primary:hover{background:#9a5800;border-color:#9a5800}
+/* A read that followed pages: its outcome, the pages it read and why it stopped. */
+.tool-paging{margin:10px 0 6px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.tool-paging .paging-chip{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 9px;font:500 12px var(--label);letter-spacing:.03em;color:var(--idle);background:var(--idle-surface)}
+.tool-paging[data-paging-outcome="complete"] .paging-chip{color:var(--success);background:var(--success-surface);border-color:#a8d5b5}
+.tool-paging[data-paging-outcome="cut"] .paging-chip{color:var(--amber);background:var(--warning-surface);border-color:#e9c98a}
+.tool-paging[data-paging-outcome="partial"] .paging-chip{color:var(--red);background:var(--error-surface);border-color:#e6b4ad}
+.tool-paging p{margin:6px 0 0;font-size:13px;line-height:1.55;color:var(--muted)}
+.tool-paging .paging-facts{color:var(--text);font-variant-numeric:tabular-nums}
+.tool-paging .paging-why{color:var(--text)}
+.tool-paging code{font:12px var(--mono)}
+.page-strip{display:flex;flex-wrap:wrap;gap:4px;list-style:none;padding:0;margin:10px 0 2px}
+.page-strip li{min-width:36px;height:28px;padding:0 6px;display:grid;place-items:center;border:1px solid var(--line);border-radius:5px;font:11px var(--mono);color:var(--muted);background:var(--panel2)}
+.page-strip li.read{color:var(--info);background:var(--info-surface);border-color:#b5cbea}
+.page-strip li.cut{color:var(--amber);background:var(--warning-surface);border-color:#e9c98a}
+.page-strip li.error{color:var(--red);background:var(--error-surface);border-color:#e6b4ad}
+.page-strip li.unread{background:transparent;border-style:dashed;color:var(--dim)}
+.page-strip li.more-pages{min-width:0;border:0;background:transparent;color:var(--dim)}
+.follows-pages{display:inline-block;margin-left:6px;padding:0 6px;border:1px solid #b5cbea;border-radius:4px;font:11px var(--mono);color:var(--info);background:var(--info-surface);white-space:nowrap}
+.follows-pages-note{border-left:2px solid var(--line);padding-left:10px}
+/* Publishing to Notion: what the approver sees, and what happened after. */
+.tool-approval-panel article[data-approval-preview]{display:grid;gap:8px}
+.publish-destination{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 14px;margin:4px 0;font-size:14px}
+.publish-destination dt{color:var(--dim)}.publish-destination dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.publish-destination code{font:12px var(--mono);color:var(--muted)}
+.allowed-page,.not-allowed-page{display:inline-block;margin-left:6px;padding:0 6px;border:1px solid;border-radius:4px;font:11px var(--mono)}
+.allowed-page{color:var(--success);background:var(--success-surface);border-color:#a8d5b5}
+.not-allowed-page{color:var(--amber);background:var(--warning-surface);border-color:#e9c98a}
+.publish-facts{font-size:14px;color:var(--muted)}.publish-facts strong{color:var(--text);font-weight:550}
+.publish-notes{list-style:none;margin:0;padding:10px 12px;background:var(--rail);border:1px solid var(--line);border-radius:8px;font-size:13px;color:var(--muted)}
+.publish-notes li{margin:3px 0}.publish-notes li::before{content:'↳ ';color:var(--amber)}
+.approval-views{display:inline-flex;width:max-content;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.approval-views button{border:0;background:var(--panel);padding:4px 10px;font-size:13px;color:var(--muted)}
+.approval-views button[aria-pressed="true"]{background:var(--shell);color:#fff}
+.notion-preview{max-height:460px;overflow:auto;padding:22px 28px;background:#fff;border:1px solid var(--line);border-radius:8px;color:#37352f;font-size:15px;line-height:1.6}
+.notion-preview .notion-title{font-size:28px;font-weight:700;line-height:1.2;margin-bottom:12px}
+.notion-preview .notion-existing{color:var(--dim);font-size:13px}
+.notion-preview h1{font-size:24px;margin:18px 0 4px}.notion-preview h2{font-size:20px;margin:14px 0 2px}.notion-preview h3{font-size:17px;margin:12px 0 2px}
+.notion-preview p{margin:3px 0;white-space:pre-wrap}.notion-preview ul,.notion-preview ol{margin:2px 0;padding-left:24px}
+.notion-preview blockquote{margin:6px 0;padding-left:14px;border-left:3px solid #37352f;white-space:pre-wrap}
+.notion-preview hr{border:0;border-top:1px solid var(--line);margin:12px 0}
+.notion-preview .notion-code{margin:8px 0;padding:8px 14px;background:var(--rail);border-radius:4px}
+.notion-preview .notion-code figcaption{font-size:11px;color:var(--dim)}.notion-preview .notion-code pre{margin:4px 0 0;font:13px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.notion-preview .to-do{display:flex;gap:8px;margin:3px 0}.notion-preview .to-do .box{width:15px;height:15px;margin-top:4px;border:1.5px solid #37352f;border-radius:3px;display:grid;place-items:center;font-size:11px;flex-shrink:0}
+.notion-preview .to-do.done>span:last-child{text-decoration:line-through;color:var(--dim)}.notion-preview .to-do-children{padding-left:24px}
+.notion-preview table{border-collapse:collapse;margin:8px 0;font-size:14px}.notion-preview th,.notion-preview td{border:1px solid var(--line);padding:5px 10px;text-align:left;vertical-align:top}.notion-preview th{background:var(--rail)}
+.notion-preview code{font:85% var(--mono);padding:1px 4px;border-radius:3px;background:var(--panel2);color:var(--red)}
+.notion-preview a{color:inherit;text-decoration:underline}
+.publish-hint{font-size:13px;color:var(--dim)}
+.tool-publication{margin:10px 0 6px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.tool-publication .publication-chip{display:inline-block;border:1px solid;border-radius:999px;padding:2px 9px;font:500 12px var(--label);letter-spacing:.03em}
+.tool-publication[data-publication-status="created"] .publication-chip,.tool-publication[data-publication-status="appended"] .publication-chip{color:var(--success);background:var(--success-surface);border-color:#a8d5b5}
+.tool-publication[data-publication-status="partial"] .publication-chip{color:var(--red);background:var(--error-surface);border-color:#e6b4ad}
+.tool-publication p{margin:6px 0 0;font-size:13px;color:var(--text)}.tool-publication .open-in-notion{display:inline-block;margin-top:6px;font-size:13.5px}
+.notion-pages{border:1px solid var(--line);border-radius:8px;margin:12px 0;padding:8px 12px}
+.notion-pages .notion-page-row{display:grid;grid-template-columns:1fr 1.4fr;gap:8px}.notion-pages p{font-size:12.5px}
+.tool-approval-panel:has([data-approval-preview]){width:min(640px,calc(100vw - 32px));max-height:80dvh}
+.notion-preview .link-host{margin-left:4px;padding:0 5px;border:1px solid var(--line);border-radius:4px;background:var(--rail);font:11px var(--mono);color:var(--dim);white-space:nowrap}

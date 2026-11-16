@@ -53,6 +53,8 @@ const run = {
 };
 
 const api = path => {
+  // A local host: its own operator, and nothing to sign in to.
+  if (path === '/api/me') return {principal: {name: 'operator', tenant: 'local', source: 'local', label: 'operator'}, login: null};
   if (path === '/api/applications') return {applications: [{id: applicationId, name: definition.name, definition, revision: 3, created_at: '2026-10-06T15:10:48.059348+00:00', updated_at: '2026-10-06T15:10:48.059348+00:00'}]};
   if (path.startsWith('/api/applications/')) return {id: applicationId, definition, revision: 3};
   if (path === '/api/members') return {members: []};
@@ -74,8 +76,11 @@ await context.route('**/*', async route => {
   if (url.host !== 'studio.local') return route.abort();
   if (url.pathname.startsWith('/api/')) return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(api(url.pathname))});
   const file = url.pathname === '/' ? `${root}/web/index.html` : url.pathname === '/definition.js' ? `${root}/shared/definition.js` : url.pathname === '/catalogue.js' ? `${root}/shared/catalogue.js` : `${root}/web${url.pathname}`;
-  const source = await readFile(file, 'utf8');
-  return route.fulfill({status: 200, contentType: types[url.pathname.substring(url.pathname.lastIndexOf('.'))] || 'text/plain', body: url.pathname === '/definition.js' || url.pathname === '/catalogue.js' ? browserImports(source) : source});
+  // A file the bundle does not have is a 404, as a real server answers: the
+  // page asks for an optional config.json and falls back when it is absent.
+  const source = await readFile(file, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (source === null) return route.fulfill({status: 404, contentType: 'text/plain', body: 'Not found'});
+  return route.fulfill({status: 200, contentType: types[file.substring(file.lastIndexOf('.'))] || 'text/plain', body: url.pathname === '/definition.js' || url.pathname === '/catalogue.js' ? browserImports(source) : source});
 });
 
 const page = await context.newPage();

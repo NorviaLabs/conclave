@@ -70,7 +70,7 @@ from .registry import (
     TRUNCATION_MARKER,
     ToolRegistry,
 )
-from .spec import AgentSpec
+from .spec import AgentSpec, ToolRefused
 
 
 R = TypeVar("R")
@@ -248,6 +248,10 @@ class ToolAgentRuntime:
         started = time.monotonic()
 
         last_check = started
+
+        # Messages holding a result over the run's tool output limit, to be
+        # shortened once the agent has acted on them.
+        oversized: list[tuple[int, str, str, str]] = []
 
         step = 0
         reviewed = False
@@ -552,22 +556,66 @@ class ToolAgentRuntime:
                 )
             )
 
+            tail = f"{counted}" + (
+                closing
+                if closing is not None
+                else "Continue. Return only "
+                "the next JSON action."
+            )
+
+            # A result longer than the run's tool output limit (only a tool
+            # allowed more for one call, such as a read that followed pages,
+            # returns one) is read in full once. After the agent's next action
+            # its copy here is cut back to the limit, or every later request
+            # would carry every long result again.
+            limit = self.config.max_tool_output_chars
+
+            for index, earlier_label, earlier, earlier_tail in oversized:
+                messages[index]["content"] = (
+                    f"{earlier_label}:\n"
+                    f"{earlier[:limit]}\n"
+                    f"...[earlier result shortened from "
+                    f"{len(earlier):,} characters]\n\n"
+                    f"{earlier_tail}"
+                )
+
+            oversized.clear()
+
+            long = (
+                limit is not None
+                and len(observation) > limit
+            )
+
+            warning = (
+                "This result is longer than this run's tool "
+                f"output limit of {limit:,} characters; after your "
+                "next action it will be shortened to that limit, so "
+                "record anything you will need in a note.\n\n"
+                if long
+                else ""
+            )
+
             messages.append(
                 {
                     "role": "user",
                     "content": (
                         f"{label}:\n"
                         f"{observation}\n\n"
-                        f"{counted}"
-                        + (
-                            closing
-                            if closing is not None
-                            else "Continue. Return only "
-                            "the next JSON action."
-                        )
+                        f"{warning}"
+                        f"{tail}"
                     ),
                 }
             )
+
+            if long:
+                oversized.append(
+                    (
+                        len(messages) - 1,
+                        label,
+                        observation,
+                        tail,
+                    )
+                )
 
             if await self.authority.exceeded(
                 "wall_clock_seconds"
@@ -1090,11 +1138,53 @@ class ToolAgentRuntime:
                 ),
             )
 
+        preview = None
+
+        if tool.destructive and tool.precheck is not None:
+            # Checked before anyone is asked: a call that cannot succeed is
+            # refused without troubling the approver or running anything.
+            try:
+                preview = await tool.precheck(
+                    arguments
+                )
+
+            except ToolRefused as exc:
+                detail = (
+                    str(exc)
+                    or "The call was refused before approval."
+                )
+
+            except Exception:
+                detail = (
+                    "The call was refused before approval: "
+                    "it could not be checked."
+                )
+
+            else:
+                detail = None
+
+            if detail is not None:
+                return ToolDenied(
+                    run_id=run_id,
+                    agent=spec.name,
+                    tool=tool.name,
+                    reason="refused",
+                    capabilities=(
+                        tool.capabilities
+                    ),
+                    observation=(
+                        f"Refused before approval: {detail}. "
+                        "Return only the next JSON action."
+                    ),
+                    detail=detail,
+                )
+
         approval = await self.authority.approve(
             tool,
             spec.name,
             arguments,
             run_id,
+            preview,
         )
 
         if approval is Approval.REFUSED:

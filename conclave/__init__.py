@@ -100,6 +100,7 @@ from .spec import (
     Capability,
     Tool,
     ToolFunc,
+    ToolRefused,
 )
 from .store import (
     MergeFunc,
@@ -112,6 +113,7 @@ from .store import (
 
 
 __all__ = [
+    "ToolRefused",
     "AgentFinished",
     "AgentResult",
     "AgentSpec",

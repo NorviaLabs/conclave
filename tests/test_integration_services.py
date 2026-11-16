@@ -13,6 +13,7 @@ class Transport:
         if 'search.brave.com' in url: return {'web': {'results': [{'url':'https://example.com','title':'Title','description':'Snippet'}]}}
         if 'docs.googleapis.com' in url: return {'documentId':'doc-1'}
         if 'slack.com' in url: return {'ok':True,'messages':{'matches':[]}}
+        if url.endswith('api.notion.com/v1/pages'): return {'object':'page','id':'5c6d7e8f-90ab-4cde-b1f2-a3b4c5d6e7f8','url':'https://www.notion.so/5c6d7e8f90ab4cdeb1f2a3b4c5d6e7f8'}
         if kwargs.get('raw'): return b'file content'
         return {'data': {}, 'results': []}
 
@@ -29,7 +30,9 @@ def test_real_api_contracts(identifier):
                 continue  # received with a signature, never sent out
             arguments = {}
             for key in operation.parameters.get('required', []):
-                arguments[key] = {'values':[['cell']], 'properties':{'name':'value'}, 'payload':{'result':'done'}, 'object_type':'contacts'}.get(key, 'value')
+                arguments[key] = {'values':[['cell']], 'properties':{'name':'value'}, 'payload':{'result':'done'}, 'object_type':'contacts',
+                                  'parent_page_id':'1a2b3c4d5e6f47a8b9c0d1e2f3a4b5c6', 'target_page_id':'1a2b3c4d5e6f47a8b9c0d1e2f3a4b5c6',
+                                  'markdown':'# Report'}.get(key, 'value')
             validate_arguments(arguments, operation.parameters)
             await invoke(service,operation,config,credentials,arguments,transport)
         assert transport.calls

@@ -479,6 +479,11 @@ class ApplicationAPI:
                     raise Conflict("This application changed. Reload its saved version before starting.")
                 # The backend supplies the durable snapshot; callers cannot swap it.
                 return await self.host.handle("start", {**value, "definition": saved["definition"]}, principal=principal)
+        if len(parts) == 5 and parts[1] == "runs" and parts[3] == 'tool-approvals' and method == 'GET':
+            # One pending approval in full: its preview is fetched once, not polled.
+            await self.host.handle('get', {'run_id': parts[2]}, principal=principal)
+            owner = (principal or self.host.principal).name
+            return 200, self.host.tool_approvals.get(parts[2], parts[4], owner)
         if len(parts) in {3, 4} and parts[1] == "runs":
             run_id = parts[2]
             if len(parts) == 4 and parts[3] == 'tool-approvals':

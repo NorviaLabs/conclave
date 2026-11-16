@@ -27,6 +27,12 @@ ToolFunc = Callable[
 ]
 
 
+class ToolRefused(Exception):
+    """Raised by a tool's precheck to refuse a call before anyone is asked to
+    approve it. The message is shown to the agent and recorded, so it must be
+    safe to show: no secrets, no provider response bodies."""
+
+
 @dataclass
 class Tool:
     """A callable the runtime owns, described for the model.
@@ -46,6 +52,23 @@ class Tool:
     ] = field(
         default_factory=frozenset
     )
+
+    # How much text one call may return, decided per call from its arguments
+    # and the registry's own cap (None when unlimited). None here, or None from
+    # the callable, leaves the registry's cap in force; a tool uses it when a
+    # call legitimately returns more, such as a read that follows pages.
+    output_limit: Callable[
+        [dict[str, Any], int | None],
+        int | None,
+    ] | None = None
+
+    # A side-effect-free check of one destructive call, run before anyone is
+    # asked to approve it. It raises ToolRefused to refuse the call, or returns
+    # what the approver should see of the action (None for nothing extra).
+    precheck: Callable[
+        [dict[str, Any]],
+        Awaitable[dict[str, Any] | None],
+    ] | None = None
 
     @property
     def destructive(self) -> bool:

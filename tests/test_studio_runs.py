@@ -716,6 +716,13 @@ def test_a_pause_asked_for_too_late_does_not_outlive_the_run(tmp_path):
                 break
             await asyncio.sleep(0.005)
         assert repository.get(run_id)["status"] == "completed"
+        # The status is stored before the run's task ends; the task's done
+        # callback is what forgets the run, and it drops the pause with it.
+        for _ in range(400):
+            if run_id not in host.tasks:
+                break
+            await asyncio.sleep(0.005)
+        assert run_id not in host.tasks
         assert run_id not in host.pauses, "a finished run keeps no pause request"
         await host.close()
 

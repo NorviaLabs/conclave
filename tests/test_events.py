@@ -76,6 +76,7 @@ FIELDS = {
         "reason",
         "observation",
         "capabilities",
+        "detail",
     ],
     "NoteRecorded": [
         "run_id",

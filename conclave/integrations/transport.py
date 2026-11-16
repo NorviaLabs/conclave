@@ -64,17 +64,35 @@ class PinnedHTTPS(http.client.HTTPSConnection):
             raise
 
 
+def abort(active):
+    """Stop a request whose caller has gone: a worker thread cannot be killed,
+    but shutting its socket fails the blocked read at once, so an abandoned
+    request neither keeps talking to the provider nor holds a worker."""
+    active['aborted'] = True
+    connection = active.get('connection')
+    sock = getattr(connection, 'sock', None) if connection is not None else None
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
 class Transport:
     def __init__(self, hosts, *, timeout=20, max_bytes=1000000):
         self.hosts, self.timeout, self.max_bytes = frozenset(hosts), timeout, max_bytes
 
     async def request(self, method, url, *, headers=None, body=None, params=None, raw=False):
         parsed = endpoint(url, self.hosts)
+        active = {}
         def call():
             connection = None
             try:
                 address = public_addresses(parsed.hostname)[0]
                 connection = PinnedHTTPS(parsed.hostname, address, self.timeout)
+                active['connection'] = connection
+                if active.get('aborted'):
+                    raise IntegrationError('Provider request was abandoned')
                 path = parsed.path or '/'
                 query = parsed.query
                 if params:
@@ -91,6 +109,8 @@ class Transport:
                     payload = json.dumps(payload, allow_nan=False).encode()
                     request_headers['Content-Type'] = 'application/json'
                 connection.request(method, path, body=payload, headers=request_headers)
+                if active.get('aborted'):
+                    raise IntegrationError('Provider request was abandoned')
                 response = connection.getresponse()
                 # Never follow redirects with authentication headers.
                 if 300 <= response.status < 400:
@@ -115,4 +135,10 @@ class Transport:
         try:
             return await asyncio.wait_for(asyncio.to_thread(call), self.timeout + 2)
         except TimeoutError:
+            abort(active)
             raise IntegrationError('Provider request timed out') from None
+        except asyncio.CancelledError:
+            # The caller gave up (a paginated read at its time limit): so does
+            # the request.
+            abort(active)
+            raise

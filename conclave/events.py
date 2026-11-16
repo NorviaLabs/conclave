@@ -116,6 +116,9 @@ class ToolDenied:
         Capability
     ]
 
+    # Why, in words safe to record: set when a precheck refused the call.
+    detail: str = ""
+
 
 @dataclass(frozen=True)
 class NoteRecorded:

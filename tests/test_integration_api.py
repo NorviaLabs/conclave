@@ -184,6 +184,13 @@ def test_pause_and_resume_over_rest(tmp_path):
                 break
             await asyncio.sleep(0.005)
         assert finished[1]['status'] in ('completed', 'waiting_for_human')
+        # The status is stored before the run's task ends, and a run is "still
+        # going" until that task is done, so wait for it before asking again.
+        for _ in range(400):
+            if record['id'] not in host.tasks:
+                break
+            await asyncio.sleep(0.005)
+        assert record['id'] not in host.tasks
         # Only a run that is still going can pause; an unknown one is not found,
         # and extra fields are refused rather than ignored.
         assert (await api.dispatch('POST', f"/api/runs/{record['id']}/pause", {}))[0] == 400

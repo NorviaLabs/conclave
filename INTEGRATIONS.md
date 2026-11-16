@@ -84,7 +84,7 @@ not met, even when native HTTP operations are contract-tested.
 | Slack (partial) | bearer; manual credentials | search_messages, read_conversation | send_message | Config/assign/disconnect | Contract + boundary | No |
 | Gmail (partial) | google_oauth; manual credentials | search_messages, read_message | create_draft, send_email | Config/assign/disconnect | Contract + boundary | No |
 | Confluence (partial) | atlassian; manual credentials | search_pages, read_page | None | Config/assign/disconnect | Contract + boundary | No |
-| Notion (partial) | bearer; manual credentials | search, read_page, read_content | None | Config/assign/disconnect | Contract + boundary | No |
+| Notion (partial) | bearer; manual credentials | search, read_page, read_content | create_page, append_content | Config/assign/disconnect | Contract + boundary | No |
 | Zendesk (partial) | zendesk; manual credentials | search_tickets, read_ticket, read_history | prepare_reply | Config/assign/disconnect | Contract + boundary | No |
 | HubSpot CRM (partial) | bearer; manual credentials | search_companies, search_contacts, search_deals, read_record | update_record | Config/assign/disconnect | Contract + boundary | No |
 | Jira (partial) | atlassian; manual credentials | search_issues, read_issue | create_issue, update_issue | Config/assign/disconnect | Contract + boundary | No |
@@ -326,6 +326,192 @@ same way: a destructive call waits for one person's approval of that exact call.
 
 Neither shape merges anything a person did not approve: the merge is the last
 approved call, not the end of the gate.
+
+## Following pages in one read
+
+A read returns one page unless the agent asks for more. The reads that can
+follow a service's pages take three optional arguments: `paginate` (true to
+follow), `max_pages` (1–20, default 5) and `max_items` (1–1000, default 500).
+`max_pages` or `max_items` without `paginate: true` is refused rather than
+ignored, and the paging arguments are never sent to the provider. Without
+`paginate` a call is exactly what it was before: one page, the provider's own
+shape and the run's tool output limit.
+
+| Service | Operation | Cursor argument | Next page signalled by |
+|---|---|---|---|
+| Gmail | search_messages | page_token | `nextPageToken` |
+| Google Drive | search_files | page_token | `nextPageToken` |
+| Slack | read_conversation | cursor | `response_metadata.next_cursor` |
+| Notion | search, read_content | start_cursor | `has_more` and `next_cursor` |
+| Jira | search_issues | nextPageToken | `nextPageToken` unless `isLast` |
+| Confluence | search_pages | start | `_links.next`; the offset is `start + size` |
+| Reddit | read_posts | after | `data.after` |
+| Amazon S3 | list_objects | continuation_token | `next_page` |
+
+`conclave/integrations/pagination.py` is the one place that knows these signals
+(`PAGERS`). A write, an inbound trigger, a single-object read and a read with no
+cursor argument (Slack search, GitHub, HubSpot, Linear, Zendesk, Trello, and
+MCP, OpenAPI and SQL adapters) never gain the paging arguments.
+
+The combined result keeps the service's shape, with every page's items in its
+list and the provider's own cursor fields removed, and starts with a
+`pagination` block:
+
+```json
+{"pagination": {"pages": 3, "items": 250, "page_items": [100, 100, 50],
+  "max_pages": 5, "max_items": 250, "truncated": true, "stopped_because": "max_items",
+  "next_cursor": "…", "cursor_argument": "page_token", "repeats": 50, "seconds": 4.0},
+ "messages": […], "resultSizeEstimate": 730}
+```
+
+`stopped_because` is one of `exhausted` (the service has no more),
+`max_items`, `max_pages`, `output_size`, `time` or `error`. To continue, pass
+`next_cursor` as the `cursor_argument`. A service's cursor points past a whole
+page, so when a limit cuts a page partway through, `next_cursor` is that page's
+own cursor and `repeats` says how many of its items will come back again; a
+null `next_cursor` with `repeats` means start again and skip that many.
+Confluence pages by offset, so it resumes exactly and repeats nothing.
+
+Limits and safety:
+
+- A paginated call may return five times the run's `max_tool_output_chars`,
+  never more than 100,000 characters (the ceiling for any connection call); a
+  run with no limit gets 100,000. With the default 20,000 that is 100,000, and
+  a limit a person set lower is scaled rather than ignored. Items are kept
+  while the result fits with 256 characters to spare, so the block and its
+  cursor always fit and the registry never cuts the JSON.
+- Sixty seconds is a hard limit for one call: a page still loading is
+  abandoned — its connection is shut, so the request stops rather than running
+  on in the background — and none finishing later is kept. Amazon S3 requests
+  go through boto3, which cannot be interrupted this way; an abandoned S3 page
+  still ends within its own 25-second timeout.
+- Pages are paced 0.2 s apart like separate calls. The connection's lock is
+  held per page, not for the whole call, so another call on the same
+  connection (a parallel step, another run) is served between pages rather
+  than waiting up to a minute. Before every page the grant, revocation and token are checked again: a
+  revoked or narrowed grant fails the whole call and returns nothing, and an
+  expiring token is refreshed — but only when at least 25 seconds of the call
+  remain, because abandoning a refresh halfway could lose a refresh token the
+  provider has already rotated. Otherwise the call stops with `time`.
+- Every page is redacted with all the credentials the call has used, so a
+  token replaced by a refresh partway is still never returned.
+- A provider error on a later page returns what was read, with the error and
+  the cursor to retry; on the first page the call fails as before.
+- Budgets: one paginated call can make up to 20 provider requests, but it is
+  one tool call to the run's `tool_calls` budget. Size that budget, and any
+  provider quota, with this in mind.
+- The agent's conversation: a result over the run's tool output limit is read
+  in full once, with a note that it will be shortened; after the agent's next
+  action its copy is cut back to that limit (the `pagination` block, which
+  opens the result, always survives). Without this every later model request
+  re-sent every long result — three paginated reads made the fourth request
+  about 300,000 characters; now about 145,000, growing by the run's limit per
+  earlier result. Provider results are redacted in a worker thread, so a large
+  page does not stall other runs.
+
+Known follow-up: every page opens a new connection (DNS lookup, TCP and TLS),
+typically 50–300 ms a page. Reusing the connection already checked for the
+first page, within one call, would save that; it changes the transport and
+should be verified against live providers.
+
+Studio shows a paginated call in the step's "Tools used" list (outcome, pages
+read, what a limit cut, why it stopped) and in the activity row, and marks the
+reads that follow pages in the connection manager. The run record holds an
+allow-listed summary only: counts, limits, the reason and whether a cursor was
+returned — never the cursor or any item the service returned. Only Conclave's
+own paginated reads publish one: an MCP or OpenAPI operation that happens to
+take a `paginate` argument cannot present its server's output as a summary.
+
+## Publishing a report to Notion
+
+A workflow publishes its report with two Notion write operations. Both are
+external changes: each call waits for one person's approval of that call, no
+approver means refusal, and an autonomous application pre-authorises them like
+any other declared write.
+
+- `create_page(parent_page_id, title, markdown)` — "Create report page": a new
+  page under the parent, titled, with the report as its content.
+- `append_content(target_page_id, markdown)` — "Append to page": the report
+  added at the end of an existing page.
+
+A page is named by its ID, dashed or not, or by a link to it on notion.so;
+anything else is refused before anything is sent.
+
+The report's Markdown becomes Notion blocks:
+
+| Markdown | Notion |
+|---|---|
+| `#`, `##`, `###` (deeper levels become `###`) | heading 1–3 |
+| paragraphs (a hard line break is kept) | paragraph |
+| `-` `*` `+` / `1.` / `- [ ]` `- [x]` lists, nested | bulleted / numbered / to-do, two levels deep |
+| `>` | quote |
+| `---` `***` `___` | divider |
+| fenced code with a language | code, the language mapped to Notion's list ("plain text" when unknown) |
+| pipe tables | a table with a header row |
+| `**bold**` `*italic*` `` `code` `` `~~strike~~` `[link](url)` `<url>` | formatted text |
+| `![alt](url)` | a link — never an embedded image, which Notion would fetch from the internet |
+
+Only web and mail links stay links; HTML is published as text, never
+interpreted. A first heading that repeats the page's title is left out. Every
+change of this kind is listed as a note, shown to the approver and returned to
+the agent. So is every domain the report links to, and a warning when a link's
+text shows one address (a URL, a domain or an email) but goes to another; the
+approval's preview also shows each link's real destination beside it.
+
+The conversion runs on text an agent wrote, so its time grows linearly with the
+report whatever it contains (a 199,000-character hostile report converts in
+under a second), and it runs in a worker thread, never on the server's event
+loop. A report that still takes more than ten seconds is refused.
+
+Limits: 2,000 characters per text run, at most 100 top-level blocks and about
+400 KB per request, 1,000 blocks and 200,000 characters per call. A long report
+is written in several requests (the page is created with the first, the rest
+appended in order). A write is never retried: a failure on the first request
+fails the call; a later one returns `status: "partial"` with what was written,
+`unwritten_from_line` and a `next` hint, so the agent can append the rest —
+after a new approval — without repeating what is already on the page.
+
+**Allowed pages.** A Notion connection can name the pages it may publish to
+(`config.pages`, up to 50, each an ID or link and a name). When set, new pages
+can only be created under them and content only appended to them; reads are
+not limited. The names label the destination in the approval. They are chosen
+when connecting; changing them means reconnecting. A page the connection itself
+created under an allowed page may also be appended to — so a partly written
+report can be finished — and is shown as "‹title› (created by this
+connection)"; the server remembers the most recent 200 and never takes that
+list from a client.
+
+**Checked before approval.** Every connection write is checked before anyone
+is asked to approve it: the grant and its revocation, the arguments,
+restrictions, scopes and allowed pages (no token is refreshed here). A write
+that cannot succeed is refused with its reason and nothing is sent. For a
+Notion publish the check also converts the report; the approval shows the
+destination, the title, the block count, the notes and the page as Notion will
+show it — drawn from the same blocks that are then written — with the Markdown
+and the raw request a click away. Previews from a sandbox are not forwarded.
+
+While a publish waits for approval, Studio polls the pending actions every
+second or so; the list carries only the preview's summary (destination, counts,
+notes), and the blocks and report are fetched once from
+`GET /api/runs/{id}/tool-approvals/{approval_id}`. The preview is drawn once
+and left alone by later renders.
+
+A long report's requests are spaced 0.35 s apart — about the three a second
+Notion allows on average — so a publish does not end half-written on a rate
+limit. A publish holds its connection's lock until its last request; with a very
+slow Notion that can be minutes, and other calls on that connection wait. Rich
+reports reach the 1,000-block limit at roughly 45–55 KB of Markdown, well before
+the character limit: a longer report is published as a page and then appended
+to, each with its own approval.
+
+The run record keeps a summary of each publish — status, blocks written and in
+total, requests and the page's canonical link (`https://www.notion.so/<id>`,
+without the title Notion puts in its own links) — never the report.
+A refusal before approval is recorded with its reason.
+
+Not yet verified against live Notion: the nesting depth accepted in one request
+(deeper list items are moved up to the second level) and the API's rate limits
+for long, many-request reports.
 
 ## Where integrations appear in the catalogue
 

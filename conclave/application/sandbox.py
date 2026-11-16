@@ -267,7 +267,11 @@ class SandboxAuthority(RunAuthority):
         return Completion(text=str(response.get("text", "")),
                           usage=None if usage is None else Usage(input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens")))
 
-    async def approve(self, tool: Tool, agent: str, arguments: dict[str, Any], run_id: str) -> Approval:
+    async def approve(self, tool: Tool, agent: str, arguments: dict[str, Any], run_id: str,
+                      preview: dict[str, Any] | None = None) -> Approval:
+        # A preview built inside a sandbox is not forwarded: the control plane
+        # must not show an approver what untrusted code says an action does.
+        # Connection tools, the ones that preview, never run in a sandbox.
         response = await self.ask({"kind": "approve", "run_id": run_id, "agent": agent, "tool": tool.name, "arguments": arguments})
         decision = response.get("decision")
 

@@ -1,4 +1,18 @@
 import {uiIcon} from '/canvas-ui.js';
+// A read that followed pages: why it stopped, in the words a person reads.
+const PAGING_REASONS={exhausted:'all pages read',max_items:'cut short at the item limit',max_pages:'cut short at the page limit',
+  output_size:'cut short at the output limit',time:'cut short at the time limit',error:'stopped by a provider error'};
+const plural=(count,word)=>`${count} ${word}${count===1?'':'s'}`;
+export function publicationText(publication){
+  const status=publication?.status,count=value=>Number.isInteger(value)&&value>=0?value:0;
+  if(status==='created'||status==='appended')return `${plural(count(publication.blocks_written),'block')} · ${status==='created'?'published to Notion':'appended in Notion'}`;
+  if(status==='partial')return `${count(publication.blocks_written)} of ${plural(count(publication.total_blocks),'block')} · partly written`;
+  return '';
+}
+export function pagingSummaryText(paging){
+  if(!paging||typeof paging!=='object'||!PAGING_REASONS[paging.stopped_because])return '';
+  return `${plural(Number(paging.pages)||0,'page')} · ${plural(Number(paging.items)||0,'item')} · ${PAGING_REASONS[paging.stopped_because]}`;
+}
 // Descriptions use only durable events; routine repeated tool calls share a row.
 export function runActivities(d,run,{agentName,capabilityName}){
   const rows=[];
@@ -14,10 +28,19 @@ export function runActivities(d,run,{agentName,capabilityName}){
         detail=Array.isArray(value)?`${value.length} ${label.toLowerCase()}`:typeof value==='string'?(count=>`${count} ${count===1?'word':'words'} produced`)(value.trim().split(/\s+/).filter(Boolean).length):'Output recorded';break;
       }
       case 'Delegation':text=`${agentName(d,event.delegated_by||step?.agent)} delegated work to ${agent}`;detail=event.task||event.reason||'';break;
-      case 'ToolCalled':text=`${agent} used ${capabilityName(event.tool)}`;routine=event.ok!==false;important=event.ok===false;if(important)text=`${agent}: ${capabilityName(event.tool)} failed`;break;
+      case 'ToolCalled':{
+        text=`${agent} used ${capabilityName(event.tool)}`;routine=event.ok!==false;important=event.ok===false;if(important)text=`${agent}: ${capabilityName(event.tool)} failed`;
+        // A call that followed pages says how it went, so it keeps its own row.
+        const paging=event.ok!==false?pagingSummaryText(event.pagination):'';
+        if(paging){detail=paging;routine=false;important=event.pagination.stopped_because==='error';}
+        // A publish to Notion keeps its own row, saying how much was written.
+        const published=event.ok!==false?publicationText(event.publication):'';
+        if(published){detail=published;routine=false;important=event.publication.status==='partial';}
+        break;
+      }
       case 'ToolApprovalRequested':text=`${agent} is waiting for approval`;detail=capabilityName(event.tool);important=true;break;
       case 'ToolApprovalResolved':text=event.approved?'External action approved':'External action rejected';detail=event.reason||'';important=true;break;
-      case 'ToolDenied':text=`${agent}: ${capabilityName(event.tool)} needs attention`;detail=event.reason||'';important=true;break;
+      case 'ToolDenied':text=`${agent}: ${capabilityName(event.tool)} needs attention`;detail=event.reason==='refused'&&event.detail?`Refused before approval: ${event.detail}`:event.reason||'';important=true;break;
       case 'NoteRecorded':text=`${agent} recorded a finding`;detail=event.note||'';break;
       case 'HumanInputRequested':text=`${agent} needs your input`;important=true;break;
       case 'HumanReviewSubmitted':text=`${event.reviewer||agent} submitted a review`;break;

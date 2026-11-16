@@ -75,6 +75,7 @@ class RunAuthority(Protocol):
         agent: str,
         arguments: dict[str, Any],
         run_id: str,
+        preview: dict[str, Any] | None = None,
     ) -> Approval: ...
 
     async def reserve(
@@ -168,6 +169,7 @@ class InProcessAuthority:
         agent: str,
         arguments: dict[str, Any],
         run_id: str,
+        preview: dict[str, Any] | None = None,
     ) -> Approval:
         return await request_approval(
             tool,
@@ -175,6 +177,7 @@ class InProcessAuthority:
             arguments,
             self.approver,
             self.lock,
+            preview,
         )
 
     async def reserve(
