@@ -88,6 +88,25 @@ assert.match(source,/function ensureStepExamples\(\)\{/);
 assert.match(source,/if\(stepExamplesApp===currentId\)return;/);
 assert.match(source,/outdated=JSON\.stringify\(fixture\.definition\.state\)/);
 assert.match(source,/onTestsChanged:\(\)=>\{stepExamplesApp=null;ensureStepExamples\(\);\}/);
+// Another render while the examples are still loading (a schedule's status
+// arriving first, say) must not chain a render onto a load that is not
+// happening: that loop never yields, and the page freezes for good.
+{
+  const slice=name=>{const at=source.indexOf(`function ${name}(`);return source.slice(source.lastIndexOf('\n',at)+1,source.indexOf('\n}',at)+2);};
+  const loader=slice('loadStepTests'),ensure=slice('ensureStepExamples');
+  let renders=0;const pending=[];const release=()=>pending.splice(0).forEach(resolve=>resolve({tests:[],fixtures:[]}));
+  const context={currentId:'app',view:'plan',stepExamples:null,stepExamplesApp:null,stepExamplesBusy:false,encodeURIComponent,Promise,
+    request:()=>new Promise(resolve=>pending.push(resolve)),
+    render(){renders++;if(renders>50)throw new Error('render loop');context.ensureStepExamples();}};
+  runInNewContext(`${loader}\n${ensure}\nthis.ensureStepExamples=ensureStepExamples;`,context);
+  context.ensureStepExamples();
+  // A second render while the first load is in flight.
+  context.ensureStepExamples();
+  for(let turn=0;turn<20;turn++)await Promise.resolve();
+  assert.ok(renders<=1,`a render during the load does not loop (${renders} renders before it finished)`);
+  release();for(let turn=0;turn<20;turn++)await Promise.resolve();
+  assert.equal(context.stepExamplesApp,'app','the load still finishes and is remembered');
+}
 assert.match(inspector,/node-example \$\{example\.outdated\?'outdated':''\}/);
 assert.match(inspector,/Example out of date/);
 assert.match(inspector,/pinned from a run/);

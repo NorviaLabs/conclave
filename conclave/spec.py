@@ -69,6 +69,11 @@ class Tool:
         [dict[str, Any]],
         Awaitable[dict[str, Any] | None],
     ] | None = None
+    # How to ask the service whether one call already happened (a
+    # `conclave.actions.Check`), or, when there is none, why not. Only a
+    # destructive tool is ever checked, and only after its outcome is unknown.
+    check: Any = None
+    check_unavailable: str = ""
 
     @property
     def destructive(self) -> bool:

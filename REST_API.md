@@ -90,15 +90,23 @@ provider logs, raw model replies and tool arguments are not exposed in run event
 | GET | `/api/catalogue` | Read saved workspace catalog and revision |
 | PUT | `/api/catalogue` | `{catalogue, revision}`; update custom roles/starters/outputs |
 | POST | `/api/proposals` | `{prompt, definition, catalogue}`; propose a validated change without executing it |
-| GET | `/api/runs?application_id={id}` | List recent runs for an application |
-| POST | `/api/runs` | `{version:1, application_id, revision, task, inputs}`; execute the backend's saved snapshot |
+| GET | `/api/applications/{id}/schedule` | The saved schedule's state: `active`, `paused`, `waiting` (no owner), `owner` and `owner_since`, `next_at`/`next_local`/`time_zone`, `last` and up to 20 `recent` scheduled times with their outcome (`started`, `skipped`, `missed`, `failed`) |
+| POST | `/api/applications/{id}/schedule` | `{action: "pause"\|"resume"\|"turn_on"}`; owner only (`turn_on` records the caller as owner of a schedule that has none). Never creates a revision; 409 when the application is not scheduled |
+| GET | `/api/applications/{id}/notifications` | Whether "this run is waiting for you" can be sent now: `configured`, `owner` and `owner_since`, `via`, `connection`, `target`, `usable` and, when not, `reason` |
+| POST | `/api/notifications/preview` | `{definition, application_id?, reason?: "review"\|"pause"}`; the exact message a waiting point would send (`via`, `target`, `text`/`subject`/`payload`, `link`), built by the host's own function; 400 with the reason when it cannot be built |
+| POST | `/api/schedules/preview` | `{schedule, definition?, after?}`; the next three times of a schedule being edited, `{times: [{at, local, time_zone}]}`, worked out by the host's rules; 400 with the reason when the schedule is invalid |
+| GET | `/api/runs?application_id={id}` | List recent runs for an application; each row has `trigger` (`{kind: "manual"}` or `{kind: "schedule", scheduled_for}`) |
+| POST | `/api/runs` | `{version:1, application_id, revision, task, inputs, resources?}`; execute the backend's saved snapshot |
 | GET | `/api/runs/{id}` | Persisted status, actual results, metrics, events and reviews |
 | GET | `/api/runs/{id}/events?after={sequence}` | Poll ordered events after a cursor; returns `next_cursor` and status |
 | GET | `/api/runs/{id}/reviews` | List durable review requests and submitted contributions |
 | POST | `/api/runs/{id}/reviews` | `{review_id, output}`; validate and persist a human contribution |
-| POST | `/api/runs/{id}/resume` | `{}`; continue a waiting run after its contribution, or a paused run from its checkpoint |
+| POST | `/api/runs/{id}/resume` | `{}`; continue a waiting, paused, stopped or interrupted run. Uncertain actions are checked first; `409 {error, actions}` names any that still need a decision |
 | POST | `/api/runs/{id}/pause` | `{}`; ask a running run to stop **between steps** and keep a checkpoint |
-| POST | `/api/runs/{id}/cancel` | `{}`; stop active, waiting or paused work |
+| POST | `/api/runs/{id}/cancel` | `{}`; stop active, waiting, paused, stopped or interrupted work. The run is `cancelled` and cannot be continued |
+| GET | `/api/runs/{id}/actions` | The run's external actions: state, check, who decided, and — only while they could be sent again — the arguments |
+| POST | `/api/runs/{id}/actions` | `{action_id, decision: "done"\|"resend"\|"undo", note?}`; decide an uncertain action, as the requesting principal |
+| POST | `/api/runs/{id}/actions/check` | `{action_id}`; ask the service whether an uncertain action happened |
 | POST | `/api/applications/{id}/fixtures/preview` | `{run_id, step_id}`; the recorded input snapshot and reference output of one completed step, redacted and ready to inspect |
 | POST | `/api/applications/{id}/fixtures` | `{run_id, step_id, name, data?}`; save a named fixture from that preview, with `data` the inspected/edited envelope |
 | POST | `/api/applications/{id}/fixtures/author` | `{step_id, name, definition?, inputs?, upstream?, reference?, reference_recorded?, task?}`; write a fixture for a step that has never run, 201 |
@@ -235,9 +243,10 @@ sees anything. That refusal arrives as `/?signin=failed` on the page, and this
 adapter reports it without inventing a reason.
 
 Polling is the event transport for this version; no SSE/WebSocket endpoint is
-claimed. Schedules and event triggers remain metadata, and execution is explicitly
-unsupported by this local host. Provider proposals require explicit user review
-and application before running.
+claimed. Scheduled applications run on a serving host (see "Scheduled
+applications" below); event triggers remain metadata, and execution on an event
+is unsupported by this local host. Provider proposals require explicit user
+review and application before running.
 
 ## Configuration and ownership
 
@@ -342,7 +351,9 @@ Changing document contents is permitted; this is not a document snapshot.
 file tools are requested without an explicit selection. It is not necessary when
 using named resources or the working folder. Source tools are `list_files`, `read_file`, `search_files`
 and `knowledge_search`. All enforce resolved path containment, hidden-file denial
-and `CONCLAVE_SOURCE_EXTENSIONS` (default `.txt,.md,.csv,.html`). A source may
+and `CONCLAVE_SOURCE_EXTENSIONS` (default `.txt,.md,.csv,.html,.pdf,.docx`: PDF and
+Word files are read as their text, with `[Page N]` and heading markers, within
+the `CONCLAVE_DOCUMENT_*` limits — see the README). A source may
 name its own instead, as `"extensions": [".rs", ".toml"]` or `"extensions": "*"`
 for any text file that is not hidden; a code checkout an application changes
 needs this to be readable as code. Built-in knowledge
@@ -369,8 +380,9 @@ subprocesses or trusted extensions; this local host is not an OS sandbox.
 - Provider/model, model timeout, Ollama URL: optional host overrides only, since
   the backend already on this computer is detected; provider/model also have CLI
   flags. These are not yet editable in Studio.
-- Source extension filters, history/member limits: still host policy settings,
-  not yet editable in Studio.
+- Source extension filters, history/member limits, and how many steps of one run
+  may work at once (`MAX_PARALLEL_STEPS`, 1 to 64, default 8): still host policy
+  settings, not yet editable in Studio.
 - Extensions/provider factories and default/catalogue files: trusted host code
   or deployment overrides; not safe to accept as arbitrary application settings.
 - Data/database locations, API token, ports and Studio proxy URLs/timeouts:
@@ -644,12 +656,65 @@ run actually used for that step, which is empty when the host's default ran it �
 nothing is invented to fill that in, and a caller that needs a name asks
 `/api/runtime` for the host's own.
 
+## Steps that run side by side
+
+A step starts as soon as every step it depends on has finished and one of the
+run's slots is free. `run_config.fan_out_limit` ("Steps at once" in Studio) sets
+how many steps work at once; `null` means as many as the host allows, which is
+`CONCLAVE_MAX_PARALLEL_STEPS` (a whole number from 1 to 64, 8 by default;
+`/api/runtime` reports it as `max_parallel_steps`). A limit above the host's is
+held to the host's.
+
+- **The results keep the plan's order.** Outputs join the shared results
+  strictly in plan order, so for the same answers the results go through exactly
+  the changes they go through one step at a time. A step's own input is only the
+  output of the steps it depends on.
+- **`StageFinished`** is recorded when a step ends: `{stage, agent, status}` with
+  `status` `completed`, `failed` or `stopped`. A completed step is `held: true`
+  when it finished before an earlier step and waits for its turn to join the
+  results (its dependents already have it); only then does it carry its
+  `patch`, since `ApplicationStateChanged` carries it once it joins; and
+  `cut_short: "tokens" | "wall_clock_seconds" | "cost_usd"` when a run-wide
+  limit ended its work and it wrote up what it had. A failed or stopped step
+  carries its `reason`. `ApplicationStateChanged` still marks each output
+  joining the results, in plan order.
+- **A checkpoint is saved after every finished step**, held ones included, so a
+  run that is interrupted, paused or stopped never asks a finished step again.
+  Only the newest is kept in the run's record: each holds every output so far,
+  and it is the only one read.
+  A checkpoint must hold every prerequisite of each step in it; checkpoints
+  saved by earlier versions still load.
+- **Pause:** once a pause is seen, no new step starts, the steps working finish,
+  and the run is `paused` with `next_stage` (the first step not started).
+  `PauseRequested {running: [...]}` is recorded when the run sees the pause.
+- **A review** that becomes ready starts nothing after it in plan order, and is
+  asked once nothing is running.
+- **A failure or a stop** in one step does not cancel the steps beside it: they
+  finish and keep their work, and then the run ends with the most serious
+  outcome (failed, then stopped, then a run-wide limit, then paused), naming the
+  first step in plan order that had it. A failed run adds every finished step's
+  output to its saved results.
+- **Run-wide limits are stops.** Once `run_budget.tokens`,
+  `run_budget.wall_clock_seconds` or `run_budget.cost_usd` is reached, no new
+  step starts, and a step already working makes no further model call except
+  one write-up of what it has. Before a further call, a step also weighs it
+  against the token and cost limits, counting every call already under way as
+  large as the largest call so far, and writes up instead of a call that would
+  likely pass the limit. So spend past the limit is, at most, what the calls
+  already under way spend, plus one write-up per working step. If steps were left unstarted, the
+  run is `stopped` with `budget: "<dimension>"` and a reason such as "Stopped:
+  the run reached its token limit (50,000)". `wall_clock_seconds` adds up the
+  time of every step, so two steps working together for 10 seconds count 20.
+
 ## Continuing a run
 
 A run's record carries `resumable`: true when it stopped in a way that can be
-continued — a waiting review, a pause, or a budget stop that recorded a
-checkpoint. The checkpoint itself stays on the host; the flag is what a caller
-needs to offer the choice.
+continued — a waiting review, a pause, or a per-step budget stop that recorded a
+checkpoint. A run stopped by a run-wide limit (`budget` on its
+`ApplicationFinished`) is not resumable: the limit is part of the saved run, and
+`POST /api/runs/<id>/resume` answers that it is fixed for this run. The
+checkpoint itself stays on the host; the flag is what a caller needs to offer
+the choice.
 
 A backend that did not answer in time, or could not be reached, **stops** a run
 rather than failing it: that is a condition of the moment, not a defect in the
@@ -660,17 +725,117 @@ between checks. A backend that failed, reported an error or returned an unreadab
 reply is a failure, and a failure is not continued.
 
 A host taking over its store marks any run left `running` by a process that is
-gone as `interrupted`, with the reason recorded and deliberately without a
-checkpoint: a run cut off mid-flight may have had an external action in it, so it
-is reported rather than offered for replay.
+gone as `interrupted`, with the reason recorded. Every external action it was
+still sending becomes **uncertain** (an `ActionUncertain` event names it): it may
+or may not have happened, so it is never sent again without a check or a person.
 
-`POST /api/runs/<id>/resume` continues from the last stage that completed.
-Completed stages and the budget already spent are restored from the checkpoint,
-so nothing finished is repeated and no spend is forgotten — which also means a
-run stopped on a limit needs that limit raised before resuming is useful. A
-half-finished stage is not restored: agent-internal recovery is unsupported, and
-a call that was interrupted is never replayed. A `failed` run is not resumable at
-all, because a failure is not a budget.
+`POST /api/runs/<id>/resume` continues from the last stage that completed, and a
+stage that had already sent something continues from its last recorded action
+instead of starting over. Completed writes are never sent again. Before claiming
+the run, the host checks each uncertain action with its service where it can
+(found: done; proved absent by a reliable read of an approved call: sent once
+more); anything still uncertain is answered `409 {error, actions}` and waits for
+`POST /api/runs/<id>/actions` — `done` (with an optional note, passed to the
+agent as the person's words) or `resend` (which is the approval for that one
+call). Either can be undone until the run continues. Completed stages and the
+budget already spent are restored, so nothing finished is repeated and no spend
+is forgotten — which also means a run stopped on a limit needs that limit raised
+before resuming is useful. A `failed` or `cancelled` run is not resumable; an
+action it left uncertain is listed as an unknown outcome. Runs recorded before
+the action journal existed cannot be continued after an interruption.
+
+## Telling someone a run waits
+
+A definition may carry `notifications: {waiting: {via, connection, ...}}`:
+`via` is `slack` (with `channel`), `email` (with one `address`) or `webhook`
+(nothing more: the connection's URL), and `connection` is the id of one of the
+owner's connections, granted that service's send operation for this
+application. Unknown keys are refused, as is a field of another channel.
+
+- **One notice per waiting point.** When a run stops with `waiting_for_human`
+  or `paused`, a notice is recorded in the same transaction as that event. The
+  host claims it before sending, so it is sent at most once; a host that
+  stopped during a send records `NotificationUncertain` when the store is next
+  opened and never sends it again. A notice that was never attempted is sent at
+  start-up if the run still waits there. A run that resumes and waits again has
+  a new waiting point.
+- **Sent after the run has stopped**, through `ConnectionStore.invoke` (grants,
+  scopes, pacing and redaction apply), as the notification owner. It never
+  fails or holds up the run. The outcome is an event on the run:
+  `NotificationSent`, `NotificationFailed` (with a short `reason`) or
+  `NotificationUncertain`, each with `waiting_sequence`, `via`, `target`,
+  `connection`, `sent_as`, `step` and `waiting` (`review` or `pause`).
+- **The message** is the application's name, the step that waits (for a pause,
+  the step it stopped before, which the paused event names as `next_stage`)
+  and `{CONCLAVE_STUDIO_URL}/?application=…&run=…`. No task, inputs, outputs,
+  state or credentials. Slack text is escaped, the email is built so a name
+  cannot add headers, and a webhook gets `{type: "run.waiting", reason,
+  application, step, run_id, waiting_since, link}` with `Idempotency-Key:
+  notice-<run>-<event>`.
+- **Limits.** A run that waits again within `CONCLAVE_NOTIFY_RUN_INTERVAL`
+  seconds (600) of its last message is not told again, and an application
+  sends at most `CONCLAVE_NOTIFY_HOURLY_LIMIT` messages an hour (20). What is
+  not sent is a `NotificationFailed` whose reason begins "Not sent:".
+- **The owner** is whoever last saved a change to what runs (a save that only
+  moves cards does not count). A run is told as the owner **when it was
+  created** — whoever last changed the words it quotes — never as whoever owns
+  the notifications later. The status endpoint gives the owner the full reason
+  a message cannot be sent; anyone else sees host-wide reasons, and otherwise
+  "… {owner} can see why", and a webhook connection is named by its id. Adding or changing the setting must name one of
+  your own connections of that service (400 otherwise); a save that leaves it
+  alone is never refused for it, and the status then says why nothing can be
+  sent. A definition run from a file, with no owner recorded, sends as the
+  person who started the run.
+- **Runtime:** `features.notifications` (the host has connections) and
+  `features.studio_url` (a link can be made). `CONCLAVE_STUDIO_URL` must be an
+  http(s) address with no query or fragment; locally `conclave serve` uses its
+  own address when it is unset.
+
+## Scheduled applications
+
+A definition with `start_mode: "schedule"` carries a `schedule` block — `kind`
+(`interval` with `every_minutes` 5–10080, or `daily`/`weekly` with 1–24
+`times` as `HH:MM` and, for weekly, `days`), an IANA `time_zone`, an optional
+local `starts_at`, `catch_up` (`skip` or `latest`) and the `request` each run
+starts with (`task`, `inputs` checked against the input fields, an optional
+named `resources.source`). The block is refused for any other start mode, and
+`start_mode: "schedule"` is refused when saved without it. The same rules are
+enforced by Studio before it sends anything.
+
+`conclave serve` (local and `--hosted`) runs a scheduler for the host, and
+`GET /api/runtime` reports `features.schedules: true` only when one is running.
+When a time comes, the host starts one run of the **latest saved revision** with
+the schedule's request, marked `trigger: {kind: "schedule", scheduled_for}`:
+
+- **Once per time.** The run and the record of its time are written in one
+  transaction, so a restart or a second process on the same store never starts
+  it twice.
+- **No overlap.** If the previous scheduled run is still going (including one
+  waiting for a person, or stopped with an uncertain action), the time is
+  recorded as `skipped`.
+- **Missed times.** Times more than two minutes late — the host was off — are
+  recorded as one `missed` entry with their count and range, and not run. With
+  `catch_up: "latest"`, the most recent one runs instead.
+- **Failed times.** Saved inputs that no longer match the application's fields,
+  or a host with no model backend, record the time as `failed` with the reason;
+  the schedule carries on.
+- **Unattended.** Nobody can approve a write, so writes are refused unless the
+  application has autonomous execution on. Runs act as the schedule's
+  **owner**, under their connections and grants at run time. The owner is
+  whoever last saved a change to what the application runs (a save that only
+  moves cards does not count), so an edit never borrows someone else's
+  accounts. A hosted schedule with no owner waits for `turn_on`.
+- **Owners who have left.** With Google sign-in, a time whose owner the login
+  file no longer admits is recorded as `failed`, and the schedule waits for a
+  current member to `turn_on` it.
+- **The same checks as a person's start.** Each time is checked as a manual
+  start is — tools, backends, host connectors, and the source and its version —
+  acting as the owner. A refusal is a `failed` time with the reason; no run is
+  created.
+
+Changing the timing of a saved schedule reschedules it from the save; changing
+only its request does not. Pausing and resuming are host state, not a new
+revision, and times passed while paused are not reported as missed.
 
 ## A run's events
 

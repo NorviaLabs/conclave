@@ -1,6 +1,10 @@
 """Tests for the run-scoped delegation budget and its recursion guards."""
 
+import asyncio
+
 import pytest
+
+from conclave import Completion
 
 from conftest import make_budget
 
@@ -295,3 +299,57 @@ def test_an_unbounded_dimension_can_never_be_exceeded():
     assert not budget.exceeded(
         "wall_clock_seconds"
     )
+
+
+# --- The in-flight projection (parallel steps, design §15) -------------------------
+
+def test_the_largest_call_follows_what_each_call_settled():
+    budget = make_budget(tokens=100)
+    assert budget.largest_call == {} and budget.calls_in_flight == 0
+    budget.settle("tokens", 30)
+    budget.settle("tokens", 12)
+    assert budget.largest_call["tokens"] == 30
+    assert budget.call_fits("tokens"), "42 spent + 1 x 30 fits in 100"
+    budget.settle("tokens", 30)
+    assert not budget.call_fits("tokens"), "72 + 1 x 30 would pass 100"
+
+
+def test_calls_in_flight_count_against_the_next_one():
+    budget = make_budget(tokens=100)
+    budget.settle("tokens", 20)
+    budget.calls_in_flight = 4
+    assert not budget.call_fits("tokens"), "20 spent + (4 in flight + this one) x 20 = 120 would pass 100"
+    budget.calls_in_flight = 3
+    assert budget.call_fits("tokens"), "20 + 4 x 20 = 100 reaches the limit without passing it"
+
+
+def test_nothing_is_projected_without_a_limit_or_a_measured_call():
+    assert make_budget(tokens=100).call_fits("tokens"), "no call measured yet"
+    unlimited = make_budget()
+    unlimited.settle("tokens", 10_000)
+    assert unlimited.call_fits("tokens")
+
+
+def test_a_call_is_in_flight_until_it_returns_or_raises():
+    from conclave.authority import InProcessAuthority, ModelCall
+
+    budget = make_budget(tokens=100)
+    seen = []
+
+    class Provider:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        async def complete(self, messages):
+            seen.append(budget.calls_in_flight)
+            if self.fail:
+                raise RuntimeError("down")
+            return Completion(text="{}")
+
+    call = ModelCall(run_id="r", agent="a", messages=[{"role": "user", "content": "x"}])
+    asyncio.run(InProcessAuthority(Provider(), budget).complete(call))
+    with pytest.raises(RuntimeError):
+        asyncio.run(InProcessAuthority(Provider(fail=True), budget).complete(call))
+    assert seen == [1, 1] and budget.calls_in_flight == 0
+    budget.settle("tokens", 90)
+    assert asyncio.run(InProcessAuthority(Provider(), budget).call_fits("tokens")) is False

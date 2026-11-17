@@ -33,7 +33,8 @@ assert.deepEqual(await loadConfiguration({href:'data:text/html,x'},async()=>{thr
 // Being told about a run is a host capability, not a client preference.
 const live=(await readFile(new URL('../web/live.js',import.meta.url),'utf8'))
   .replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href))
-  .replace("'/canvas-ui.js'",JSON.stringify(new URL('../web/canvas-ui.js',import.meta.url).href));
+  .replace("'/canvas-ui.js'",JSON.stringify(new URL('../web/canvas-ui.js',import.meta.url).href))
+  .replace("'/parallel-ui.js'",JSON.stringify(new URL('../web/parallel-ui.js',import.meta.url).href));
 const {liveFollowMode,liveStreamPath,liveRunMarkup}=await import('data:text/javascript,'+encodeURIComponent(live));
 assert.equal(liveFollowMode({features:{events:true}}),'push');
 assert.equal(liveFollowMode({features:{events:false}}),'poll');

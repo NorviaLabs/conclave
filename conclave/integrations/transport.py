@@ -10,14 +10,25 @@ from urllib.parse import urlencode, urlsplit
 
 
 class IntegrationError(RuntimeError):
-    """Public error text contains neither credentials nor upstream response bodies."""
+    """Public error text contains neither credentials nor upstream response bodies.
+
+    `sent` says whether the request left this host: False when it certainly did
+    not, True when it did, None when this error cannot say. `rejected` marks a
+    request the service answered with a refusal, which it did not act on.
+    Together they decide whether a failed write may be reported as not having
+    happened (`conclave.actions.classify`).
+    """
+
+    def __init__(self, message='', *, sent=None, rejected=False, status=None):
+        super().__init__(message)
+        self.sent, self.rejected, self.status = sent, rejected, status
 
 
 def endpoint(url, allowed_hosts):
     parsed = urlsplit(url)
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
             or parsed.fragment or parsed.port not in (None, 443) or parsed.hostname not in allowed_hosts):
-        raise IntegrationError('Endpoint is not an approved HTTPS host')
+        raise IntegrationError('Endpoint is not an approved HTTPS host', sent=False)
     return parsed
 
 
@@ -25,9 +36,9 @@ def public_addresses(host):
     try:
         addresses = {item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
     except OSError:
-        raise IntegrationError('Host name could not be resolved') from None
+        raise IntegrationError('Host name could not be resolved', sent=False) from None
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
-        raise IntegrationError('Private or reserved network targets are forbidden')
+        raise IntegrationError('Private or reserved network targets are forbidden', sent=False)
     return sorted(addresses)
 
 
@@ -87,6 +98,9 @@ class Transport:
         active = {}
         def call():
             connection = None
+            # Whether the request left this host. Until `request` returns
+            # nothing was sent; after it, the service may have acted.
+            sent = False
             try:
                 address = public_addresses(parsed.hostname)[0]
                 connection = PinnedHTTPS(parsed.hostname, address, self.timeout)
@@ -109,26 +123,35 @@ class Transport:
                     payload = json.dumps(payload, allow_nan=False).encode()
                     request_headers['Content-Type'] = 'application/json'
                 connection.request(method, path, body=payload, headers=request_headers)
+                sent = True
                 if active.get('aborted'):
-                    raise IntegrationError('Provider request was abandoned')
+                    raise IntegrationError('Provider request was abandoned', sent=True)
                 response = connection.getresponse()
-                # Never follow redirects with authentication headers.
-                if 300 <= response.status < 400:
-                    raise IntegrationError('Provider redirect refused')
-                if response.status == 429:
-                    raise IntegrationError('Provider rate limit reached; retry later')
-                if not 200 <= response.status < 300:
-                    raise IntegrationError(f'Provider request failed (HTTP {response.status}){refusal(response)}')
+                status = response.status
+                # Never follow redirects with authentication headers. A
+                # redirect, a rate limit and any 4xx are answers that the
+                # request was not acted on; a 5xx is not.
+                if 300 <= status < 400:
+                    raise IntegrationError('Provider redirect refused', sent=True, rejected=True, status=status)
+                if status == 429:
+                    raise IntegrationError('Provider rate limit reached; retry later', sent=True, rejected=True, status=status)
+                if not 200 <= status < 300:
+                    raise IntegrationError(f'Provider request failed (HTTP {status}){refusal(response)}',
+                                           sent=True, rejected=status < 500, status=status)
                 data = response.read(self.max_bytes + 1)
                 if len(data) > self.max_bytes:
-                    raise IntegrationError('Provider response exceeds the configured size limit')
+                    raise IntegrationError('Provider response exceeds the configured size limit', sent=True, status=status)
                 if raw:
                     return data
                 return json.loads(data) if data else {}
-            except IntegrationError:
+            except IntegrationError as error:
+                # A refusal raised before the request went out (an address
+                # that did not resolve, say) says nothing left this host.
+                if not sent and error.sent is None:
+                    error.sent = False
                 raise
             except Exception:
-                raise IntegrationError('Provider request could not be completed') from None
+                raise IntegrationError('Provider request could not be completed', sent=sent) from None
             finally:
                 if connection:
                     connection.close()
@@ -136,7 +159,8 @@ class Transport:
             return await asyncio.wait_for(asyncio.to_thread(call), self.timeout + 2)
         except TimeoutError:
             abort(active)
-            raise IntegrationError('Provider request timed out') from None
+            # The worker thread may still deliver the request after this.
+            raise IntegrationError('Provider request timed out', sent=True) from None
         except asyncio.CancelledError:
             # The caller gave up (a paginated read at its time limit): so does
             # the request.

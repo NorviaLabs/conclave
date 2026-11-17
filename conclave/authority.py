@@ -20,6 +20,16 @@ from typing import (
     Protocol,
 )
 
+from datetime import datetime, timezone
+
+from .actions import (
+    ActionContext,
+    ActionLog,
+    ActionStart,
+    CheckResult,
+    Resolution,
+    settled_observation,
+)
 from .approval import (
     Approval,
     ApprovalRequest,
@@ -128,6 +138,7 @@ class InProcessAuthority:
         approver: Approver | None = None,
         *,
         lock: Any = None,
+        log: ActionLog | None = None,
     ):
         self.provider = provider
         self.budget = budget
@@ -135,6 +146,10 @@ class InProcessAuthority:
         # Concurrent agents may ask at the same time; one lock keeps an
         # approver from being asked twice at once.
         self.lock = lock
+        # Where external actions are recorded before they are sent. Without
+        # one, a write runs exactly as it always has.
+        self.log = log
+        self.started: dict[str, str] = {}
 
     async def complete(
         self,
@@ -159,9 +174,21 @@ class InProcessAuthority:
 
             provider = chosen
 
-        return await provider.complete(
-            call.messages
-        )
+        # Past a run-wide limit only write-ups are answered, so the limit holds
+        # for a loop that does not stop at it, wherever that loop runs.
+        self.budget.admit_call()
+
+        # Under way until it returns or raises, so the next call can be
+        # weighed against the ones already spending.
+        self.budget.calls_in_flight += 1
+
+        try:
+            return await provider.complete(
+                call.messages
+            )
+
+        finally:
+            self.budget.calls_in_flight -= 1
 
     async def approve(
         self,
@@ -228,6 +255,14 @@ class InProcessAuthority:
             dimension
         )
 
+    async def call_fits(
+        self,
+        dimension: str,
+    ) -> bool:
+        return self.budget.call_fits(
+            dimension
+        )
+
     async def numbers(
         self,
         dimension: str,
@@ -246,3 +281,141 @@ class InProcessAuthority:
         self,
     ) -> int | None:
         return self.budget.max_depth
+
+    # -- External actions -------------------------------------------------
+
+    async def records_actions(
+        self,
+    ) -> bool:
+        return self.log is not None
+
+    async def begin_action(
+        self,
+        start: ActionStart,
+    ) -> bool:
+        """Record an action before it is sent. False: this run keeps no log."""
+
+        if self.log is None:
+            return False
+
+        self.log.begin(start)
+        self.started[start.action_id] = datetime.now(timezone.utc).isoformat()
+
+        return True
+
+    async def finish_action(
+        self,
+        action_id: str,
+        state: str,
+        frames: list[dict[str, Any]],
+        reason: str = "",
+    ) -> None:
+        if self.log is not None:
+            self.log.finish(action_id, state, frames=frames, reason=reason)
+
+    async def check_action(
+        self,
+        action_id: str,
+        tool: Tool,
+        arguments: dict[str, Any],
+        approval: Approval | str,
+    ) -> Resolution:
+        """Ask the service whether an uncertain action happened, and settle what it can.
+
+        Found: it happened, and is not sent again. Absent, by a read that can
+        be trusted, of a call that was approved: it is sent once more. Anything
+        else waits for a person.
+        """
+
+        stop = Resolution("stop", reason=f"The outcome of {tool.name} is uncertain")
+
+        if self.log is None:
+            return stop
+
+        result = await run_check(tool, action_id, arguments, self.started.get(action_id))
+        self.log.checked(action_id, result)
+
+        return decide(self.log, action_id, result, approval, stop)
+
+    async def begin_resend(
+        self,
+        action_id: str,
+    ) -> None:
+        if self.log is not None:
+            self.log.resend(action_id)
+
+    async def resolve_action(
+        self,
+        action_id: str,
+    ) -> Resolution:
+        """What an agent resuming after this action should do with it."""
+
+        resolution = self.log.resolution(action_id) if self.log is not None else None
+
+        return resolution_for(resolution)
+
+
+async def run_check(
+    tool: Tool | None,
+    action_id: str,
+    arguments: dict[str, Any],
+    started_at: str | None,
+) -> CheckResult:
+    """Run a tool's check, never raising: a check that fails could not tell."""
+
+    if tool is None:
+        return CheckResult("unavailable", "This host no longer offers the tool, so it cannot be checked")
+
+    if tool.check is None:
+        return CheckResult("unavailable", tool.check_unavailable or f"{tool.name} cannot be checked automatically")
+
+    context = ActionContext(action_id=action_id, arguments=dict(arguments),
+                            started_at=started_at or datetime.now(timezone.utc).isoformat())
+
+    try:
+        result = await tool.check.run(dict(arguments), context)
+    except Exception:
+        return CheckResult("inconclusive", "The check could not complete")
+
+    if not isinstance(result, CheckResult):
+        return CheckResult("inconclusive", "The check gave no usable answer")
+
+    return result
+
+
+def decide(
+    log: ActionLog,
+    action_id: str,
+    result: CheckResult,
+    approval: Approval | str,
+    stop: Resolution,
+) -> Resolution:
+    """The settlement rules: what a check's answer decides on its own."""
+
+    if result.result == "found":
+        log.settle(action_id, "done", by="check", kind="check")
+
+        return Resolution("done", observation=settled_observation(log.resolution(action_id) or {}))
+
+    if result.result == "absent" and result.exact and str(approval) == str(Approval.APPROVED):
+        log.settle(action_id, "resend", by="check", kind="check")
+
+        return Resolution("resend")
+
+    return stop
+
+
+def resolution_for(
+    resolution: dict[str, Any] | None,
+) -> Resolution:
+    if resolution is None or resolution.get("state") in (None, "sending", "uncertain"):
+        return Resolution("stop", reason="Settle this action before continuing")
+
+    if resolution["state"] == "resend":
+        return Resolution("resend", tool=str(resolution.get("tool") or ""), arguments=resolution.get("arguments"))
+
+    if resolution["state"] == "done":
+        return Resolution("done", observation=settled_observation(resolution))
+
+    # Completed or failed: already recorded, and never sent again.
+    return Resolution("done", observation="This action already finished earlier in this run. Do not repeat it.")

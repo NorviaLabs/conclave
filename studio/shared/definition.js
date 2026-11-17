@@ -11,6 +11,44 @@ function str(value,label,max=4000,required=true){if(typeof value!=='string'||val
 function identifier(value,label){str(value,label,64);if(!/^[a-z][a-z0-9_-]*$/.test(value)||reserved.has(value))fail(`${label} must start with a lowercase letter and contain letters, digits, underscores or hyphens.`)}
 function array(value,label,max=24){if(!Array.isArray(value)||value.length<1||value.length>max)fail(`${label} needs 1–${max} entries.`)}
 function unique(items,field,label){const values=items.map(x=>x[field]);if(new Set(values).size!==values.length)fail(`${label} must be unique.`)}
+// When a scheduled application runs, and with what. The host validates the
+// same block with the same rules and words (conclave/application/schedules.py);
+// tests/data/schedule_cases.json holds both sides to that.
+const scheduleDays=['mon','tue','wed','thu','fri','sat','sun'];
+const scheduleSettings={interval:['kind','every_minutes','time_zone','starts_at','catch_up','request'],daily:['kind','times','time_zone','starts_at','catch_up','request'],weekly:['kind','times','days','time_zone','starts_at','catch_up','request']};
+function knownZone(name){try{const zones=typeof Intl.supportedValuesOf==='function'?Intl.supportedValuesOf('timeZone'):null;if(zones&&(zones.includes(name)||name==='UTC'))return true;new Intl.DateTimeFormat('en',{timeZone:name});return !zones;}catch{return false;}}
+// Where one message goes when a run waits for someone. The host checks the same
+// block with the same rules and words (conclave/application/notices.py);
+// tests/data/notification_cases.json holds both sides to that.
+const notifyChannels={slack:'channel',email:'address',webhook:null};
+export function validateNotifications(value){
+ if(!value||typeof value!=='object'||Array.isArray(value)||!value.waiting||typeof value.waiting!=='object'||Array.isArray(value.waiting))fail('Say where to send the message when a run waits.');
+ const extra=Object.keys(value).filter(key=>key!=='waiting').sort();if(extra.length)fail(`Unsupported notification setting: ${extra[0]}.`);
+ const waiting=value.waiting;if(!Object.hasOwn(notifyChannels,waiting.via))fail('Choose Slack, Email or Webhook.');
+ const needs=notifyChannels[waiting.via],unsupported=Object.keys(waiting).filter(key=>!['via','connection',needs].includes(key)).sort();if(unsupported.length)fail(`Unsupported notification setting: ${unsupported[0]}.`);
+ if(typeof waiting.connection!=='string'||!/^[a-z][a-z0-9_]{0,31}$/.test(waiting.connection))fail('Choose one of your connections.');
+ if(waiting.via==='slack'&&(typeof waiting.channel!=='string'||!/^[^\s\x00-\x1f\x7f]{1,80}$/.test(waiting.channel)))fail('Name the Slack channel, such as #reviews.');
+ const bad='\\s@<>,;:"()\\[\\]\\\\\\x00-\\x1f\\x7f',address=new RegExp(`^[^${bad}]+@[^${bad}]+\\.[^${bad}]+$`);
+ if(waiting.via==='email'&&(typeof waiting.address!=='string'||waiting.address.length>254||!address.test(waiting.address)))fail('Give one email address.');
+ return value;
+}
+export function validateSchedule(schedule,definition){
+ if(!schedule||typeof schedule!=='object'||Array.isArray(schedule)||!['interval','daily','weekly'].includes(schedule.kind))fail('Choose interval, daily or weekly.');
+ const unsupported=Object.keys(schedule).filter(key=>!scheduleSettings[schedule.kind].includes(key)).sort();if(unsupported.length)fail(`Unsupported schedule setting: ${unsupported[0]}.`);
+ if(schedule.kind==='interval'){const every=schedule.every_minutes;if(!Number.isInteger(every)||every<5)fail('Run at most every 5 minutes.');if(every>10080)fail('Run at least once a week.');}
+ else{const times=schedule.times;if(!Array.isArray(times)||times.length<1||times.length>24||times.some(item=>typeof item!=='string'||!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(item)))fail('Give 1 to 24 times as HH:MM.');if(new Set(times).size!==times.length)fail('Use each time once.');}
+ if(schedule.kind==='weekly'){const days=schedule.days;if(!Array.isArray(days)||days.length<1||days.length>7||days.some(item=>!scheduleDays.includes(item)))fail(`Choose the days: ${scheduleDays.join(', ')}.`);if(new Set(days).size!==days.length)fail('Choose each day once.');}
+ if(typeof schedule.time_zone!=='string'||!schedule.time_zone||schedule.time_zone.length>64||!knownZone(schedule.time_zone))fail('Choose a time zone this host knows, such as Europe/London.');
+ if(schedule.starts_at!==undefined){const value=schedule.starts_at,parsed=typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)?new Date(value+':00Z'):null;if(!parsed||Number.isNaN(parsed.getTime())||parsed.toISOString().slice(0,16)!==value)fail('Give the start as a local date and time, YYYY-MM-DDTHH:MM.');}
+ if(schedule.catch_up!==undefined&&!['skip','latest'].includes(schedule.catch_up))fail('Choose skip or latest for missed times.');
+ const request=schedule.request;if(!request||typeof request!=='object'||Array.isArray(request))fail('Say what each scheduled run should do.');
+ const extra=Object.keys(request).filter(key=>!['task','inputs','resources'].includes(key)).sort();if(extra.length)fail(`Unsupported scheduled request setting: ${extra[0]}.`);
+ if(typeof request.task!=='string'||!request.task.trim()||request.task.length>20000)fail('Say what each scheduled run should do.');
+ const inputs=request.inputs??{};if(!inputs||typeof inputs!=='object'||Array.isArray(inputs)||Object.keys(inputs).some(key=>!(definition.inputs||[]).some(field=>field.id===key)))fail('Request values must contain only declared fields.');
+ validateRequestInputs(definition,inputs);
+ if(request.resources!==undefined){const r=request.resources;if(!r||typeof r!=='object'||Array.isArray(r)||Object.keys(r).join()!=='source'||typeof r.source!=='string'||!r.source||r.source.length>64)fail('Scheduled runs use a named source resource, not a path.');}
+ return schedule;
+}
 export function validateDefinition(d){
  if(d?.autonomous_execution!==undefined&&typeof d.autonomous_execution!=='boolean')fail('Autonomous execution must be a boolean.');
  if(!d||typeof d!=='object'||Array.isArray(d)||d.version!==1)fail('Unsupported application definition.');
@@ -31,6 +69,8 @@ export function validateDefinition(d){
  if(d.canvas!==undefined){if(!d.canvas||typeof d.canvas!=='object'||!d.canvas.positions||typeof d.canvas.positions!=='object'||Array.isArray(d.canvas.positions))fail('Use valid canvas positions.');for(const [id,pos] of Object.entries(d.canvas.positions)){if(!d.workflow.some(w=>w.id===id)||!pos||!Number.isFinite(pos.x)||!Number.isFinite(pos.y)||pos.x<0||pos.y<0||pos.x>10000||pos.y>10000)fail('Place steps within the canvas.');}}
  if(d.canvas!==undefined&&d.canvas.groups!==undefined){const groups=d.canvas.groups;if(!Array.isArray(groups)||groups.length>20)fail('Use up to 20 canvas groups.');const ids=new Set();for(const group of groups){if(!group||typeof group.id!=='string'||!/^[a-z][a-z0-9_-]{0,63}$/.test(group.id)||ids.has(group.id))fail('Use a valid group identifier.');ids.add(group.id);if(typeof group.name!=='string'||!group.name.trim()||group.name.length>100||(group.collapsed!==undefined&&typeof group.collapsed!=='boolean'))fail('Name each group.');}for(const step of d.workflow)if(step.group!==undefined&&!ids.has(step.group))fail('A step can only belong to a group the plan declares.');}
  if(d.start_mode!==undefined&&!['manual','event','schedule'].includes(d.start_mode))fail('Choose a supported start method.');
+ if(d.notifications!==undefined)validateNotifications(d.notifications);
+ if(d.schedule!==undefined){if(d.start_mode!=='schedule')fail("A schedule needs the start method 'On a schedule'.");validateSchedule(d.schedule,d);}
  if(d.integrations!==undefined){if(!Array.isArray(d.integrations)||d.integrations.length>40)fail('Choose up to 40 connectors.');unique(d.integrations,'connector','Connector selections');for(const item of d.integrations){if(!item||Object.keys(item).some(k=>!['connector','purpose','scope','mode'].includes(k)))fail('Connector setup accepts choices only, not account credentials.');const connector=connectorDescriptors.find(c=>c.id===item.connector);identifier(item.connector,'Connector identifier');str(item.purpose,'Connector purpose',1000,false);str(item.scope,'Connector source or destination',1000,false);const modes=connector?.default_mode==='model'?['model']:connector?.default_mode==='read'?['read']:['read','draft','approved','model'];if(!modes.includes(item.mode))fail('Choose supported actions for this connector.');}}
  return d;
 }

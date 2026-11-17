@@ -33,6 +33,27 @@ DIMENSION_LABELS = {
 }
 
 
+# The limits that bound a whole run, measured as it goes.
+RUN_WIDE_LIMITS = (
+    "tokens",
+    "wall_clock_seconds",
+    "cost_usd",
+)
+
+
+class LimitReached(RuntimeError):
+    """A model call refused because a run-wide limit has been reached.
+
+    A loop that stops at the limit never sees this: it writes up instead, and
+    its write-ups fit the allowance. It is what a loop that ignores the limit
+    gets, wherever it runs.
+    """
+
+    def __init__(self, dimension: str):
+        super().__init__(f"The run reached its {dimension} limit")
+        self.dimension = dimension
+
+
 @dataclass
 class RunBudget:
     max_delegations: int | None
@@ -59,6 +80,26 @@ class RunBudget:
     ] = field(
         default_factory=dict
     )
+
+    # The most one call has spent, per measured dimension, and how many model
+    # calls are under way. Kept for this process only: they say whether the
+    # next call is likely to pass a limit, not what was spent.
+    largest_call: dict[
+        str,
+        float,
+    ] = field(
+        default_factory=dict
+    )
+
+    calls_in_flight: int = 0
+
+    # How many model calls the whole run may still make once a run-wide limit
+    # has been reached: its write-ups. None leaves calls unrefused, as a core
+    # caller that brings its own loop has always had it; the application
+    # runner sets it, so a loop that ignores the limit is stopped anyway.
+    post_limit_calls: int | None = None
+
+    post_limit_used: int = 0
 
     @property
     def remaining(
@@ -228,12 +269,67 @@ class RunBudget:
             + amount
         )
 
+        self.largest_call[dimension] = max(
+            self.largest_call.get(dimension, 0),
+            amount,
+        )
+
         if self.exceeded(dimension):
             return self.refusal(
                 dimension
             )
 
         return None
+
+    def admit_call(
+        self,
+    ) -> None:
+        """Let a model call through, or refuse it past the limit and its allowance."""
+
+        reached = next(
+            (
+                dimension
+                for dimension in RUN_WIDE_LIMITS
+                if self.exceeded(dimension)
+            ),
+            None,
+        )
+
+        if reached is None or self.post_limit_calls is None:
+            return
+
+        if self.post_limit_used >= self.post_limit_calls:
+            raise LimitReached(reached)
+
+        self.post_limit_used += 1
+
+    def call_fits(
+        self,
+        dimension: str,
+    ) -> bool:
+        """Whether one more call is likely to stay within the limit.
+
+        Each call under way, and this one, is taken to spend as much as the
+        largest call so far: with several steps of a run working at once, a
+        limit that only counted what was spent would let every one of them
+        start a call just below it.
+        """
+
+        limit = self.limit(
+            dimension
+        )
+
+        largest = self.largest_call.get(
+            dimension
+        )
+
+        return (
+            limit is None
+            or not largest
+            or self.spent_on(dimension)
+            + (self.calls_in_flight + 1) * largest
+            <= limit
+        )
 
     def exceeded(
         self,

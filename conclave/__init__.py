@@ -30,6 +30,18 @@ pulls a network dependency or shells out to anything.
         print(event)
 """
 
+from .actions import (
+    ActionContext,
+    ActionLog,
+    ActionNotPerformed,
+    ActionStart,
+    ActionStopped,
+    Check,
+    CheckResult,
+    Resolution,
+    classify,
+    current_action,
+)
 from .approval import (
     Approval,
     ApprovalRequest,
@@ -114,6 +126,16 @@ from .store import (
 
 __all__ = [
     "ToolRefused",
+    "ActionContext",
+    "ActionLog",
+    "ActionNotPerformed",
+    "ActionStart",
+    "ActionStopped",
+    "Check",
+    "CheckResult",
+    "Resolution",
+    "classify",
+    "current_action",
     "AgentFinished",
     "AgentResult",
     "AgentSpec",

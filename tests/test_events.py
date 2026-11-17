@@ -68,6 +68,10 @@ FIELDS = {
         "output_chars",
         "truncated",
         "ok",
+        # Which recorded action the call was, and whether it was sent again
+        # after a check or a person said to (resumable external writes).
+        "action_id",
+        "resent",
     ],
     "ToolDenied": [
         "run_id",

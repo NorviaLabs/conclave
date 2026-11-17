@@ -14,7 +14,7 @@ const load = async (path, replacements = []) => {
 };
 const shared = url('../shared/definition.js'), catalogue = url('../shared/catalogue.js');
 const activityUrl = await load('../web/run-activity.js', [['/canvas-ui.js', url('../web/canvas-ui.js')]]);
-const runCanvasUrl = await load('../web/run-canvas.js', [['/definition.js', shared], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', activityUrl]]);
+const runCanvasUrl = await load('../web/run-canvas.js', [['/parallel-ui.js', url('../web/parallel-ui.js')], ['/definition.js', shared], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', activityUrl]]);
 const planUrl = await load('../web/plan.js', [['/definition.js', shared]]);
 const workbenchUrl = await load('../web/workbench-ui.js', [['/plan.js', planUrl], ['/catalogue.js', catalogue], ['/definition.js', shared], ['/run-canvas.js', runCanvasUrl], ['/canvas-ui.js', url('../web/canvas-ui.js')], ['/run-activity.js', activityUrl]]);
 const {runActivities, activityDockMarkup} = await import(activityUrl);

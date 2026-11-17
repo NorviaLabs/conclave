@@ -106,7 +106,7 @@ def test_a_scratchpad_does_not_cross():
     payload = event_payload(event)
 
     assert "half-formed thought" not in repr(payload)
-    assert "private" not in payload["result"] and set(payload["result"]) == {"content", "data", "nested"}
+    assert "private" not in payload["result"] and set(payload["result"]) == {"content", "data", "nested", "exhausted_by"}
 
     rebuilt = rebuild_event(payload, CONFIGURED)
 
@@ -278,7 +278,7 @@ def test_a_whole_application_runs_with_its_loop_in_a_sandbox(tmp_path):
     # The durable record drops the agent's steps and replies, wherever the loop
     # ran; the rest of the run is the same.
     assert [event["type"] for event in events] == ["ApplicationStarted", "StageStarted", "RunStarted", "AgentStarted",
-                                                  "AgentFinished", "RunFinished", "ApplicationStateChanged",
+                                                  "AgentFinished", "RunFinished", "StageFinished", "ApplicationStateChanged",
                                                   "ApplicationFinished"]
     assert events[-1]["status"] == "completed" and events[-1]["state"]["brief"] == "Draft"
 

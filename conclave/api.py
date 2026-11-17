@@ -253,7 +253,8 @@ class ApplicationAPI:
         try:
             return await self._dispatch(method, target, value, principal, streaming)
         except Conflict as error:
-            return 409, {"error": str(error)}
+            # A run that cannot continue yet says which actions still need a decision.
+            return 409, {"error": str(error), **({"actions": error.actions} if hasattr(error, "actions") else {})}
         except KeyError:
             return 404, {"error": "Resource not found"}
         except ValueError as error:
@@ -263,6 +264,185 @@ class ApplicationAPI:
         except Exception:
             # Backend exceptions may contain credentials; never expose them.
             return 503, {"error": "The Conclave service is unavailable"}
+
+    async def start_schedules(self, **options):
+        """Run this host's schedules from now on (`conclave serve`, or a hosted tenant)."""
+        self.begin_schedules(**options)
+
+    def begin_schedules(self, **options):
+        """As `start_schedules`, from code already running in the event loop."""
+        from .application.scheduler import ScheduleService
+        if self.host.schedules is None:
+            self.host.schedules = ScheduleService(self.host, self.workspace, **options)
+            self.host.schedules.start()
+            # A serving host also sends any "waiting for you" message that was
+            # due when the last host stopped and never attempted.
+            self.host.spawn(self.host.notifier.deliver_all())
+
+    async def stop_schedules(self):
+        service, self.host.schedules = self.host.schedules, None
+        if service is not None:
+            await service.stop()
+
+    async def schedule_command(self, method, application_id, value, principal):
+        """A saved application's schedule: its status, or the owner's pause, resume or turn on.
+
+        None of these saves the application: a paused schedule is the same
+        application, not a new version of it.
+        """
+        from datetime import datetime, timezone
+        saved = self.workspace.get(application_id)
+        schedules = self.host.repository.schedules
+        if method == "GET":
+            return 200, schedules.status(application_id)
+        if method != "POST":
+            return 405, {"error": "Method not allowed"}
+        self.fields(value, {"action"})
+        action, block = value["action"], saved["definition"].get("schedule")
+        if action not in {"pause", "resume", "turn_on"}:
+            raise ValueError("Choose pause, resume or turn_on")
+        if block is None or saved["definition"].get("start_mode") != "schedule":
+            raise Conflict("This application does not start on a schedule")
+        by, now = (principal or self.host.principal).name, datetime.now(timezone.utc)
+        status = (schedules.pause(application_id, by=by) if action == "pause"
+                  else schedules.resume(application_id, block, by=by, now=now) if action == "resume"
+                  else schedules.turn_on(application_id, block, by=by, now=now))
+        if self.host.schedules is not None:
+            self.host.schedules.wake()
+        return 200, status
+
+    @staticmethod
+    def preview_schedule(value):
+        """The next three times of a schedule being edited, worked out by the
+        host's own rules, so Studio never computes a clock change itself."""
+        from datetime import datetime, timezone
+        from .application.schedules import format_local, next_time, validate_schedule
+        if not isinstance(value, dict) or not {"schedule"} <= set(value) <= {"schedule", "definition", "after"}:
+            raise ValueError("Use the supported request fields")
+        definition = value.get("definition") or {"inputs": []}
+        if not isinstance(definition, dict):
+            raise ValueError("Provide the application definition")
+        schedule = validate_schedule(value["schedule"], definition)
+        after = datetime.fromisoformat(value["after"]) if isinstance(value.get("after"), str) else datetime.now(timezone.utc)
+        if after.tzinfo is None:
+            raise ValueError("Give the time to preview from with its offset")
+        times, instant = [], after
+        for _ in range(3):
+            instant = next_time(schedule, instant, after)
+            times.append({"at": instant.isoformat(), "local": format_local(instant, schedule["time_zone"]),
+                          "time_zone": schedule["time_zone"]})
+        return {"times": times}
+
+    def saved(self, application, principal, *, previous=None):
+        """A saved application's schedule, brought up to date at once.
+
+        The person who saves a scheduled application is recorded as its
+        schedule's owner when it has none: its runs will act as them. Anyone
+        who saves a change to what runs (anything but where the cards sit)
+        becomes the owner, so editing someone's schedule never borrows their
+        accounts. A running scheduler is woken so the next time is worked out
+        straight away.
+        """
+        from datetime import datetime, timezone
+        definition = application["definition"]
+        block = definition.get("schedule") if definition.get("start_mode") == "schedule" else None
+        schedules = self.host.repository.schedules
+        if block is not None or application["id"] in schedules.applications():
+            changed = previous is None or without_layout(previous) != without_layout(definition)
+            schedules.reconcile(application["id"], block, owner=(principal or self.host.principal).name,
+                                now=datetime.now(timezone.utc), take_over=changed)
+        if self.host.schedules is not None:
+            self.host.schedules.wake()
+        # Whose account sends "this run is waiting for you": the same rule as a
+        # schedule's owner, for the same reason — the message quotes names
+        # anyone here can edit, so it is never sent from someone else's account.
+        owners = self.host.repository.notification_owners
+        if (definition.get("notifications") or {}).get("waiting"):
+            owners.record(application["id"], (principal or self.host.principal).name,
+                          take_over=previous is None or without_layout(previous) != without_layout(definition))
+        else:
+            owners.forget(application["id"])
+        return application
+
+    def check_notifications(self, definition, previous, principal):
+        """Choosing where messages go is choosing whose account sends them:
+        only your own connection, of the service you chose. A save that leaves
+        the setting as it was is never refused for it."""
+        from .application.notices import CHANNELS
+        store = getattr(self.host, "connections", None)
+        waiting = (definition.get("notifications") or {}).get("waiting") if isinstance(definition, dict) else None
+        before = ((previous or {}).get("notifications") or {}).get("waiting")
+        if store is None or not isinstance(waiting, dict) or waiting == before or waiting.get("via") not in CHANNELS:
+            return
+        service, _, label, _ = CHANNELS[waiting["via"]]
+        by = (principal or self.host.principal).name
+        try:
+            record = store._read(waiting.get("connection"), self.host.principal.tenant, by)
+        except Exception:
+            record = None
+        if record is None or record.get("integration") != service:
+            raise ValueError(f"Choose one of your own {label} connections")
+
+    def notification_status(self, application_id, principal=None):
+        """Whether "this run is waiting for you" can be sent now, as whom, and if not, why."""
+        from .application.notifier import host_problem, problem, target_label
+        saved = self.workspace.get(application_id)
+        waiting = (saved["definition"].get("notifications") or {}).get("waiting")
+        recorded = self.host.repository.notification_owners.owner(application_id) or {}
+        if not waiting:
+            return {"configured": False, "owner": None, "owner_since": None, "via": None, "connection": None, "target": None,
+                    "usable": False, "reason": ""}
+        owner = recorded.get("owner")
+        reason = problem(self.host, waiting, owner, application_id)
+        # The owner's connection is the owner's: its name, and what it is
+        # granted, are theirs to see. Everyone else is told who can see why.
+        mine = (principal or self.host.principal).name == owner
+        if reason and not mine and not host_problem(self.host, owner):
+            reason = f"Notifications cannot be sent as set up; {owner} can see why"
+        target = target_label(self.host, waiting, owner, named=mine and getattr(self.host, "connections", None) is not None)
+        return {"configured": True, "owner": owner, "owner_since": recorded.get("owner_since"), "via": waiting["via"],
+                "connection": waiting["connection"], "target": target, "usable": not reason, "reason": reason}
+
+    def preview_notification(self, value):
+        """The message a waiting point would send, built by the host's own
+        function, so what Studio shows is what goes out."""
+        from datetime import datetime, timezone
+        from .application.notices import PREVIEW_RUN, validate_notifications, waiting_message
+        if not isinstance(value, dict) or not {"definition"} <= set(value) <= {"definition", "application_id", "reason"}:
+            raise ValueError("Use the supported request fields")
+        definition = value["definition"]
+        if not isinstance(definition, dict) or not isinstance(definition.get("workflow"), list):
+            raise ValueError("Provide the application definition")
+        validate_notifications(definition.get("notifications"))
+        reason = value.get("reason", "review")
+        if reason not in {"review", "pause"}:
+            raise ValueError("Choose review or pause")
+        members = {item.get("id"): item for item in definition.get("agents", []) if isinstance(item, dict)}
+        steps = [item for item in definition["workflow"] if isinstance(item, dict) and "id" in item]
+        if reason == "review":
+            human = next((item for item in steps if members.get(item.get("agent"), {}).get("kind") == "human"), None)
+            event = {"status": "waiting_for_human", "stage": (human or {}).get("id")}
+        else:
+            event = {"status": "paused", "next_stage": steps[0]["id"] if steps else None}
+        application_id = value.get("application_id") or "new"
+        if not isinstance(application_id, str) or len(application_id) > 100:
+            raise ValueError("Name the application by its id")
+        waiting_since = datetime.now(timezone.utc).isoformat()
+        message = waiting_message(definition, application_id=application_id, run_id=PREVIEW_RUN,
+                                  event={"type": "ApplicationFinished", "sequence": 1, "timestamp": waiting_since, **event},
+                                  studio_url=self.host.studio_url)
+        body = {"via": message.via, "target": message.target, "link": message.link, "reason": message.reason,
+                "step": message.step, "waiting_since": waiting_since}
+        if message.via == "slack":
+            body["text"] = message.arguments["text"]
+        elif message.via == "email":
+            import base64, email, email.policy
+            raw = message.arguments["raw"]
+            mail = email.message_from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), policy=email.policy.default)
+            body["subject"], body["text"] = str(mail["Subject"]), mail.get_content().strip()
+        else:
+            body["payload"] = message.arguments["payload"]
+        return body
 
     @staticmethod
     def fields(value, required):
@@ -425,16 +605,30 @@ class ApplicationAPI:
                 return 200, {"applications": self.workspace.applications()}
             if method == "POST":
                 self.fields(value, {"definition"})
-                return 201, self.workspace.save(value["definition"])
+                self.check_notifications(value["definition"], None, principal)
+                return 201, self.saved(self.workspace.save(value["definition"]), principal)
+        if path == "/api/schedules/preview" and method == "POST":
+            return 200, self.preview_schedule(value)
+        if path == "/api/notifications/preview" and method == "POST":
+            return 200, self.preview_notification(value)
+        if len(parts) == 4 and parts[1] == "applications" and parts[3] == "notifications" and method == "GET":
+            return 200, self.notification_status(parts[2], principal)
+        if len(parts) == 4 and parts[1] == "applications" and parts[3] == "schedule":
+            return await self.schedule_command(method, parts[2], value, principal)
         if len(parts) == 3 and parts[1] == "applications":
             if method == "GET":
                 return 200, self.workspace.get(parts[2])
             if method == "PUT":
                 self.fields(value, {"definition", "revision"})
-                return 200, self.workspace.save(value["definition"], identifier=parts[2], revision=value["revision"])
+                previous = self.workspace.get(parts[2])["definition"]
+                self.check_notifications(value["definition"], previous, principal)
+                return 200, self.saved(self.workspace.save(value["definition"], identifier=parts[2], revision=value["revision"]),
+                                       principal, previous=previous)
             if method == "DELETE":
                 self.fields(value, {"revision"})
                 self.workspace.delete(parts[2], value["revision"])
+                self.host.repository.schedules.forget(parts[2])
+                self.host.repository.notification_owners.forget(parts[2])
                 return 204, None
         if path == "/api/members":
             if method == "GET":
@@ -484,6 +678,19 @@ class ApplicationAPI:
             await self.host.handle('get', {'run_id': parts[2]}, principal=principal)
             owner = (principal or self.host.principal).name
             return 200, self.host.tool_approvals.get(parts[2], parts[4], owner)
+        if len(parts) in {4, 5} and parts[1] == "runs" and parts[3] == "actions":
+            # A run's external actions: what was in flight, checks, and a
+            # person's decision — always as the principal asking.
+            run_id = parts[2]
+            if len(parts) == 4 and method == "GET":
+                return await self.host.handle("actions", {"run_id": run_id}, principal=principal)
+            if len(parts) == 4 and method == "POST":
+                if not isinstance(value, dict) or not {"action_id", "decision"} <= set(value) <= {"action_id", "decision", "note"}:
+                    raise ValueError("Use the supported request fields")
+                return await self.host.handle("settle", {**value, "run_id": run_id}, principal=principal)
+            if len(parts) == 5 and parts[4] == "check" and method == "POST":
+                self.fields(value, {"action_id"})
+                return await self.host.handle("check", {**value, "run_id": run_id}, principal=principal)
         if len(parts) in {3, 4} and parts[1] == "runs":
             run_id = parts[2]
             if len(parts) == 4 and parts[3] == 'tool-approvals':
@@ -515,6 +722,11 @@ class ApplicationAPI:
         return 404, {"error": "Endpoint not found"}
 
 
+def without_layout(definition):
+    """A definition without where its cards sit: what decides what runs."""
+    return {key: value for key, value in definition.items() if key != "canvas"}
+
+
 def configured_api(*, workspace=None, principal=None):
     host = configured_host(workspace=workspace, principal=principal)
     defaults, catalogue = (configured_data(name) for name in ("defaults", "catalogue"))
@@ -533,22 +745,75 @@ class TenantAPIs:
     because several people may act inside one tenant.
     """
 
-    def __init__(self, workspace=None, *, factory=None):
+    def __init__(self, workspace=None, *, factory=None, admits=None):
         self.workspace, self.factory, self.apis = workspace, factory or configured_api, {}
+        # Whether the deployment still admits a schedule's owner (see
+        # `ScheduleService`). None: nothing here can say, so every owner is.
+        self.admits = admits
 
     def for_principal(self, principal) -> ApplicationAPI:
         service = self.apis.get(principal.tenant)
 
         if service is None:
             service = self.apis[principal.tenant] = self.factory(workspace=self.workspace, principal=principal)
+            # A served tenant runs its schedules from the moment its service
+            # exists, whether or not it had one at startup: otherwise a tenant
+            # first seen later could never make one, and a server that sends no
+            # lifespan events would never run any.
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                service.begin_schedules(**({"admits": self.admits} if self.admits is not None else {}))
 
         return service
+
+    async def start_schedules(self) -> None:
+        """Start the scheduler of every tenant that has an active schedule.
+
+        Called as the deployment starts, so a tenant nobody has visited since
+        the restart still runs on time. A tenant with no schedule is left until
+        its first request, as before.
+        """
+        from .application.principal import Principal, require_tenant
+        from .application.service import configured_paths
+        from .application.storage import tenant_paths
+
+        data_dir = configured_paths(Principal("scheduler", "local")).root
+        tenants = ["local"] + sorted(path.name for path in (data_dir / "tenants").glob("*") if path.is_dir())
+        for tenant in tenants:
+            try:
+                require_tenant(tenant)
+            except ValueError:
+                continue
+            # One tenant at a time, letting requests through in between.
+            await asyncio.sleep(0)
+            if has_active_schedule(tenant_paths(data_dir, tenant).runs):
+                # Not a person: a tenant started for its schedules approves nothing itself.
+                await self.for_principal(Principal("scheduler", tenant, source="system")).start_schedules()
 
     async def close(self) -> None:
         services, self.apis = list(self.apis.values()), {}
 
         for service in services:
+            await service.stop_schedules()
             await service.host.close()
+
+
+def has_active_schedule(path) -> bool:
+    """Whether a tenant's run store has a schedule to keep, read without changing it."""
+    import sqlite3
+    if not Path(path).exists():
+        return False
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return connection.execute("SELECT 1 FROM studio_schedules WHERE active = 1 LIMIT 1").fetchone() is not None
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return False
 
 
 async def asgi_exchange(app, *, method, target, headers, body, port, writer, head=False):
@@ -758,6 +1023,9 @@ async def serve(port=8080, *, hosted=False):
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stopped.set)
         server = await start_server(None, port, assets=assets, app=app)
+        # Every tenant's schedules start now, not at its first request, behind
+        # the server rather than before it answers (as with ASGI lifespan).
+        scan = asyncio.create_task(app.services.start_schedules())
         async with server:
             address = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
             print(f"Conclave hosted adapter: {address}/api/health", flush=True)
@@ -775,6 +1043,10 @@ async def serve(port=8080, *, hosted=False):
             else:
                 print("Google sign-in: off. Set CONCLAVE_GOOGLE_LOGIN_FILE and CONCLAVE_SESSION_KEY.", flush=True)
             await stopped.wait()
+        if not scan.done():
+            scan.cancel()
+        await asyncio.gather(scan, return_exceptions=True)
+        await app.services.close()
         return
 
     api = configured_api(workspace=Path.cwd())
@@ -791,8 +1063,13 @@ async def serve(port=8080, *, hosted=False):
         server = await start_server(api, port, token=token, assets=assets)
         async with server:
             address = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            # Locally, Studio is this address unless the operator named another.
+            api.host.studio_url = api.host.studio_url or address
+            # A serving host keeps its schedules: runs start on time from here.
+            await api.start_schedules()
             for line in startup_lines(api, address, assets, token):
                 print(line, flush=True)
             await stopped.wait()
     finally:
+        await api.stop_schedules()
         await api.host.close()

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import re
 from urllib.parse import quote, urlsplit
+from conclave.actions import current_action
 from .transport import IntegrationError, endpoint, public_addresses
 from .notion_blocks import MAX_CHARS as NOTION_MAX_CHARS
 
@@ -246,12 +247,12 @@ async def publish_to_notion(name, arguments, base, headers, transport):
             'total_blocks': conversion.total, 'requests': requests, 'notes': conversion.notes}
 
 
-async def invoke(service, operation, config, secrets, arguments, transport):
-    if operation.capability == 'inbound':
-        # An inbound delivery arrives with a signature; it is never sent out.
-        raise IntegrationError('Inbound triggers are received, not called')
-    args = dict(arguments)
-    base = config.get('base_url', service.base_url).rstrip('/')
+def authorization(service, secrets):
+    """The headers that authenticate a call to this service with these credentials.
+
+    Trello authenticates with query parameters instead, added where its calls
+    are built; here it only has to have them.
+    """
     headers = {}
     if service.auth in ('google_oauth','bearer','api_key'):
         token = secrets.get('access_token') or secrets.get('token') or secrets.get('api_key')
@@ -267,6 +268,21 @@ async def invoke(service, operation, config, secrets, arguments, transport):
         headers['Authorization'] = 'Basic ' + base64.b64encode(f'{email}:{token}'.encode()).decode()
     elif service.auth == 'trello':
         if not secrets.get('api_key') or not secrets.get('token'): raise IntegrationError('Configure Trello key and token')
+    return headers
+
+
+def marker(action_id):
+    """An invisible line a GitHub body carries, so a check can find the item it created."""
+    return f'<!-- conclave-action:{action_id} -->'
+
+
+async def invoke(service, operation, config, secrets, arguments, transport):
+    if operation.capability == 'inbound':
+        # An inbound delivery arrives with a signature; it is never sent out.
+        raise IntegrationError('Inbound triggers are received, not called')
+    args = dict(arguments)
+    base = config.get('base_url', service.base_url).rstrip('/')
+    headers = authorization(service, secrets)
     if service.id == 'notion' and operation.name in NOTION_WRITES:
         headers['Notion-Version'] = NOTION_VERSION
         return await publish_to_notion(operation.name, args, base, headers, transport)
@@ -342,7 +358,18 @@ async def invoke(service, operation, config, secrets, arguments, transport):
         target=args['url'];approved=config.get('target_hosts',[])
         parsed=endpoint(target,approved);public_addresses(parsed.hostname)
         body={'url':target,'formats':['markdown'],'onlyMainContent':True}
-    if service.id == 'webhooks':body=args['payload']
+    if service.id == 'webhooks':
+        body=args['payload']
+        action = current_action.get()
+        if action:
+            # The receiver may use it to drop a delivery it already has; the
+            # same key goes with a send repeated after a check or a person.
+            headers['Idempotency-Key'] = action
+    if service.id == 'github' and operation.name in ('create_issue', 'create_pull_request') and current_action.get():
+        # Invisible when rendered; it is how a check tells this item from one
+        # someone else made with the same title.
+        text = (body or {}).get('body')
+        body['body'] = (text + '\n\n' if text else '') + marker(current_action.get())
     if service.id == 'rss':
         import xml.etree.ElementTree as ET
         from email.utils import parsedate_to_datetime

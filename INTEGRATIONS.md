@@ -62,9 +62,12 @@ Python primitive, not yet a complete Studio OAuth redirect/callback experience.
 SQL, MCP/OpenAPI and S3 adapters are enabled through deployment-owned
 configuration and then use the same Studio grant/assignment UI. Missing drivers
 are reported unavailable; browser users cannot choose database hosts or roles.
-Inbound workflow webhooks and scheduling are not implemented by this change.
+Inbound workflow webhooks are not implemented by this change. Scheduled
+applications run on a serving host (README, "Run an application on a schedule");
+their writes are refused unless the application has autonomous execution on.
 Native provider-side token revocation is not implied by local disconnect.
-Automatic mutation retries are deliberately absent to avoid duplicate actions.
+Automatic resends happen only after an exact check shows the write did not take
+effect (see "Uncertain writes" below); nothing uncertain is retried blindly.
 
 A final status matrix will identify implemented operations and remaining work;
 this document does not claim all 23 integration requirements are complete.
@@ -128,7 +131,8 @@ not met, even when native HTTP operations are contract-tested.
   page traversal is not universal. Health checks can only probe granted reads
   without required parameters. No live health was performed.
 - RSS/Atom reads feeds on deployment-approved public HTTPS endpoints; polling
-  subscriptions/scheduling and inbound webhook workflow triggers are absent.
+  subscriptions and inbound webhook workflow triggers are absent; a scheduled
+  application can read a feed on its own schedule.
 - Native REST contracts were tested using deterministic mocked responses, not
   provider sandboxes. Six full representative workflows A–F remain unverified.
 
@@ -277,11 +281,12 @@ payload that a delivery was verified; dispatch additionally requires the
 transport-verified hook principal. Without the resolver configured, the path
 stays behind the ordinary bearer token and refuses everyone.
 
-Deferred on purpose: schedules, cron, queueing, delivery retries, backoff and
+Deferred on purpose: cron expressions, queueing, delivery retries, backoff and
 provider-specific inbound formats (Slack events, Jira webhooks and similar).
-Those need a scheduling/queue runtime this change does not add, and hook
-replay protection is process-local, so a multi-worker deployment needs sticky
-routing or a shared delivery store.
+Applications can run on a schedule (interval, daily or weekly times; see
+`REST_API.md`, "Scheduled applications"), but an inbound hook does not queue or
+retry its delivery, and hook replay protection is process-local, so a
+multi-worker deployment needs sticky routing or a shared delivery store.
 
 `tests/test_integration_workflows.py` runs six representative workflows (A–F)
 through the real runtime with a scripted provider and a recording HTTP
@@ -542,3 +547,56 @@ still never leave the host.
 shows real availability instead of a bundled guess. Services that templates
 mention but this host cannot run stay in a collapsed "Suggested by templates, not
 installed on this host" section, labelled as intent rather than capability.
+
+## Connections as notification channels
+
+An application can tell someone when a run waits for them (`README.md`, "Tell
+someone when a run waits for them"). The message goes through one of the
+owner's own connections: Slack `send_message` to a channel, Gmail `send_email`
+to one address, or Webhooks `send` to the connection's URL, with
+`Idempotency-Key: notice-<run>-<event>`. It is an ordinary call through
+`ConnectionStore.invoke`, so the connection must grant that operation to the
+application, and revocation, scopes, pacing and credential redaction apply
+exactly as for an agent's call. It is the host's message, not an agent's write,
+so it is not journalled as an action and never becomes an uncertain write:
+each waiting point is sent at most once, and a send cut off by a restart is
+recorded as "may not have been sent".
+
+## Uncertain writes: checks, markers and idempotency keys
+
+A write that may or may not have happened — the run stopped while it was being
+sent, or the service did not answer clearly (a timeout, a dropped connection, an
+HTTP 5xx) — is never sent again without a check or a person. A clear refusal
+(the request never left the host, or the service answered 4xx) is reported to
+the agent as before. How each connection write is checked:
+
+| Write | Read it needs (granted on the same connection) | Found | Reliably absent |
+|---|---|---|---|
+| GitHub `create_branch` | `read_branches` | branch at the same commit | no such branch |
+| GitHub `write_content` | `read_content` | file has that text | file missing or different |
+| GitHub `create_pull_request` | `read_pull_request` | a PR from that head into that base | none |
+| GitHub `merge_pull_request` | `read_pull_request` | merged | still open |
+| GitHub `create_issue` | `read_issue` | an issue carrying this action's marker | none |
+| Sheets `update_range` | `read_range` | the range holds those values | — |
+| HubSpot `update_record` | `read_record` | the properties hold those values | they do not |
+| Jira `update_issue` | `read_issue` | the summary is that text | it is not |
+| Jira / Linear `create_issue` | `search_issues` | exactly one match (search can lag) | — |
+| Trello `create_card` | `read_cards` | a card of that name created since | none |
+| Zendesk `prepare_reply` | `read_history` | that note since the action began | none |
+| Slack `send_message` | `read_conversation` | that text in the channel | — (Slack may rewrite text) |
+| Gmail `send_email` | `search_messages` | the message's own `Message-ID` | — |
+
+A connection without the needed read has no check, and a person decides.
+Webhooks `send`, Gmail drafts, Docs creation, Trello updates and MCP/OpenAPI
+writes cannot be checked. The bundled repository tools check themselves
+(`write_file`, `edit_file`, `git_commit`, `push_branch`, `open_pull_request`,
+`merge_pull_request`); `run_tests` cannot be. Extension authors can supply
+`Tool(check=Check(run=..., describe=...))`.
+
+GitHub issue and pull request bodies carry an invisible
+`<!-- conclave-action:<id> -->` marker so a check can tell this item from one
+someone else made. Webhook and OpenAPI writes carry `Idempotency-Key: <id>`, the
+same key on a resend; whether a receiver honours it cannot be verified, so those
+writes still count as uncheckable. Checks only read, are not charged to a run's
+budget, ask the connection's grant again each time, and never return a
+credential the service echoes back.

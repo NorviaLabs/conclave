@@ -39,6 +39,10 @@ def read_text_or_none(
     )
 
 
+# Documents read through `conclave.tools.documents`, never as text.
+DOCUMENT_SUFFIXES = {".pdf", ".docx", ".doc", ".pptx", ".xlsx", ".odt", ".rtf"}
+
+
 # =============================================================================
 # Local tools
 # =============================================================================
@@ -147,19 +151,33 @@ class LocalTools:
         if not file_path.is_file():
             return f"Not a file: {path}"
 
-        text = read_text_or_none(
-            file_path
-        )
+        from conclave.tools.documents import document_kind, extract, unsupported_message
 
-        if text is None:
-            return (
-                f"Binary file, not readable as "
-                f"text: {path} "
-                f"({file_path.stat().st_size} "
-                "bytes). Do not read it again."
+        kind = document_kind(file_path)
+        if kind in ("pdf", "docx"):
+            # The document's text, with page or heading markers, numbered and
+            # paged like any text file; or one sentence saying why there is none.
+            extracted = await extract(file_path)
+            if extracted.lines is None:
+                return extracted.message
+            # Split once when it was extracted; a page is a slice.
+            lines = extracted.lines
+        elif kind is not None:
+            return unsupported_message(kind[1])
+        else:
+            text = read_text_or_none(
+                file_path
             )
 
-        lines = text.splitlines()
+            if text is None:
+                return (
+                    f"Binary file, not readable as "
+                    f"text: {path} "
+                    f"({file_path.stat().st_size} "
+                    "bytes). Do not read it again."
+                )
+
+            lines = text.splitlines()
 
         start = max(
             1,
@@ -216,6 +234,12 @@ class LocalTools:
                 part in ignored
                 for part in file_path.parts
             ):
+                continue
+
+            # Code search reads text files only: a document's bytes are not
+            # its text (a PDF without a NUL byte would otherwise be searched
+            # as raw PDF syntax). Source folders search inside documents.
+            if file_path.suffix.lower() in DOCUMENT_SUFFIXES:
                 continue
 
             try:

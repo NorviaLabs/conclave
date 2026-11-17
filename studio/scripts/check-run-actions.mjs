@@ -59,8 +59,9 @@ console.log('PASS: Run and Run again open a modal on the canvas, create fresh ru
 // page's own module cannot be imported: what a person can press while a run is
 // open has to follow from the run's state, not from a guess.
 const controllerSource = source.slice(source.indexOf('function runControllerMarkup('), source.indexOf('\n}', source.indexOf('function runControllerMarkup('))) + '\n}';
+const {pauseControl} = await import('../web/parallel-ui.js');
 const bar = vm.createContext({
-  uiIcon: name => `<svg class="ui-icon" data-icon="${name}"></svg>`,
+  uiIcon: name => `<svg class="ui-icon" data-icon="${name}"></svg>`, pauseControl,
   liveBusy: false, runtime: {available: true}, preview: null,
   console
 });
@@ -70,6 +71,9 @@ const actions = markup => [...markup.matchAll(/data-action="([^"]+)"/g)].map(mat
 assert.deepEqual(actions(controlsFor(null)), ['run'], 'a plan offers Run');
 assert.deepEqual(actions(controlsFor({live: true, mode: 'running'})), ['pause-live', 'cancel-live'], 'a going run offers Pause and Stop');
 assert.deepEqual(actions(controlsFor({live: true, mode: 'pending'})), ['pause-live', 'cancel-live'], 'a starting run too');
+// Several steps may be working when pause is pressed: it says so, and is not pressed twice.
+assert.match(controlsFor({live: true, mode: 'running'}), /data-action="pause-live" +title="Pause: no new step starts; running steps finish"/);
+assert.match(controlsFor({live: true, mode: 'running', pausing: {running: 2}}), /data-action="pause-live" disabled title="Pausing · 2 running steps will finish first" aria-label="Pausing · 2 running steps will finish first"/);
 assert.deepEqual(actions(controlsFor({live: true, mode: 'paused'})), ['resume-live', 'cancel-live'], 'a paused run offers Run and Stop');
 // What a run is waiting for stays in the status line above the canvas, in words,
 // so the bar offers it once and never without a label.

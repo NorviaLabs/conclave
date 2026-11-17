@@ -16,17 +16,33 @@ machine is already signed in to, exactly like the bundled read tools.
 """
 
 import asyncio
+import json
 import re
 import shlex
 import subprocess
 
+from datetime import datetime, timedelta, timezone
+
 from pathlib import Path
 from typing import Any
 
+from ..actions import ActionNotPerformed, Check, CheckResult
 from ..spec import (
     Capability,
     Tool,
 )
+
+
+class Refused(ActionNotPerformed, ValueError):
+    """A write refused before it touched anything: a bad path or argument."""
+
+
+class CommandRefused(ActionNotPerformed, RuntimeError):
+    """A local command that failed on its own, so it changed nothing.
+
+    Only commands that stay on this machine are read this way. A push or a
+    GitHub call that fails may still have reached the remote.
+    """
 
 # Writing a file changes the repository and nothing else.
 WRITES_FILES = frozenset(
@@ -55,6 +71,16 @@ WRITES_REMOTELY = frozenset(
 BRANCH_NAME = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}"
 )
+
+# A pull request number is digits and nothing else: anything `gh` could read
+# as an option (--web, --repo=...) is refused before it runs.
+PULL_REQUEST_NUMBER = re.compile(r"[1-9][0-9]{0,9}")
+
+
+def pull_request_number(number) -> str | None:
+    text = str(number).strip() if isinstance(number, (int, str)) and not isinstance(number, bool) else ""
+    return text if PULL_REQUEST_NUMBER.fullmatch(text) else None
+
 
 MERGE_METHODS = (
     "merge",
@@ -87,7 +113,7 @@ class Changes:
         relative: str,
     ) -> Path:
         if not isinstance(relative, str) or not relative.strip():
-            raise ValueError("Provide a path inside the repository")
+            raise Refused("Provide a path inside the repository")
 
         path = (
             self.root / relative
@@ -99,7 +125,7 @@ class Changes:
             )
 
         except ValueError as exc:
-            raise ValueError(
+            raise Refused(
                 "Choose a path inside the repository"
             ) from exc
 
@@ -107,7 +133,7 @@ class Changes:
             part.startswith(".")
             for part in inside.parts
         ):
-            raise ValueError(
+            raise Refused(
                 "Choose a visible path inside the repository;"
                 " hidden files such as .git are not writable"
             )
@@ -136,6 +162,8 @@ class Changes:
         self,
         command: list[str],
         timeout: int,
+        *,
+        may_have_acted: bool = False,
     ) -> str:
         completed = await self._execute(
             command,
@@ -154,7 +182,10 @@ class Changes:
             completed.returncode
             != 0
         ):
-            raise RuntimeError(
+            # A local command that fails changed nothing. One that reaches a
+            # remote may have been received before it failed, and one that runs
+            # after a change landed cannot undo it: both leave the outcome unknown.
+            raise (RuntimeError if may_have_acted else CommandRefused)(
                 error
                 or (
                     "Command failed: "
@@ -175,7 +206,7 @@ class Changes:
         content: str,
     ) -> str:
         if not isinstance(content, str):
-            raise ValueError("Provide the file text")
+            raise Refused("Provide the file text")
 
         target = self._writable(
             path
@@ -206,7 +237,7 @@ class Changes:
         # the whole file, or reach for a script through run_tests, which is
         # how a source file once ended up deleted.
         if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
-            raise ValueError("Provide the exact text to replace and its replacement")
+            raise Refused("Provide the exact text to replace and its replacement")
 
         target = self._writable(
             path
@@ -215,11 +246,11 @@ class Changes:
         try:
             text = target.read_text(encoding="utf-8")
         except FileNotFoundError:
-            raise ValueError(f"{path} does not exist; create it with write_file") from None
+            raise Refused(f"{path} does not exist; create it with write_file") from None
 
         found = text.count(old_text)
         if found != 1:
-            raise ValueError(
+            raise Refused(
                 f"old_text appears {found} times in {path}; it must appear exactly once. "
                 "Include more surrounding lines to make it unique."
             )
@@ -237,7 +268,7 @@ class Changes:
         timeout: int | None = DEFAULT_TIMEOUT,
     ) -> str:
         if not isinstance(command, str) or not command.strip():
-            raise ValueError("Provide the command to run")
+            raise Refused("Provide the command to run")
 
         limit = (
             DEFAULT_TIMEOUT
@@ -289,7 +320,7 @@ class Changes:
             name = str(branch).strip()
 
             if not BRANCH_NAME.fullmatch(name):
-                raise ValueError("Provide a branch name such as fix/issue-7")
+                raise Refused("Provide a branch name such as fix/issue-7")
 
             exists = await self._execute(
                 [
@@ -310,7 +341,7 @@ class Changes:
             if exists.returncode == 0 and current != name:
                 extra = await self._execute(["git", "rev-list", "--count", "HEAD.." + name], 30)
                 if extra.returncode != 0 or extra.stdout.strip() != "0":
-                    raise ValueError(
+                    raise Refused(
                         f"Branch {name} already exists with commits this checkout does not have; "
                         "committing there would carry them along. Pass a new branch name."
                     )
@@ -327,7 +358,7 @@ class Changes:
                                         "refs/remotes/origin/HEAD"], 30)).stdout.strip()
 
         if current and default.startswith("origin/") and current == default.removeprefix("origin/"):
-            raise ValueError(
+            raise Refused(
                 f"Refusing to commit on {current}, the remote's default branch. "
                 "Pass branch, such as fix/issue-7, to commit on a branch of its own."
             )
@@ -339,10 +370,10 @@ class Changes:
         branch: str | None = None,
     ) -> str:
         if not isinstance(message, str) or not message.strip():
-            raise ValueError("Provide a commit message")
+            raise Refused("Provide a commit message")
 
         if paths is not None and not isinstance(paths, str):
-            raise ValueError("Give comma-separated paths, or omit them to stage every change")
+            raise Refused("Give comma-separated paths, or omit them to stage every change")
 
         await self._on_branch(
             branch
@@ -380,6 +411,8 @@ class Changes:
             120,
         )
 
+        # The commit has landed by now, so this reading of it cannot fail the
+        # commit itself.
         return await self._checked(
             [
                 "git",
@@ -388,6 +421,7 @@ class Changes:
                 "HEAD",
             ],
             60,
+            may_have_acted=True,
         )
 
     async def push_branch(
@@ -400,7 +434,7 @@ class Changes:
 
         # A leading dash would be read as an option, not a branch.
         if not BRANCH_NAME.fullmatch(name):
-            raise ValueError("Provide a branch name such as fix/issue-7")
+            raise Refused("Provide a branch name such as fix/issue-7")
 
         exists = await self._execute(
             [
@@ -437,6 +471,7 @@ class Changes:
                 name,
             ],
             300,
+            may_have_acted=True,
         )
 
     async def open_pull_request(
@@ -448,7 +483,7 @@ class Changes:
         draft: Any = None,
     ) -> str:
         if not isinstance(title, str) or not title.strip():
-            raise ValueError("Provide a pull request title")
+            raise Refused("Provide a pull request title")
 
         command = [
             "gh",
@@ -485,6 +520,7 @@ class Changes:
         return await self._checked(
             command,
             180,
+            may_have_acted=True,
         )
 
     async def merge_pull_request(
@@ -497,20 +533,150 @@ class Changes:
         ).lower()
 
         if chosen not in MERGE_METHODS:
-            raise ValueError(
+            raise Refused(
                 "Choose merge, squash or rebase"
             )
+
+        checked = pull_request_number(number)
+
+        if checked is None:
+            raise Refused("Provide the pull request number, such as 12")
 
         return await self._checked(
             [
                 "gh",
                 "pr",
                 "merge",
-                str(number),
+                checked,
                 "--" + chosen,
             ],
             300,
+            may_have_acted=True,
         )
+
+
+class ChangeChecks:
+    """Whether one of the write tools' calls already happened, by reading only.
+
+    Each reads the same folder, Git repository or GitHub account the tool
+    wrote to, and never changes any of them. A check that cannot run answers
+    that it could not tell.
+    """
+
+    def __init__(self, changes: "Changes"):
+        self.changes = changes
+
+    async def run(self, command: list[str], timeout: int = 60):
+        return await self.changes._execute(command, timeout)
+
+    async def write_file(self, arguments, context) -> CheckResult:
+        path = arguments.get("path", "")
+        target = self.changes._writable(path)
+        if target.is_file() and target.read_text(encoding="utf-8") == arguments.get("content"):
+            return CheckResult("found", f"{path} has the text that was written")
+        return CheckResult("absent", f"{path} does not have the text that was written", exact=True)
+
+    async def edit_file(self, arguments, context) -> CheckResult:
+        path, old, new = arguments.get("path", ""), arguments.get("old_text") or "", arguments.get("new_text") or ""
+        target = self.changes._writable(path)
+        if not old or not target.is_file():
+            return CheckResult("inconclusive", f"{path} cannot be compared with the edit")
+        text = target.read_text(encoding="utf-8")
+        # New text in place and the old gone — or, when the new text contains
+        # the old, exactly as many of the old as the new ones account for.
+        if new and new in text and (old not in text or old in new and text.count(old) == text.count(new) * new.count(old)):
+            return CheckResult("found", f"{path} has the edit")
+        if text.count(old) == 1 and (not new or new not in text):
+            return CheckResult("absent", f"{path} still has the text the edit replaces", exact=True)
+        return CheckResult("inconclusive", f"{path} has neither the edit nor exactly the text it replaces")
+
+    async def git_commit(self, arguments, context) -> CheckResult:
+        subject = str(arguments.get("message") or "").strip().splitlines()[0] if str(arguments.get("message") or "").strip() else ""
+        head = await self.run(["git", "log", "-1", "--format=%h%x00%s%x00%cI"], 30)
+        parts = (head.stdout or "").strip().split("\0")
+        if head.returncode != 0 or len(parts) != 3:
+            return CheckResult("inconclusive", "The latest commit could not be read")
+        short, latest, when = parts
+        since = datetime.fromisoformat(context.started_at) - timedelta(seconds=60)
+        if subject and latest == subject and datetime.fromisoformat(when) >= since:
+            return CheckResult("found", f"Commit {short} “{latest}” is the latest commit")
+        # A commit that is not the latest may have been amended or followed:
+        # absence cannot be told from that.
+        return CheckResult("inconclusive", "The latest commit is not this one")
+
+    async def push_branch(self, arguments, context) -> CheckResult:
+        name = str(arguments.get("branch") or "").strip()
+        if not BRANCH_NAME.fullmatch(name):
+            return CheckResult("inconclusive", "The branch name cannot be checked")
+        local = await self.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/" + name], 30)
+        remote = await self.run(["git", "ls-remote", "origin", "refs/heads/" + name], 60)
+        if local.returncode != 0 or remote.returncode != 0:
+            return CheckResult("inconclusive", f"{name} could not be compared with origin")
+        pushed = (remote.stdout or "").split()
+        if pushed and pushed[0] == local.stdout.strip():
+            return CheckResult("found", f"origin has {name} at {pushed[0][:7]}")
+        return CheckResult("absent", f"origin does not have {name} as it is here", exact=True)
+
+    async def open_pull_request(self, arguments, context) -> CheckResult:
+        branch = arguments.get("branch") or (await self.run(["git", "branch", "--show-current"], 30)).stdout.strip()
+        base = arguments.get("base") or "main"
+        if not all(BRANCH_NAME.fullmatch(str(name)) for name in (branch, base)):
+            return CheckResult("inconclusive", "The branches cannot be checked")
+        listed = await self.run(["gh", "pr", "list", "--head", branch, "--base", base, "--state", "all",
+                                 "--json", "number,title,state,url", "--limit", "5"], 60)
+        if listed.returncode != 0:
+            return CheckResult("inconclusive", "GitHub could not be asked about pull requests")
+        pulls = json.loads(listed.stdout or "[]")
+        if pulls:
+            pull = pulls[0]
+            return CheckResult("found", f"Found pull request #{pull.get('number')} “{pull.get('title')}” ({pull.get('state')})",
+                               detail=f"#{pull.get('number')} {pull.get('title')} {pull.get('url') or ''}".strip())
+        return CheckResult("absent", f"No pull request from {branch} into {base}", exact=True)
+
+    async def merge_pull_request(self, arguments, context) -> CheckResult:
+        number = pull_request_number(arguments.get("number"))
+        if number is None:
+            return CheckResult("inconclusive", "The pull request number cannot be checked")
+        viewed = await self.run(["gh", "pr", "view", number, "--json", "state,mergedAt"], 60)
+        if viewed.returncode != 0:
+            return CheckResult("inconclusive", f"GitHub could not be asked about pull request #{number}")
+        state = (json.loads(viewed.stdout or "{}") or {}).get("state")
+        if state == "MERGED":
+            return CheckResult("found", f"Pull request #{number} is merged")
+        if state == "OPEN":
+            return CheckResult("absent", f"Pull request #{number} is open and not merged", exact=True)
+        return CheckResult("inconclusive", f"Pull request #{number} is {str(state or 'in an unknown state').lower()}")
+
+
+def guarded(check):
+    """A check that fails to run could not tell; it never raises."""
+
+    async def run(arguments, context):
+        try:
+            return await check(arguments, context)
+        except Exception:
+            return CheckResult("inconclusive", "The check could not complete")
+
+    return run
+
+
+DESCRIPTIONS = {
+    "write_file": "Will read {path} and compare it with what was written",
+    "edit_file": "Will read {path} and look for the edit",
+    "git_commit": "Will look at the latest commit for this message",
+    "push_branch": "Will compare {branch} with origin",
+    "open_pull_request": "Will ask GitHub for a pull request from this branch",
+    "merge_pull_request": "Will ask GitHub whether pull request {number} is merged",
+}
+
+
+def describing(template):
+    def describe(arguments):
+        try:
+            return template.format(**arguments)
+        except (KeyError, IndexError, ValueError):
+            return template.split("{")[0].strip()
+    return describe
 
 
 # The write tools, as one table: name, description, parameters, capabilities.
@@ -596,7 +762,13 @@ CHANGE_TOOL_NAMES = frozenset(
 def build_change_tools(
     changes: Changes,
 ) -> tuple[Tool, ...]:
-    """One repository's write tools; `changes` supplies every implementation."""
+    """One repository's write tools; `changes` supplies every implementation.
+
+    Each carries the read-only check that can tell whether one of its calls
+    already happened; a command run by `run_tests` has none.
+    """
+
+    checks = ChangeChecks(changes)
 
     return tuple(
         Tool(
@@ -608,6 +780,16 @@ def build_change_tools(
                 name,
             ),
             capabilities,
+            check=(
+                Check(run=guarded(getattr(checks, name)), describe=describing(DESCRIPTIONS[name]))
+                if name in DESCRIPTIONS
+                else None
+            ),
+            check_unavailable=(
+                ""
+                if name in DESCRIPTIONS
+                else "A command's effects cannot be checked automatically; look at what it changed, then decide"
+            ),
         )
         for name, description, parameters, capabilities in CHANGE_TOOLS
     )

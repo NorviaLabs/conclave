@@ -9,9 +9,7 @@ from pathlib import Path
 from .definition import validate_definition
 from .catalogue import validate_member, validate_catalogue
 
-
-class Conflict(ValueError):
-    pass
+from .errors import Conflict  # noqa: F401  (re-exported: callers import it from here)
 
 
 class Workspace:
@@ -70,6 +68,8 @@ class Workspace:
     def save(self, definition, *, identifier=None, revision=None):
         definition = {key: value for key, value in definition.items() if key not in {"sample_request", "sample_outputs", "sample_sources"}} if isinstance(definition, dict) else definition
         validate_definition(definition)
+        if definition.get("start_mode") == "schedule" and "schedule" not in definition:
+            raise ValueError("Set when this application runs, or start it manually")
         updated_at = datetime.now(timezone.utc).isoformat()
         with self.connect() as connection:
             if identifier is None:

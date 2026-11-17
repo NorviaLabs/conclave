@@ -64,7 +64,7 @@ console.log('PASS: five-step workflow, explicit parallel/between insertion, shar
 
 const canvasURL=new URL('../web/canvas-ui.js',import.meta.url).href;
 const activityURL=await load('../web/run-activity.js',[['/canvas-ui.js',canvasURL]]);
-const runURL=await load('../web/run-canvas.js',[['/definition.js',shared],['/canvas-ui.js',canvasURL],['/run-activity.js',activityURL]]);
+const runURL=await load('../web/run-canvas.js',[['/parallel-ui.js',new URL('../web/parallel-ui.js',import.meta.url).href],['/definition.js',shared],['/canvas-ui.js',canvasURL],['/run-activity.js',activityURL]]);
 const {workbenchMarkup}=await import(await load('../web/workbench-ui.js',[['/definition.js',shared],['/plan.js',planURL],['/run-canvas.js',runURL],['/catalogue.js',new URL('../shared/catalogue.js',import.meta.url).href],['/canvas-ui.js',new URL('../web/canvas-ui.js',import.meta.url).href],['/run-activity.js',activityURL]]));
 const ctx={escape:value=>String(value??'').replaceAll('<','&lt;'),field:label=>`<label>${label}</label>`,agentName:(definition,id)=>definition.agents.find(member=>member.id===id)?.name||id,outputName:(definition,key)=>definition.state.find(output=>output.key===key)?.label||key,capabilityName:id=>id,selectedId:'step_1',pane:'steps',members:[],showResources:false,showInspector:false,assistantText:'',runtime:{}};
 const markup=workbenchMarkup(d,ctx);

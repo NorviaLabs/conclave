@@ -4,7 +4,8 @@ import {readFile} from 'node:fs/promises';
 import {emptyDefinition,initialState,preflightIssues,resolvePreflightIssue,validateRecordValues} from '../shared/definition.js';
 const source=(await readFile(new URL('../web/live.js',import.meta.url),'utf8'))
   .replace("'/definition.js'",JSON.stringify(new URL('../shared/definition.js',import.meta.url).href))
-  .replace("'/canvas-ui.js'",JSON.stringify(new URL('../web/canvas-ui.js',import.meta.url).href));
+  .replace("'/canvas-ui.js'",JSON.stringify(new URL('../web/canvas-ui.js',import.meta.url).href))
+  .replace("'/parallel-ui.js'",JSON.stringify(new URL('../web/parallel-ui.js',import.meta.url).href));
 const {projectLiveRun,liveRunMarkup}=await import('data:text/javascript,'+encodeURIComponent(source));
 const d=emptyDefinition();d.state[0].merge='append';
 const conflicting=emptyDefinition();

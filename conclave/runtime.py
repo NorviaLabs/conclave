@@ -11,6 +11,7 @@ fans out top-level work instead.
 """
 
 import asyncio
+import copy
 import json
 import time
 import uuid
@@ -29,6 +30,13 @@ from typing import (
     TypeVar,
 )
 
+from .actions import (
+    ActionLog,
+    ActionStart,
+    ActionStopped,
+    classify,
+    current_action,
+)
 from .approval import (
     Approval,
     Approver,
@@ -39,7 +47,7 @@ from .authority import (
     ModelCall,
     RunAuthority,
 )
-from .budget import RunBudget
+from .budget import RUN_WIDE_LIMITS, RunBudget
 from .config import RunConfig
 from .events import (
     AgentFinished,
@@ -79,6 +87,13 @@ T = TypeVar("T")
 # How little time has to be left before an agent is told to answer with what it
 # has. Roughly one action's worth on a slow backend, which is what it is for.
 TIME_LEFT_WINDOW = 60.0
+
+
+# The run-wide limits a further call is weighed against before it is made.
+PROJECTED_LIMITS = (
+    "tokens",
+    "cost_usd",
+)
 
 
 async def fan_out(
@@ -139,6 +154,7 @@ class ToolAgentRuntime:
         config: RunConfig,
         approver: Approver | None = None,
         authority: RunAuthority | None = None,
+        log: ActionLog | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -148,6 +164,10 @@ class ToolAgentRuntime:
         self.approver = approver
 
         self._approval_lock = asyncio.Lock()
+
+        # Whether anything records this run's actions, asked once: when
+        # nothing does, no progress snapshot is ever built.
+        self._records: bool | None = None
 
         # The provider, the budget and the approver answer through one object,
         # so a loop that runs somewhere else asks the same questions over a
@@ -160,6 +180,7 @@ class ToolAgentRuntime:
                 budget,
                 approver,
                 lock=self._approval_lock,
+                log=log,
             )
         )
 
@@ -204,8 +225,19 @@ class ToolAgentRuntime:
         depth: int = 1,
         ancestry: tuple[str, ...] = (),
         parent_run_id: str | None = None,
+        scope: str = "",
+        resume: list[dict[str, Any]] | None = None,
+        parents: tuple[dict[str, Any], ...] = (),
     ) -> AsyncIterator[Event]:
-        """Run one agent, yielding what happens as it happens."""
+        """Run one agent, yielding what happens as it happens.
+
+        `scope` names what this run works on behalf of (an application's step)
+        and travels to every agent it delegates to, so each recorded action
+        says where it belongs. `resume` continues from saved progress instead
+        of starting over: the frames of this agent and of any agent it was
+        waiting on, as recorded with an action. `parents` are the frames of the
+        agents waiting on this one.
+        """
 
         run_id = uuid.uuid4().hex[:12]
 
@@ -255,7 +287,90 @@ class ToolAgentRuntime:
 
         step = 0
         reviewed = False
+
+        # This agent's conversation log, kept across a resume, so a run store
+        # appends what is new instead of saving the whole conversation again.
+        log = str((resume[0].get("log") if resume else None) or run_id)
+
+        def frame(
+            response: str,
+            action: dict[str, Any],
+            *,
+            action_id: str | None = None,
+            observation: str | None = None,
+            delegation: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            """This agent, as it stands when it takes `action`: enough to go on from."""
+
+            return {
+                "version": 1,
+                "agent": spec.name,
+                "log": log,
+                "task": task,
+                "depth": depth,
+                "messages": copy.deepcopy(messages),
+                "reply": response,
+                "action": copy.deepcopy(action),
+                "action_id": action_id,
+                "observation": observation,
+                "notes": list(private.notes),
+                "checked": list(private.checked),
+                "step": step,
+                "reviewed": reviewed,
+                "nested": copy.deepcopy(nested),
+                "delegation": copy.deepcopy(delegation),
+            }
+
+        if resume:
+            # Continue where the saved progress left off: the conversation,
+            # the notes and the delegations so far, then the action that was
+            # under way, settled rather than asked for again. The action
+            # allowance starts afresh, as it does whenever a step is resumed.
+            restored = resume[0]
+            messages[:] = copy.deepcopy(restored["messages"])
+            private.notes[:] = list(restored.get("notes") or [])
+            private.checked[:] = list(restored.get("checked") or [])
+            nested[:] = copy.deepcopy(restored.get("nested") or [])
+            reviewed = bool(restored.get("reviewed"))
+
+            async for event in self.resume_action(
+                spec,
+                run_id,
+                restored,
+                resume[1:],
+                private,
+                nested,
+                messages,
+                depth,
+                ancestry,
+                scope,
+                parents,
+            ):
+                yield event
+
+        # Run-wide limits this agent has already reported, so a limit that
+        # stops it is reported once.
+        reported: set[str] = set()
+
         while self.config.max_tool_steps is None or step < self.config.max_tool_steps:
+            # A run-wide limit is a real stop: once it is reached, by this
+            # agent or by any other working in the same run, no further call
+            # is made, apart from the write-up of what this agent has. An
+            # agent's first call is its start, which the caller decides.
+            reached = await self.run_limit_reached() if step else None
+
+            if reached is not None:
+                if reached not in reported:
+                    reported.add(reached)
+                    yield await self.budget_event(
+                        run_id,
+                        reached,
+                    )
+
+                spent = reached
+
+                break
+
             messages[0][
                 "content"
             ] = self.system_prompt(
@@ -297,6 +412,7 @@ class ToolAgentRuntime:
                     ),
                 ],
             ):
+                reported.add(event.dimension)
                 yield event
 
             last_check = now
@@ -437,6 +553,19 @@ class ToolAgentRuntime:
                         depth,
                         ancestry,
                         run_id,
+                        scope=scope,
+                        parents=(
+                            (
+                                *parents,
+                                frame(
+                                    response,
+                                    action,
+                                    delegation={**plan.record, "prompt": plan.task},
+                                ),
+                            )
+                            if await self.records_actions()
+                            else parents
+                        ),
                     ):
                         yield event
 
@@ -472,6 +601,18 @@ class ToolAgentRuntime:
                     )
                     or {},
                     private,
+                    scope=scope,
+                    snapshot=(
+                        lambda action_id, observation, response=response, action=action: [
+                            *parents,
+                            frame(
+                                response,
+                                action,
+                                action_id=action_id,
+                                observation=observation,
+                            ),
+                        ]
+                    ),
                 )
 
                 observation = event.observation
@@ -620,10 +761,12 @@ class ToolAgentRuntime:
             if await self.authority.exceeded(
                 "wall_clock_seconds"
             ):
-                yield await self.budget_event(
-                    run_id,
-                    "wall_clock_seconds",
-                )
+                if "wall_clock_seconds" not in reported:
+                    reported.add("wall_clock_seconds")
+                    yield await self.budget_event(
+                        run_id,
+                        "wall_clock_seconds",
+                    )
 
                 spent = "wall_clock_seconds"
 
@@ -637,19 +780,18 @@ class ToolAgentRuntime:
             # because a spent budget should not cost the work: it bounds the
             # effort, not what comes back. The write-up is one call beyond the
             # limit, and the record says which limit it went past.
-            if spent is not None:
-                result, charged, answered = await self.write_up(
-                    run_id,
-                    spec,
-                    messages,
-                    private,
-                    nested,
-                    last_check,
-                    spent,
-                )
+            result, charged, answered = await self.write_up(
+                run_id,
+                spec,
+                messages,
+                private,
+                nested,
+                last_check,
+                spent,
+            )
 
-                for event in charged:
-                    yield event
+            for event in charged:
+                yield event
 
         status = (
             "completed"
@@ -859,17 +1001,46 @@ class ToolAgentRuntime:
             used=used,
         )
 
+    async def run_limit_reached(
+        self,
+    ) -> str | None:
+        """The run-wide limit that has been reached, if any."""
+
+        for dimension in RUN_WIDE_LIMITS:
+            if await self.authority.exceeded(
+                dimension
+            ):
+                return dimension
+
+        # Spend measured per call is also weighed before it happens: a call
+        # that, with those already under way, would likely pass the limit is
+        # not made. Time is not projected; it warns the agent itself.
+        fits = getattr(
+            self.authority,
+            "call_fits",
+            None,
+        )
+
+        if fits is not None:
+            for dimension in PROJECTED_LIMITS:
+                if not await fits(
+                    dimension
+                ):
+                    return dimension
+
+        return None
+
     def exhausted(
         self,
         private: PrivateState,
         nested: list[dict[str, Any]],
         budget: str,
     ) -> AgentResult:
-        label = (
-            "Wall-clock"
-            if budget == "wall_clock_seconds"
-            else "Tool-step"
-        )
+        label = {
+            "wall_clock_seconds": "Wall-clock",
+            "tokens": "Token",
+            "cost_usd": "Cost",
+        }.get(budget, "Tool-step")
 
         return AgentResult(
             content=(
@@ -1011,6 +1182,10 @@ class ToolAgentRuntime:
         depth: int,
         ancestry: tuple[str, ...],
         parent_run_id: str,
+        *,
+        scope: str = "",
+        resume: list[dict[str, Any]] | None = None,
+        parents: tuple[dict[str, Any], ...] = (),
     ) -> AsyncIterator[Event]:
         """Run the delegated agent, propagating everything it reports."""
 
@@ -1029,6 +1204,9 @@ class ToolAgentRuntime:
                     ancestry + (str(record["delegated_by"]),)
                 ),
                 parent_run_id=parent_run_id,
+                scope=scope,
+                resume=resume,
+                parents=parents,
             ):
                 if isinstance(
                     event,
@@ -1037,6 +1215,11 @@ class ToolAgentRuntime:
                     child_result = event.result
 
                 yield event
+
+        except ActionStopped:
+            # A delegated agent stopped on an action nobody settled: the run
+            # stops, it does not carry on as if the delegation just failed.
+            raise
 
         except Exception as exc:
             record["status"] = "failed"
@@ -1092,8 +1275,16 @@ class ToolAgentRuntime:
         name: Any,
         arguments: dict[str, Any],
         private: PrivateState,
+        *,
+        scope: str = "",
+        snapshot: Any = None,
     ) -> ToolCalled | ToolDenied:
-        """Execute one tool call, or refuse it and say why."""
+        """Execute one tool call, or refuse it and say why.
+
+        An approved destructive call is recorded before it runs, when the run
+        keeps an action log: `snapshot(action_id, observation)` is this
+        agent's progress to record with it.
+        """
 
         tool = self.tools.tool(name)
 
@@ -1203,6 +1394,33 @@ class ToolAgentRuntime:
                 ),
             )
 
+        if tool.destructive and snapshot is not None and await self.records_actions():
+            action_id = uuid.uuid4().hex
+            begin = getattr(self.authority, "begin_action", None)
+
+            if begin is not None and await begin(
+                ActionStart(
+                    action_id=action_id,
+                    scope=scope,
+                    agent=spec.name,
+                    tool=tool.name,
+                    arguments=arguments,
+                    approval=str(approval),
+                    frames=snapshot(action_id, None),
+                    checkable=tool.check is not None,
+                )
+            ):
+                return await self.send(
+                    spec,
+                    run_id,
+                    tool,
+                    arguments,
+                    approval,
+                    action_id,
+                    private,
+                    snapshot,
+                )
+
         rendered = json.dumps(
             arguments,
             ensure_ascii=False,
@@ -1247,6 +1465,262 @@ class ToolAgentRuntime:
                 TRUNCATION_MARKER
             ),
             ok=ok,
+        )
+
+    async def records_actions(
+        self,
+    ) -> bool:
+        """Whether this run's authority records external actions. Asked once."""
+
+        if self._records is None:
+            ask = getattr(self.authority, "records_actions", None)
+            self._records = bool(await ask()) if ask is not None else False
+
+        return self._records
+
+    async def send(
+        self,
+        spec: AgentSpec,
+        run_id: str,
+        tool: Any,
+        arguments: dict[str, Any],
+        approval: Approval,
+        action_id: str,
+        private: PrivateState,
+        snapshot: Any,
+        *,
+        resent: bool = False,
+    ) -> ToolCalled:
+        """Run a recorded action, and record how it ended.
+
+        A clear failure is reported to the agent, as any tool error is. An
+        unclear one is checked with the service: found, and the agent is told
+        so; proved absent, and it is sent once more under the same action;
+        anything else stops the run for a person. A call cancelled mid-flight
+        stays recorded as being sent, for whoever ends the run to settle.
+        """
+
+        summary = f"{tool.name}({json.dumps(arguments, ensure_ascii=False)})"
+
+        while True:
+            try:
+                observation = await self.execute_action(
+                    tool.name,
+                    arguments,
+                    run_id,
+                    spec.name,
+                    action_id,
+                )
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as exc:
+                if classify(exc) == "failed":
+                    observation = f"Tool error: {exc}"
+                    private.check(summary + " -> failed")
+
+                    await self.authority.finish_action(action_id, "failed", snapshot(action_id, observation))
+
+                    return self.called(spec, run_id, tool, arguments, approval, observation, False, action_id, resent)
+
+                await self.authority.finish_action(
+                    action_id,
+                    "uncertain",
+                    snapshot(action_id, None),
+                    reason=f"{tool.name} ended without a clear answer ({type(exc).__name__})",
+                )
+
+                if resent:
+                    # Sent again and still no clear answer: a person decides.
+                    raise ActionStopped(action_id, f"The outcome of {tool.name} is uncertain") from None
+
+                resolution = await self.authority.check_action(action_id, tool, arguments, approval)
+
+                if resolution.kind == "done":
+                    private.check(summary)
+
+                    return self.called(spec, run_id, tool, arguments, approval, resolution.observation, True, action_id, resent)
+
+                if resolution.kind != "resend":
+                    raise ActionStopped(action_id, resolution.reason or f"The outcome of {tool.name} is uncertain") from None
+
+                await self.authority.begin_resend(action_id)
+                resent = True
+
+                continue
+
+            private.check(summary)
+
+            await self.authority.finish_action(action_id, "completed", snapshot(action_id, observation))
+
+            return self.called(spec, run_id, tool, arguments, approval, observation, True, action_id, resent)
+
+    async def execute_action(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        run_id: str,
+        agent: str,
+        action_id: str,
+    ) -> str:
+        """Run a tool as one action: it can see which, for an idempotency key."""
+
+        token = current_action.set(action_id)
+
+        try:
+            return await self.tools.execute(
+                name,
+                arguments,
+                run_id=run_id,
+                agent=agent,
+            )
+
+        finally:
+            current_action.reset(token)
+
+    def called(
+        self,
+        spec: AgentSpec,
+        run_id: str,
+        tool: Any,
+        arguments: dict[str, Any],
+        approval: Approval,
+        observation: str,
+        ok: bool,
+        action_id: str,
+        resent: bool,
+    ) -> ToolCalled:
+        return ToolCalled(
+            run_id=run_id,
+            agent=spec.name,
+            tool=tool.name,
+            arguments=arguments,
+            capabilities=tool.capabilities,
+            approval=approval,
+            observation=observation,
+            output_chars=len(observation),
+            truncated=observation.endswith(TRUNCATION_MARKER),
+            ok=ok,
+            action_id=action_id,
+            resent=resent,
+        )
+
+    async def resume_action(
+        self,
+        spec: AgentSpec,
+        run_id: str,
+        restored: dict[str, Any],
+        rest: list[dict[str, Any]],
+        private: PrivateState,
+        nested: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        depth: int,
+        ancestry: tuple[str, ...],
+        scope: str,
+        parents: tuple[dict[str, Any], ...],
+    ) -> AsyncIterator[Event]:
+        """Finish the action saved progress stopped at, without asking the model again.
+
+        A recorded result is used as it is. A write that was uncertain is
+        whatever its settlement says: done (the agent is told, nothing is
+        sent), or resend (sent once, with no new approval — the settlement was
+        the approval). A delegation resumes inside the agent it was waiting
+        on. Then the conversation continues as if the action had just ended.
+        """
+
+        action = restored.get("action") or {}
+        kind = action.get("type")
+        observation = restored.get("observation")
+        label = (
+            f"DELEGATION RESULT for {action.get('agent')}"
+            if kind == "delegate"
+            else f"TOOL RESULT for {action.get('name')}"
+        )
+
+        if observation is None and kind == "delegate":
+            record = dict(restored.get("delegation") or {})
+            prompt = str(record.pop("prompt", record.get("task", "")))
+            plan = _Delegation(record=record, spec=self.agents.get(str(record.get("agent"))), task=prompt)
+
+            if plan.spec is None:
+                raise ActionStopped("", f"{record.get('agent')} is not an agent of this run any more")
+
+            async for event in self.delegate(
+                plan,
+                depth,
+                ancestry,
+                run_id,
+                scope=scope,
+                resume=rest or None,
+                parents=(*parents, restored),
+            ):
+                yield event
+
+            nested.append(plan.record)
+            nested.extend(plan.descendants)
+
+            yield self.delegation_event(run_id, spec.name, plan)
+
+            observation = plan.record["observation"]
+
+        elif observation is None:
+            action_id = str(restored.get("action_id") or "")
+            settled = await self.authority.resolve_action(action_id)
+
+            if settled.kind == "done":
+                observation = settled.observation
+
+            elif settled.kind == "resend":
+                # What is sent is the recorded call — what was shown and
+                # approved — never whatever the saved progress says; progress
+                # that names a different tool is not trusted at all.
+                if settled.arguments is None or (settled.tool and settled.tool != action.get("name")):
+                    raise ActionStopped(action_id, "The recorded call to send again is not available")
+
+                tool = self.tools.tool(settled.tool or action.get("name"))
+
+                if tool is None:
+                    raise ActionStopped(action_id, f"{action.get('name')} is not available to send again")
+
+                await self.authority.begin_resend(action_id)
+
+                event = await self.send(
+                    spec,
+                    run_id,
+                    tool,
+                    dict(settled.arguments),
+                    Approval.APPROVED,
+                    action_id,
+                    private,
+                    lambda action_id, observation: [*parents, {**restored, "observation": observation,
+                                                               "action_id": action_id}],
+                    resent=True,
+                )
+
+                observation = event.observation
+
+                yield event
+
+            else:
+                raise ActionStopped(action_id, settled.reason)
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": str(restored.get("reply") or ""),
+            }
+        )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"{label}:\n"
+                    f"{observation}\n\n"
+                    "Continue. Return only the next JSON action."
+                ),
+            }
         )
 
     # =====================================================================

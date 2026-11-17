@@ -11,6 +11,8 @@ from .application.definition import validate_definition
 from .application.presentation import render_run
 from .application.service import configured_host
 from .application.service import setting
+from .application.runs import ActionsUnsettled
+from .api import configured_api
 
 
 def read_json(path):
@@ -68,8 +70,26 @@ async def execute(args):
             _, record = await host.handle("start", value)
         elif args.command == "review":
             _, record = await host.handle("review", {"run_id": args.run_id, "review_id": args.review_id, "output": read_json(args.output)})
+        elif args.command in {"actions", "settle", "check"}:
+            # What a run was sending when it stopped, and a person's decision
+            # about it: printed as the host reports it, nothing else.
+            value = {"run_id": args.run_id}
+            if args.command != "actions":
+                value["action_id"] = args.action_id
+            if args.command == "settle":
+                value["decision"] = args.decision
+                if args.note is not None:
+                    value["note"] = args.note
+            _, listed = await host.handle(args.command, value)
+            print(json.dumps(listed, indent=2, allow_nan=False))
+            return 0
         else:
-            _, record = await host.handle("get" if args.command == "status" else args.command, {"run_id": args.run_id})
+            try:
+                _, record = await host.handle("get" if args.command == "status" else args.command, {"run_id": args.run_id})
+            except ActionsUnsettled as error:
+                views = {item["id"]: item for item in (await host.handle("actions", {"run_id": args.run_id}))[1]["actions"]}
+                error.details = [views[identifier] for identifier in error.actions if identifier in views]
+                raise
         active = host.tasks.get(record["id"])
         if active:
             await active[0]
@@ -81,6 +101,21 @@ async def execute(args):
         return 1 if record["status"] in {"failed", "interrupted"} else 0
     finally:
         await host.close()
+
+
+async def schedule_command(args):
+    """Show, pause or resume a schedule. Only a serving host starts its runs."""
+    api = configured_api(workspace=Path.cwd())
+    try:
+        route = f"/api/applications/{args.application_id}/schedule"
+        status, body = (await api.dispatch("GET", route) if args.action == "status"
+                        else await api.dispatch("POST", route, {"action": args.action}))
+        if status >= 400:
+            raise ValueError(body.get("error") or "No such application")
+        print(json.dumps(body, indent=2, allow_nan=False))
+        return 0
+    finally:
+        await api.host.close()
 
 
 def run(argv=None):
@@ -116,7 +151,26 @@ def run(argv=None):
             if name == "review":
                 command.add_argument("review_id")
                 command.add_argument("--output", required=True, help="JSON contribution matching the waiting output schema")
+    scheduled = commands.add_parser("schedule", help="Show, pause or resume an application's schedule")
+    scheduled.add_argument("action", choices=("status", "pause", "resume"))
+    scheduled.add_argument("application_id")
+    scheduled.add_argument("--database", help="Run database (shared with Studio by default)")
+    actions = commands.add_parser("actions", help="List what a run was sending, and what is known about each action")
+    check = commands.add_parser("check", help="Ask the service whether an uncertain action happened")
+    settle = commands.add_parser("settle", help="Decide an uncertain action: it happened, send it again, or undo")
+    for command in (actions, check, settle):
+        command.add_argument("--database", help="Run database (shared with Studio by default)")
+        command.add_argument("run_id")
+        if command is not actions:
+            command.add_argument("action_id")
+    decision = settle.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--done", dest="decision", action="store_const", const="done", help="It happened: do not send it again")
+    decision.add_argument("--resend", dest="decision", action="store_const", const="resend", help="Send it again when the run continues")
+    decision.add_argument("--undo", dest="decision", action="store_const", const="undo", help="Withdraw the decision")
+    settle.add_argument("--note", help="With --done: what you saw, passed on as your words")
     args = parser.parse_args(argv)
+    if args.command == "settle" and args.note is not None and args.decision != "done":
+        parser.error("--note goes with --done")
     try:
         if args.command == "serve":
             from .api import serve
@@ -132,7 +186,13 @@ def run(argv=None):
                 output.write(json.dumps(definition, indent=2) + "\n")
             return
         with host_settings(args):
-            code = asyncio.run(execute(args))
+            code = asyncio.run(schedule_command(args) if args.command == "schedule" else execute(args))
+    except ActionsUnsettled as error:
+        # Not a failure: the run waits for a person. Say what, and how.
+        listed = ", ".join(f"{item['id']} {item['label']}" for item in error.details) or ", ".join(error.actions)
+        count = len(error.actions)
+        parser.exit(3, f"conclave: {count} action{'s' if count != 1 else ''} still need{'s' if count == 1 else ''} a decision: {listed}\n"
+                       f"          settle with: conclave settle {args.run_id} ACTION_ID --done [--note TEXT] | --resend\n")
     except (ValueError, OSError, KeyError) as error:
         parser.exit(2, f"conclave: {error}\n")
     except KeyboardInterrupt:

@@ -74,7 +74,7 @@ class HostAdapters:
         identifier = service.id
         spec = next((op for op in service.operations if op.name == operation), None)
         if spec is None:
-            raise IntegrationError('Host operation is not authorized')
+            raise IntegrationError('Host operation is not authorized', sent=False)
         validate_arguments(arguments, spec.parameters)
         try:
             if identifier in ('postgres','mysql'):

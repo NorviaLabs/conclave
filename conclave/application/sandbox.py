@@ -24,6 +24,7 @@ because the sandbox builds its own tools from the source it was given.
 """
 
 import asyncio
+import dataclasses
 
 from dataclasses import dataclass
 from typing import (
@@ -33,6 +34,11 @@ from typing import (
     Protocol,
 )
 
+from ..actions import (
+    ActionStart,
+    ActionStopped,
+    Resolution,
+)
 from ..approval import (
     Approval,
     Approver,
@@ -192,8 +198,11 @@ class ControlPlaneAuthority:
     write tool as harmless changes nothing, because the name is looked up here.
     """
 
-    def __init__(self, provider: ModelProvider, budget: RunBudget, tools: Mapping[str, Tool], approver: Approver | None = None):
-        self.inner = InProcessAuthority(provider, budget, approver)
+    def __init__(self, provider: ModelProvider, budget: RunBudget, tools: Mapping[str, Tool], approver: Approver | None = None,
+                 *, log: Any = None):
+        # The action log lives here too: a loop elsewhere records its writes
+        # by asking, and can never settle or finalise one itself.
+        self.inner = InProcessAuthority(provider, budget, approver, log=log)
         self.tools = tools
 
     async def answer(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -232,9 +241,45 @@ class ControlPlaneAuthority:
         if kind == "exceeded":
             return {"exceeded": await self.inner.exceeded(str(request.get("dimension")))}
 
+        if kind == "call_fits":
+            return {"fits": await self.inner.call_fits(str(request.get("dimension")))}
+
         if kind == "numbers":
             limit, used = await self.inner.numbers(str(request.get("dimension")))
             return {"limit": limit, "used": used}
+
+        if kind == "records_actions":
+            return {"records": await self.inner.records_actions()}
+
+        if kind == "begin_action":
+            start = request.get("start") or {}
+            return {"recorded": await self.inner.begin_action(ActionStart(
+                action_id=str(start.get("action_id", "")), scope=str(start.get("scope", "")), agent=str(start.get("agent", "")),
+                tool=str(start.get("tool", "")), arguments=dict(start.get("arguments") or {}),
+                approval=str(start.get("approval", "")), frames=list(start.get("frames") or []),
+                checkable=bool(start.get("checkable"))))}
+
+        if kind == "finish_action":
+            await self.inner.finish_action(str(request.get("action_id")), str(request.get("state")),
+                                           list(request.get("frames") or []), str(request.get("reason") or ""))
+            return {}
+
+        if kind == "check_action":
+            # The control plane's own declaration of the tool is what is
+            # checked: a sandbox cannot supply a check that always says found.
+            tool = self.tools.get(request.get("tool"))
+            if tool is None:
+                return dict(vars(Resolution("stop", reason=f"The outcome of {request.get('tool')} is uncertain")))
+            resolution = await self.inner.check_action(str(request.get("action_id")), tool,
+                                                       dict(request.get("arguments") or {}), str(request.get("approval", "")))
+            return dict(vars(resolution))
+
+        if kind == "begin_resend":
+            await self.inner.begin_resend(str(request.get("action_id")))
+            return {}
+
+        if kind == "resolve_action":
+            return dict(vars(await self.inner.resolve_action(str(request.get("action_id")))))
 
         raise ValueError(f"Unknown authority request: {kind}")
 
@@ -298,10 +343,47 @@ class SandboxAuthority(RunAuthority):
     async def exceeded(self, dimension: str) -> bool:
         return bool((await self.ask({"kind": "exceeded", "dimension": dimension})).get("exceeded"))
 
+    async def call_fits(self, dimension: str) -> bool:
+        return (await self.ask({"kind": "call_fits", "dimension": dimension})).get("fits") is not False
+
     async def numbers(self, dimension: str) -> tuple[float | None, float]:
         response = await self.ask({"kind": "numbers", "dimension": dimension})
 
         return (response.get("limit"), float(response.get("used", 0.0)))
+
+    async def records_actions(self) -> bool:
+        if getattr(self, "_records", None) is None:
+            self._records = bool((await self.ask({"kind": "records_actions"})).get("records"))
+
+        return self._records
+
+    async def begin_action(self, start: ActionStart) -> bool:
+        response = await self.ask({"kind": "begin_action", "start": dataclasses.asdict(start)})
+
+        return bool(response.get("recorded"))
+
+    async def finish_action(self, action_id: str, state: str, frames: list[dict[str, Any]], reason: str = "") -> None:
+        await self.ask({"kind": "finish_action", "action_id": action_id, "state": state, "frames": frames, "reason": reason})
+
+    async def check_action(self, action_id: str, tool: Tool, arguments: dict[str, Any], approval: Any) -> Resolution:
+        return self.resolution(await self.ask({"kind": "check_action", "action_id": action_id, "tool": tool.name,
+                                               "arguments": arguments, "approval": str(approval)}))
+
+    async def begin_resend(self, action_id: str) -> None:
+        await self.ask({"kind": "begin_resend", "action_id": action_id})
+
+    async def resolve_action(self, action_id: str) -> Resolution:
+        return self.resolution(await self.ask({"kind": "resolve_action", "action_id": action_id}))
+
+    @staticmethod
+    def resolution(response: dict[str, Any]) -> Resolution:
+        if response.get("kind") not in {"done", "resend", "stop"}:
+            raise RuntimeError("The control plane returned an unusable resolution")
+
+        arguments = response.get("arguments")
+
+        return Resolution(response["kind"], str(response.get("observation") or ""), str(response.get("reason") or ""),
+                          tool=str(response.get("tool") or ""), arguments=dict(arguments) if isinstance(arguments, dict) else None)
 
     def may_delegate(self, depth: int) -> bool:
         """Declared policy, so it needs no round trip.
@@ -357,7 +439,7 @@ class LoopChannel(SandboxTransport, Protocol):
 
 async def run_agent(channel: LoopChannel, spec: AgentSpec, task: str, *, tools: Any, agents: Any, config: RunConfig,
                     max_depth: int | None = None, depth: int = 1, ancestry: tuple[str, ...] = (),
-                    parent_run_id: str | None = None) -> None:
+                    parent_run_id: str | None = None, scope: str = "", resume: list[dict[str, Any]] | None = None) -> None:
     """The sandbox's side: run one agent and report what happens.
 
     This is what a kernel calls. The loop is the loop this repository tests;
@@ -367,7 +449,8 @@ async def run_agent(channel: LoopChannel, spec: AgentSpec, task: str, *, tools: 
 
     loop = sandboxed_loop(channel, tools=tools, agents=agents, config=config, max_depth=max_depth)
 
-    async for event in loop.stream(spec, task, depth=depth, ancestry=ancestry, parent_run_id=parent_run_id):
+    async for event in loop.stream(spec, task, depth=depth, ancestry=ancestry, parent_run_id=parent_run_id,
+                                   scope=scope, resume=resume):
         await channel.emit(event_payload(event))
 
 
@@ -383,8 +466,12 @@ class SandboxedLoop:
         self.channel, self.start, self.config = channel, start, config
 
     async def stream(self, spec: AgentSpec, task: str, *, depth: int = 1, ancestry: tuple[str, ...] = (),
-                     parent_run_id: str | None = None) -> AsyncIterator[Event]:
-        running = asyncio.ensure_future(self.start(spec, task, depth, ancestry, parent_run_id))
+                     parent_run_id: str | None = None, scope: str = "", resume: list[dict[str, Any]] | None = None,
+                     parents: tuple = ()) -> AsyncIterator[Event]:
+        # A step's scope and saved progress travel to the sandbox only when
+        # there are any, so a deployment's own `start` keeps working unchanged.
+        extra = {key: value for key, value in (("scope", scope), ("resume", resume)) if value}
+        running = asyncio.ensure_future(self.start(spec, task, depth, ancestry, parent_run_id, **extra))
         stop = {RunFinished} if depth == 1 else {AgentFinished}
         finished = False
 
@@ -414,6 +501,10 @@ class SandboxedLoop:
             (item for item in outcome if isinstance(item, BaseException) and not isinstance(item, asyncio.CancelledError)),
             None,
         )
+
+        if isinstance(failure, ActionStopped):
+            # The run stops for a person, exactly as it would in this process.
+            raise failure
 
         if failure is not None:
             raise RuntimeError(f"The sandbox failed: {failure}") from failure
@@ -457,10 +548,10 @@ class InProcessChannel:
 def sandboxed_agent(channel: InProcessChannel, *, tools: Any, agents: Any, config: RunConfig, max_depth: int | None = None) -> SandboxedLoop:
     """Run one agent through this channel, as the control plane's side sees it."""
 
-    async def start(spec, task, depth, ancestry, parent_run_id):
+    async def start(spec, task, depth, ancestry, parent_run_id, scope="", resume=None):
         try:
             await run_agent(channel, spec, task, tools=tools, agents=agents, config=config, max_depth=max_depth,
-                            depth=depth, ancestry=ancestry, parent_run_id=parent_run_id)
+                            depth=depth, ancestry=ancestry, parent_run_id=parent_run_id, scope=scope, resume=resume)
         finally:
             channel.close()
 

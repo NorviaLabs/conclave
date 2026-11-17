@@ -120,8 +120,24 @@ def test_host_failure_and_interrupted_iterator_are_durable(tmp_path):
 
     asyncio.run(interrupt())
     assert repository.get(run_id)["status"] == "interrupted"
+    # A run recorded before the action journal existed cannot say whether a
+    # write was in flight, so it stays unresumable. (A journaled run resumes:
+    # tests/test_resumable_writes.py.)
+    as_recorded_before_the_journal(repository, run_id)
     with pytest.raises(ValueError, match="Only a waiting, paused or stopped run"):
         collect(repository.resume(run_id, None, ToolRegistry(20000)))
+
+
+def as_recorded_before_the_journal(repository, run_id):
+    """Rewrite a run's start event the way runs were recorded before the journal."""
+    with repository._connect() as connection:
+        for sequence, payload in connection.execute(
+                "SELECT sequence, payload FROM studio_run_events WHERE run_id = ?", (run_id,)).fetchall():
+            event = json.loads(payload)
+            if event.get("type") == "ApplicationStarted" and "journal" in event:
+                del event["journal"]
+                connection.execute("UPDATE studio_run_events SET payload = ? WHERE run_id = ? AND sequence = ?",
+                                   (json.dumps(event), run_id, sequence))
 
 
 def test_completed_run_with_explicit_human_input(tmp_path):
@@ -234,7 +250,7 @@ def test_parallel_failure_identifies_responsible_stage(failure):
         {"id": "sibling", "agent": "writer", "task": "Wait", "output": "brief"},
     ]
     definition["connections"] = []
-    both_started = asyncio.Event()
+    both_started, failing = asyncio.Event(), asyncio.Event()
 
     class ParallelLoop:
         def __init__(self, *args, **kwargs):
@@ -242,9 +258,16 @@ def test_parallel_failure_identifies_responsible_stage(failure):
 
         async def stream(self, spec, prompt):
             if "STAGE TASK:\nWait" in prompt:
+                # The sibling is still working when the draft fails, and it is
+                # not cancelled: it finishes, and its work is kept.
                 both_started.set()
-                await asyncio.Event().wait()
+                await failing.wait()
+                await asyncio.sleep(0.01)
+                yield RunFinished(run_id="sibling", agent="writer", status="completed",
+                                  result=AgentResult(content="Done", private=PrivateState(CONFIG), data={"text": "Sibling"}))
+                return
             await both_started.wait()
+            failing.set()
             if failure == "exception":
                 raise RuntimeError("private credential must not leak")
             yield RunFinished(run_id="test", agent="writer", status="stopped" if failure == "stopped" else "completed",
@@ -256,6 +279,8 @@ def test_parallel_failure_identifies_responsible_stage(failure):
     assert events[-1]["stage"] == "draft"
     assert events[-1]["status"] == ("stopped" if failure == "stopped" else "failed")
     assert "private credential" not in json.dumps(events)
+    sibling = [event for event in events if event["type"] == "StageFinished" and event["stage"] == "sibling"]
+    assert sibling and sibling[0]["status"] == "completed", "the step beside the failure finished"
 
 
 @pytest.mark.parametrize("failure", ["exception", "invalid_output"])

@@ -265,6 +265,10 @@ node scripts/check-config.mjs      # host configuration and catalogues
 node scripts/check-api-proxy.mjs   # the same-origin proxy and its token
 node scripts/check-pagination.mjs  # reads that followed pages: activity, step card, connection tag
 node scripts/check-notion-publish.mjs  # Notion publish: approval preview, outcome card, allowed pages
+node scripts/check-schedules.mjs   # schedule rules shared with the host, editor, header line, history
+node scripts/check-notifications.mjs  # notification rules shared with the host, section, warnings, run line
+node scripts/check-documents.mjs     # the source settings say PDF and Word files are read as text
+node scripts/check-parallel.mjs      # steps at once: held, pausing, per-step outcomes, limit stops, Steps at once
 ```
 
 `scripts/check-canvas-browser.mjs` is an optional real-browser check for the two
@@ -503,9 +507,21 @@ application subtree. View results and Review input open the existing results
 and human checkpoint without replacing the graph. Context, version and usage
 metrics are under Run information. Timestamps appear only when recorded.
 
+**Uncertain external actions.** When a run stopped while it was sending
+something, a floating panel on the run lists each uncertain action: the service
+and operation, the step and member, why it is uncertain, and what a check found.
+Actions Conclave can check say so and are checked when you press Continue; the
+rest offer **It happened — mark done** (with an optional note for the agent) and
+**Send it again**, each confirmed in place and undoable until Continue. Continue,
+in the panel and the dock, waits for every decision. The panel minimises to a
+pill, run history marks runs that need a check, and the canvas marks their steps
+**Needs check**. On a run that can no longer continue, the panel only records
+what stayed uncertain.
+
 Offline Run UX checks:
 
 ```sh
+node studio/scripts/check-uncertain-actions.mjs
 node studio/scripts/check-run-experience.mjs
 node studio/scripts/check-canvas.mjs
 node studio/scripts/check-live-ui.mjs
@@ -517,6 +533,77 @@ selection, activity scrolling, following, and tablet/mobile inspectors. Set
 `STUDIO_PLAYWRIGHT_MODULE` to an installed Playwright module and
 `STUDIO_BROWSER_ARTIFACTS` to an artifact directory; optionally set
 `STUDIO_BROWSER_CHANNEL=chrome` to use installed Chrome.
+
+### PDF and Word documents
+
+Source folders list `.pdf` and `.docx` files, and agents read them as text, with
+`[Page N]` and heading markers; the source settings help says so. Studio shows
+that an agent used `read_file`, as for any tool, but never the documents' text:
+a run's events do not carry tool arguments or outputs. `node
+studio/scripts/check-documents.mjs` checks the help.
+
+### Several steps at once
+
+Steps that do not depend on each other work side by side, up to **Steps at
+once** (Setup → Limits and approvals → Workload limits; 1 runs them one at a
+time, blank means as many as the host allows). On the run:
+
+- the status line counts what is happening — *2 steps running*, *1 finished,
+  waiting its turn*, *2 steps finishing* while pausing;
+- each working card shows its own activity;
+- a step that finished before an earlier one says **Finished** (green, dashed)
+  and which steps its result joins after; its details show the result and why
+  it is not in the shared results yet;
+- each step that failed or stopped says so on its own card, whichever step the
+  run as a whole names;
+- pressing pause says how many running steps will finish first, and the control
+  stays disabled while they do;
+- a run stopped by its token, time or cost limit says so with the numbers,
+  offers **Open Limits and approvals**, and has no Continue; a step that wrote
+  up at the limit says *cut short at the token limit*.
+
+`node studio/scripts/check-parallel.mjs` checks it offline; the mockups and the
+real-browser verification are in `docs/studio/mockups/parallel-steps/`.
+
+### When a run waits for someone
+
+**Settings → Connections → When a run waits for someone** (on a host with
+connections) chooses where one message goes when a run stops for a review or a
+pause: Off (the default), Slack, Email or Webhook; one of *your own*
+connections of that service, each marked granted to this application or not
+(with **Grant it**); and the channel or address. The preview is the exact
+message, built by the host. A line says whose account sends it, and warnings
+before saving say when the connection is someone else's, is not granted, or
+the host has no Studio address. On the run, the activity stream has one row per
+send — "Told #reviews …", or in amber "Could not tell #reviews" / "#reviews may
+not have been told" — and the run's status line says the same in small text.
+`node studio/scripts/check-notifications.mjs` checks it offline.
+
+### Scheduled applications
+
+**Settings → Connections → When to run → On a schedule** opens the schedule
+editor (offered when the host reports `features.schedules`): how often (every N
+minutes or hours, daily, or weekly on chosen days), the times, an optional
+start, the time zone (this browser's by default), what to do about times missed
+while the host was off, and what each run starts with — the task, the same
+request fields as the Run dialog, and the source. The browser checks the
+schedule with the same rules as the host, and the host works out the **next
+three runs**, shown in the schedule's zone and in yours, so a clock change has
+one implementation. Before you save, the editor warns when writes would be
+refused (nobody approves writes on a schedule unless autonomous execution is
+on) and when the application has no limits. Switching back to a manual start
+drops the schedule from the draft.
+
+On the canvas, the header says **Scheduled · Next run Wed 18 Nov, 09:00
+Europe/London · in 15 hours · runs as Ana Ruiz** (your local time on hover),
+or that the schedule is paused or waiting for an owner, with **Pause schedule**, **Resume schedule**
+or **Turn on schedule** beside the other header actions. When the last time did
+not start a run, one line says why — skipped because the previous run was still
+going (with a link to that run), missed while the host was off, or failed (with
+**Edit the schedule**). Run history tags each run *Scheduled · …* or *Started
+manually*, and lists the skipped, missed and failed times as *not run*. Saving
+a change to someone else's scheduled application makes it yours, and Studio
+says so: "This schedule now runs as you" (by name).
 
 ### Canvas-first Plan screen
 
@@ -691,7 +778,7 @@ written for the person paying for the run rather than for the machine:
 | --- | --- |
 | **Action steps** | how much one member may *do* in a single stage — look something up, read a file, record a finding |
 | **Tool calls** | how many lookups the whole run may make, across every member |
-| **Time** | how long the whole run may take |
+| **Time** | how long the whole run may work: the working time of every step, added up |
 | **Spend** | tokens or money, if you set either |
 
 Delegations and depth are bounded too: how many sub-agents the team may create,
@@ -722,11 +809,14 @@ away:
    offer, and that answer is what the stage produces. The record says which budget
    was spent, so this is never mistaken for a stage that finished early.
 3. **The run can be continued.** Every stage that completes is checkpointed as it
-   goes, and a run stopped by a budget keeps that checkpoint: press **Continue**
-   on a stopped run and it carries on from the last stage that finished — nothing
-   already done is repeated, and the spend already recorded is not forgotten. If
-   it stopped on a limit, raise the limit first; the resumed run keeps the old
-   spend, which is the honest thing for accounting to do.
+   goes, and a run stopped by a member's action limit keeps that checkpoint:
+   press **Continue** on a stopped run and it carries on from the last stage that
+   finished — nothing already done is repeated, and the spend already recorded is
+   not forgotten. A run stopped by a run-wide limit — time, tokens or cost — is
+   the exception: the limit is fixed for that run, so it offers **Open Limits and
+   approvals** instead, to raise it for the next run. Once such a limit is
+   reached, no new step starts and the steps already working write up what they
+   have, so the limit holds even when several steps spend at once.
 
 A backend that stops answering is treated the same way. If a model call does not
 come back in time — five minutes by default — the run **stops** rather than

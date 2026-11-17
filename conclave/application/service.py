@@ -16,7 +16,7 @@ from pathlib import Path
 
 from conclave import Capability, ToolRegistry
 from conclave.providers import OLLAMA_DEFAULT_URL, LocalBackends, resolve_provider
-from .definition import stage_backend, validate_host_tools
+from .definition import MAX_PARALLEL_STEPS, MAX_PARALLEL_STEPS_CEILING, stage_backend, validate_host_tools
 from .runs import RunRepository, validate_run_request
 from .extensions import ConnectorAdapter, load_extensions, load_provider_factory
 from .planning import propose, questions, refine
@@ -42,6 +42,12 @@ def public_record(record):
         # told so rather than left to guess.
         if event.get("type") == "ApplicationFinished":
             resumable = bool(checkpoint) and event.get("status") in {"waiting_for_human", "paused", "stopped"}
+            # A run-wide limit is part of the saved run: continuing would only
+            # run past it, so a run it stopped is not offered Continue.
+            resumable = resumable and not event.get("budget")
+            # A run that recorded its actions can continue after an
+            # interruption, once whatever was in flight is settled.
+            resumable = resumable or (event.get("status") == "interrupted" and bool(record.get("journal")))
         if checkpoint:
             metrics = checkpoint["budget"]["spent"]
             if event["type"] == "ApplicationStateChanged":
@@ -92,6 +98,18 @@ class LocalRunHost:
         self.adapters = tuple(adapters)
         self.resources = resources
         self.source_extensions = source_extensions
+        # The scheduler for this host's schedules, while one is running.
+        self.schedules = None
+        # "This run is waiting for you": where Studio is served from (for the
+        # link), what sends the messages, and the sends still going, which
+        # close() waits for a little rather than cutting off.
+        self.studio_url = None
+        # How often one run, and one application, may tell someone (seconds
+        # between a run's messages; messages per application per hour).
+        self.notify_run_interval, self.notify_hourly_limit = 600, 20
+        from .notifier import Notifier
+        self.notifier = Notifier(self)
+        self.background = set()
 
     def run_tools(self, request, *, owner=None):
         """The tools one run may use, and where its calls actually run.
@@ -113,6 +131,10 @@ class LocalRunHost:
 
         return tools
 
+    # How long close() waits for messages still being sent before it gives up
+    # on them (they are then recorded as "may not have been sent").
+    NOTICE_GRACE = 10.0
+
     async def _consume(self, stream):
         try:
             async with aclosing(stream):
@@ -123,13 +145,34 @@ class LocalRunHost:
             # and its status remain authoritative; never rewrite that run.
             pass
 
-    async def _schedule(self, run_id, *, resume=False):
+    async def _run_then_notify(self, stream, run_id, notify=True):
+        try:
+            await self._consume(stream)
+        finally:
+            # The run has stopped. If it now waits for someone and the
+            # application says where to tell them, the message goes out on its
+            # own: the run is never held up by it, and never fails because of it.
+            # An application without the setting costs nothing here.
+            if notify:
+                self.spawn(self.notifier.deliver(run_id))
+
+    def spawn(self, work):
+        """Run background work the host waits for when it closes."""
+        task = asyncio.get_running_loop().create_task(work)
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
+        return task
+
+    async def _schedule(self, run_id, *, resume=False, approvals="ask"):
+        """Start (or resume) a run as a task. `approvals="refuse"` is for a run
+        nobody is watching — a scheduled one: a destructive call is refused
+        unless the application authorized its tools up front."""
         active = self.tasks.get(run_id)
         if active is not None:
             if not active[0].done():
                 raise ValueError("This request is already running")
             self.tasks.pop(run_id)
-        owner = self.connections.run_owner(run_id, self.principal.tenant) if getattr(self, 'connections', None) else None
+        owner = self.run_actor(run_id)
         saved_request = self.repository.get(run_id)["request"]
         definition = saved_request["definition"]
         tools = self.run_tools(saved_request, owner=owner)
@@ -148,9 +191,9 @@ class LocalRunHost:
             # A destructive call is answered by the person running it: the
             # connection's owner when a connection is involved, the run's owner
             # otherwise. Every write tool asks, not only a connected service.
-            if not self.interactive_approvals:
+            if not self.interactive_approvals or approvals == "refuse" or owner is None:
                 return False
-            return await self.tool_approvals.approver(run_id, owner or self.principal.name)(request)
+            return await self.tool_approvals.approver(run_id, owner)(request)
         # A resumed run is no longer paused, or it would stop again immediately.
         self.pauses.discard(run_id)
         stream = (self.repository.resume(run_id, provider, tools, loop=self.loop, approver=approver,
@@ -167,7 +210,8 @@ class LocalRunHost:
             self.repository._append(run_id, {"type": "ToolAuthorizationGranted",
                 "mode": "autonomous", "authorizer": owner or self.principal.name,
                 "tools": {agent: sorted(names) for agent, names in grants.items()}})
-        task = asyncio.create_task(self._consume(stream))
+        notify = bool((definition.get("notifications") or {}).get("waiting"))
+        task = asyncio.create_task(self._run_then_notify(stream, run_id, notify))
         self.tasks[run_id] = (task, stream)
 
         def forget_task(done):
@@ -177,6 +221,41 @@ class LocalRunHost:
                 self.pauses.discard(run_id)
 
         task.add_done_callback(forget_task)
+
+    async def prepare_run(self, value, actor):
+        """The checks every run passes before it is created, whoever starts it.
+
+        A person's start and a schedule's time both come through here, acting
+        as `actor`: the request is validated, the team's tools are bound as
+        that person, the backends and host connectors are checked, and the
+        source (and its version) is pinned. Returns the request to record.
+        """
+        value = validate_run_request(value)
+        if "resources" not in value and value["definition"].get("resources"):
+            value["resources"] = dict(value["definition"]["resources"])
+        validate_host_tools(value["definition"], self.run_tools(value, owner=actor.name))
+        self._validate_backends(value["definition"])
+
+        self.run_tools(value, owner=actor.name)
+        # Pin the compatibility default just like an explicit selection.
+        if self.resources is not None and not value.get("resources") and "default" in self.resources:
+            if any(SOURCE_TOOLS.intersection(agent["tools"]) for agent in value["definition"]["agents"]):
+                value["resources"] = {"source": "default"}
+        if self.resources is not None and value.get("resources", {}).get("source"):
+            value["resources"]["source_revision"] = self.resources[value["resources"]["source"]]["revision"]
+        selected = {item["connector"]: item for item in value["definition"].get("integrations", [])}
+        for adapter in self.adapters:
+            if adapter.id in selected:
+                try:
+                    descriptor = await adapter.describe(self.tools)
+                except Exception:
+                    raise ValueError("Selected host connector is unavailable: " + adapter.id) from None
+                if not descriptor["available"]:
+                    raise ValueError("Selected host connector is unavailable: " + adapter.id)
+                mode = selected[adapter.id]["mode"]
+                if adapter.mode == "read" and mode != "read" or adapter.mode == "model" and mode != "model":
+                    raise ValueError("Selected connector does not support these actions: " + adapter.id)
+        return value
 
     def _require_provider(self):
         if self.provider is None:
@@ -265,8 +344,13 @@ class LocalRunHost:
                                                "permission": "write" if tool.destructive else "read",
                                                "origin": "host", "category": "Host tools", "available": True}
                                               for tool in self.tools.tools.values()],
+                         # The most steps of one run that work at once here, so
+                         # Studio can offer it as the ceiling of Steps at once.
+                         "max_parallel_steps": self.repository.max_parallel_steps,
                          "features": {"dag": True, "durable_reviews": True, "manual": True,
-                                      "schedules": False, "events": streaming, "budget_warnings": True}}
+                                      "schedules": self.schedules is not None, "events": streaming, "budget_warnings": True,
+                                      "notifications": getattr(self, "connections", None) is not None,
+                                      "studio_url": bool(self.studio_url)}}
         if command == "refine":
             # One model call that only sharpens the person's own words.
             self._require_provider()
@@ -281,33 +365,9 @@ class LocalRunHost:
             return 200, await propose(self.provider, self.tools, value)
         if command == "start":
             self._require_provider()
-            value = validate_run_request(value)
-            if "resources" not in value and value["definition"].get("resources"):
-                value["resources"] = dict(value["definition"]["resources"])
             actor = principal or self.principal
-            validate_host_tools(value["definition"], self.run_tools(value, owner=actor.name))
-            self._validate_backends(value["definition"])
-
-            self.run_tools(value, owner=actor.name)
-            # Pin the compatibility default just like an explicit selection.
-            if self.resources is not None and not value.get("resources") and "default" in self.resources:
-                if any(SOURCE_TOOLS.intersection(agent["tools"]) for agent in value["definition"]["agents"]):
-                    value["resources"] = {"source": "default"}
-            if self.resources is not None and value.get("resources", {}).get("source"):
-                value["resources"]["source_revision"] = self.resources[value["resources"]["source"]]["revision"]
-            selected = {item["connector"]: item for item in value["definition"].get("integrations", [])}
-            for adapter in self.adapters:
-                if adapter.id in selected:
-                    try:
-                        descriptor = await adapter.describe(self.tools)
-                    except Exception:
-                        raise ValueError("Selected host connector is unavailable: " + adapter.id) from None
-                    if not descriptor["available"]:
-                        raise ValueError("Selected host connector is unavailable: " + adapter.id)
-                    mode = selected[adapter.id]["mode"]
-                    if adapter.mode == "read" and mode != "read" or adapter.mode == "model" and mode != "model":
-                        raise ValueError("Selected connector does not support these actions: " + adapter.id)
-            run_id = self.repository.create(value)
+            value = await self.prepare_run(value, actor)
+            run_id = self.repository.create(value, actor=actor.name)
             if getattr(self, 'connections', None):
                 self.connections.pin_run(run_id, actor.tenant, actor.name)
             await self._schedule(run_id)
@@ -327,7 +387,7 @@ class LocalRunHost:
             request_value = validate_run_request({'version': 1, 'application_id': application,
                 'revision': value['revision'], 'definition': value['definition'],
                 'task': trigger['task'], 'inputs': value['inputs']})
-            run_id = self.repository.create(request_value)
+            run_id = self.repository.create(request_value, actor=record['owner'])
             store.pin_run(run_id, self.principal.tenant, record['owner'])
             await self._schedule(run_id)
             return 201, {'run_id': run_id, 'application_id': application, 'delivery_id': trigger['delivery_id'],
@@ -340,14 +400,13 @@ class LocalRunHost:
                 runs = [run for run in runs if self.connections.run_owner(run['id'], self.principal.tenant)
                         in (None, (principal or self.principal).name)]
             return 200, {'runs': runs}
+        if command in {"actions", "check", "settle"}:
+            return 200, await self._actions_command(command, value, principal or self.principal)
         if command in {"get", "resume", "cancel", "pause"}:
             if set(value) != {"run_id"} or not isinstance(value["run_id"], str):
                 raise ValueError("Choose a saved request")
             run_id = value["run_id"]
-            if getattr(self, 'connections', None):
-                owner = self.connections.run_owner(run_id, self.principal.tenant)
-                if owner is not None and owner != (principal or self.principal).name:
-                    raise ValueError('Integration run belongs to another principal')
+            self._require_run_owner(run_id, principal)
             self.repository.get(run_id)
             if command == "pause":
                 # Asked between steps: the run finishes the step it is in and
@@ -357,18 +416,29 @@ class LocalRunHost:
                 self.pauses.add(run_id)
             elif command == "resume":
                 self._require_provider()
+                # Whatever was left uncertain is checked with its service
+                # first; the run continues only once everything is settled.
+                if (self.repository.get(run_id)["status"] in {"interrupted", "stopped", "paused", "waiting_for_human"}
+                        and self.repository.journal.uncertain(run_id)):
+                    await self.repository.check_actions(run_id, self._action_tools(run_id))
                 await self._schedule(run_id, resume=True)
             elif command == "cancel":
                 self.pauses.discard(run_id)
                 active = self.tasks.get(run_id)
                 if active is not None:
                     task, stream = active
-                    task.cancel()
+                    # A person stopping a run cancels it: it is not a run the
+                    # host lost, and it is not offered to continue.
+                    self.repository.stopping.add(run_id)
                     try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    await stream.aclose()
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        await stream.aclose()
+                    finally:
+                        self.repository.stopping.discard(run_id)
                 if active is None or self.repository.get(run_id)["status"] in {"waiting_for_human", "paused"}:
                     self.repository.cancel_waiting(run_id)
             return 200, public_record(self.repository.get(run_id))
@@ -383,6 +453,132 @@ class LocalRunHost:
             self.repository.submit_review(value["run_id"], value["review_id"], reviewer=reviewer, output=value["output"])
             return 200, public_record(self.repository.get(value["run_id"]))
         raise ValueError("Unknown local run command")
+
+    def _require_run_owner(self, run_id, principal):
+        if getattr(self, 'connections', None):
+            owner = self.connections.run_owner(run_id, self.principal.tenant)
+            if owner is not None and owner != (principal or self.principal).name:
+                raise ValueError('Integration run belongs to another principal')
+
+    def run_actor(self, run_id):
+        """Whom a run acts as, and so who answers its approvals and decisions.
+
+        The connection owner it is pinned to; else the person recorded when it
+        was created (whoever started it, or the schedule's owner). A run from
+        before that was recorded falls back to this host's principal, unless
+        the host is not a person (a tenant started for its schedules): then
+        nobody is asked, and nothing is approved.
+        """
+        owner = self.connections.run_owner(run_id, self.principal.tenant) if getattr(self, 'connections', None) else None
+        if owner is None:
+            owner = self.repository.actor(run_id)
+        if owner is None and self.principal.source != "system":
+            owner = self.principal.name
+        return owner
+
+    def _run_approver(self, run_id):
+        return self.run_actor(run_id)
+
+    def _action_tools(self, run_id, request=None):
+        """The run's tools as bound now, so grants and revocations are asked again."""
+        owner = self.run_actor(run_id)
+        try:
+            return self.run_tools(request or self.repository.get(run_id)["request"], owner=owner)
+        except Exception:
+            # A connection that was removed cannot be read through: its checks
+            # are unavailable, and a person decides.
+            from conclave import ToolRegistry
+            return ToolRegistry(None)
+
+    def _action_label(self, tool, run_id):
+        """The service's name when the run's own owner has that connection.
+
+        Read as the run's owner within this tenant only, so a label never
+        opens another owner's connection record.
+        """
+        from .definition import action_label
+        parts = tool.split(".")
+        store = getattr(self, 'connections', None)
+        if len(parts) == 3 and parts[0] == "connection" and store is not None:
+            try:
+                record = store._read(parts[1], self.principal.tenant, self._run_approver(run_id))
+                return f"{store.service_for(record).name} · {parts[2].replace('_', ' ').capitalize()}"
+            except Exception:
+                pass
+        return action_label(tool)
+
+    async def _actions_command(self, command, value, principal):
+        """List a run's external actions, check one, or record a person's decision.
+
+        Decisions are recorded as the principal making the request, never as
+        a name in the payload.
+        """
+        allowed = {"actions": ({"run_id"}, set()), "check": ({"run_id", "action_id"}, set()),
+                   "settle": ({"run_id", "action_id", "decision"}, {"note"})}[command]
+        if not allowed[0] <= set(value) <= allowed[0] | allowed[1] or any(
+                not isinstance(value[key], str) for key in allowed[0]):
+            raise ValueError("Choose the run and the action, and an explicit decision")
+        if "note" in value and not isinstance(value["note"], str):
+            raise ValueError("A note is text")
+        run_id = value["run_id"]
+        self._require_run_owner(run_id, principal)
+        # Deciding an action — "send it again" above all — is approving it, so
+        # only the person who answers this run's tool approvals may see the
+        # details or decide: the connection's owner, or this host's principal.
+        approver = self._run_approver(run_id)
+        if approver is None or principal.name != approver:
+            raise ValueError("Only the person who approves this run's actions can see or decide them")
+        if command == "check":
+            await self.repository.check_actions(run_id, self._action_tools(run_id), only=value["action_id"])
+        elif command == "settle":
+            note = value.get("note") or None
+            self.repository.settle(run_id, value["action_id"], value["decision"], by=principal.name, note=note)
+        return {"actions": self._action_views(run_id)}
+
+    def _action_views(self, run_id):
+        """Each action as a person deciding about it needs to see it.
+
+        The arguments appear only while they could still be sent: for an
+        uncertain action, and for one a person chose to send again.
+        """
+        from .definition import action_label
+        from .runs import TERMINAL
+        # One record, one list and one read of the details, however many actions.
+        record = self.repository.get(run_id)
+        tools = self._action_tools(run_id, record["request"])
+        details = self.repository.journal.details(run_id)
+        views = []
+        for action in self.repository.actions(run_id, record=record):
+            tool = tools.tool(action["tool"])
+            detail = details.get(action["id"], {})
+            arguments = detail.get("arguments")
+            check = getattr(tool, "check", None)
+            described = ""
+            if check is not None and action["state"] == "uncertain":
+                try:
+                    described = check.describe(detail.get("call") or {})
+                except Exception:
+                    described = ""
+            by_person = action["settled_kind"] == "person"
+            view = {key: action[key] for key in ("id", "stage", "agent", "tool", "state", "attempts", "started_at",
+                                                 "finished_at", "reason", "approval", "settled_by", "settled_kind",
+                                                 "settled_at", "final")}
+            view.update(
+                label=self._action_label(action["tool"], run_id),
+                note=detail.get("note") if by_person else None,
+                undoable=by_person and action["state"] in {"done", "resend"} and not action["final"]
+                and record["status"] not in TERMINAL,
+                check={"available": check is not None, "description": described,
+                       "unavailable_reason": "" if check is not None else (
+                           tool.check_unavailable if tool is not None and tool.check_unavailable
+                           else "This host no longer offers this tool" if tool is None
+                           else f"{action_label(action['tool'])} cannot be checked automatically"),
+                       "result": action["check_result"], "summary": action["check_summary"], "checked_at": action["checked_at"]},
+            )
+            if arguments is not None:
+                view["arguments"] = arguments
+            views.append(view)
+        return views
 
     @staticmethod
     def _integration_group(category):
@@ -424,6 +620,15 @@ class LocalRunHost:
         await asyncio.gather(*(task for task, stream in active), return_exceptions=True)
         for task, stream in active:
             await stream.aclose()
+        # Messages still being sent get a moment to finish; one cut off here
+        # stays "sending", and the next host to open the store records that it
+        # may not have gone out. It is never sent twice.
+        pending = [task for task in self.background if not task.done()]
+        if pending:
+            _, late = await asyncio.wait(pending, timeout=self.NOTICE_GRACE)
+            for task in late:
+                task.cancel()
+            await asyncio.gather(*late, return_exceptions=True)
 
 
 def configured_paths(principal) -> StoragePaths:
@@ -450,6 +655,26 @@ def configured_paths(principal) -> StoragePaths:
                         applications=Path(setting("DATABASE")) if setting("DATABASE") else runs.parent / "studio.sqlite")
 
 
+def run_journal_key():
+    """The key that seals what a run records about its external actions.
+
+    `CONCLAVE_RUN_KEY` when set; otherwise derived from the integration key
+    for this one purpose (HKDF-SHA256), so one key never serves two. None when
+    neither is set: the run database is then this user's alone, unsealed.
+    """
+    import base64
+    explicit = setting("RUN_KEY")
+    if explicit:
+        return explicit.encode()
+    integration = setting("INTEGRATION_KEY")
+    if not integration:
+        return None
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"conclave-run-journal-v1").derive(integration.encode())
+    return base64.urlsafe_b64encode(derived)
+
+
 def configured_host(*, workspace=None, source_dir=None, principal=None, interactive_approvals=True):
     profile = resolve_profile(setting("PROFILE"))
     principal = principal or resolve_principal(setting("PRINCIPAL"), setting("TENANT"))
@@ -463,7 +688,10 @@ def configured_host(*, workspace=None, source_dir=None, principal=None, interact
     output_limit = defaults["run_config"]["max_tool_output_chars"]
     tools = ToolRegistry(output_limit)
     adapters = []
-    source_extensions = {item.strip().lower() for item in setting("SOURCE_EXTENSIONS", ".txt,.md,.csv,.html").split(',')}
+    # PDF and Word documents are read as text (conclave/tools/documents.py).
+    source_extensions = {item.strip().lower() for item in setting("SOURCE_EXTENSIONS", ".txt,.md,.csv,.html,.pdf,.docx").split(',')}
+    from conclave.tools.documents import Limits
+    Limits.from_environment()  # a bad CONCLAVE_DOCUMENT_* setting stops the host here, by name
     import re
     if not source_extensions or any(not re.fullmatch(r"\.[a-z0-9_-]+", item) for item in source_extensions):
         raise ValueError("STUDIO_SOURCE_EXTENSIONS must contain comma-separated file suffixes")
@@ -528,8 +756,10 @@ def configured_host(*, workspace=None, source_dir=None, principal=None, interact
     history_limit = int(setting("HISTORY_LIMIT", "30"))
     if history_limit < 1:
         raise ValueError("CONCLAVE_HISTORY_LIMIT must be positive")
-    repository = RunRepository(paths.runs)
+    run_key = run_journal_key()
+    repository = RunRepository(paths.runs, **({"key": run_key} if run_key else {}))
     repository.history_limit = history_limit
+    repository.max_parallel_steps = parallel_step_cap(setting("MAX_PARALLEL_STEPS", str(MAX_PARALLEL_STEPS)))
     # This host is taking over the store, so nothing in it can still be running.
     repository.sweep_abandoned()
     host = LocalRunHost(repository, provider, tools,
@@ -537,6 +767,9 @@ def configured_host(*, workspace=None, source_dir=None, principal=None, interact
                         resources=resources, source_extensions=source_extensions, provider_source=source,
                         profile=profile, principal=principal, paths=paths, backends=backends,
                         interactive_approvals=interactive_approvals)
+    host.studio_url = studio_address(setting("STUDIO_URL"))
+    host.notify_run_interval = whole_number("NOTIFY_RUN_INTERVAL", setting("NOTIFY_RUN_INTERVAL", "600"), minimum=0)
+    host.notify_hourly_limit = whole_number("NOTIFY_HOURLY_LIMIT", setting("NOTIFY_HOURLY_LIMIT", "20"), minimum=1)
     key = setting('INTEGRATION_KEY')
     if key:
         from conclave.integrations import ConnectionStore
@@ -553,6 +786,39 @@ def configured_host(*, workspace=None, source_dir=None, principal=None, interact
         host.connections = ConnectionStore(paths.root / 'connections.sqlite', key.encode(),
                                            hosts=filter(None, setting('INTEGRATION_HOSTS', '').split(',')), adapters=adapters, oauth=oauth)
     return host
+
+
+def parallel_step_cap(value):
+    """How many steps of one run this host lets work at once.
+
+    An application's "Steps at once" may be blank, meaning as many as the host
+    allows; this is that number, so a blank never means as many as a plan has.
+    """
+    cap = whole_number("MAX_PARALLEL_STEPS", value, minimum=1)
+    if cap > MAX_PARALLEL_STEPS_CEILING:
+        raise ValueError(f"CONCLAVE_MAX_PARALLEL_STEPS must be at most {MAX_PARALLEL_STEPS_CEILING}")
+    return cap
+
+
+def whole_number(name, value, *, minimum):
+    try:
+        number = int(str(value).strip())
+    except ValueError:
+        number = None
+    if number is None or number < minimum:
+        raise ValueError(f"CONCLAVE_{name} must be a whole number of at least {minimum}")
+    return number
+
+
+def studio_address(value):
+    """Where Studio is served from, for the link in a 'waiting for you' message."""
+    if not value:
+        return None
+    from urllib.parse import urlsplit
+    parts = urlsplit(str(value).strip())
+    if parts.scheme not in {"http", "https"} or not parts.netloc or parts.query or parts.fragment or "#" in str(value):
+        raise ValueError("CONCLAVE_STUDIO_URL must be an http(s) address with no query or fragment, such as https://studio.example.com")
+    return str(value).strip().rstrip("/")
 
 
 def request_body_limit():

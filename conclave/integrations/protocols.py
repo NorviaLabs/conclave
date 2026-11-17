@@ -1,6 +1,7 @@
 """Host-approved protocol operations; discovery never constitutes a grant."""
 import re
 from urllib.parse import quote
+from conclave.actions import current_action
 from .connections import validate_arguments
 from .transport import IntegrationError
 
@@ -78,7 +79,12 @@ class OpenAPI:
                 if str(value) in ('.','..') or '/' in str(value):raise IntegrationError('Invalid resource identifier')
                 path=path.replace('{'+key+'}',quote(str(value),safe=''))
             else:query[key]=value
-        return await self.transport.request(operation['method'],self.base_url+path,headers=self.headers,params=query,body=body)
+        headers=self.headers
+        action=current_action.get()
+        if action and operation['method']!='GET':
+            # A write carries its action, so a receiver can drop a repeat of it.
+            headers={**self.headers,'Idempotency-Key':action}
+        return await self.transport.request(operation['method'],self.base_url+path,headers=headers,params=query,body=body)
 
 
 def readonly_query(query, views):

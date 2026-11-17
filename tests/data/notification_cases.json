@@ -1,0 +1,259 @@
+{
+ "valid": [
+  {
+   "name": "slack channel name",
+   "notifications": {
+    "waiting": {
+     "via": "slack",
+     "connection": "team_slack",
+     "channel": "#reviews"
+    }
+   }
+  },
+  {
+   "name": "slack channel id",
+   "notifications": {
+    "waiting": {
+     "via": "slack",
+     "connection": "team_slack",
+     "channel": "C04ENGREVIEW"
+    }
+   }
+  },
+  {
+   "name": "email",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail",
+     "address": "billing-leads@acme.example"
+    }
+   }
+  },
+  {
+   "name": "webhook",
+   "notifications": {
+    "waiting": {
+     "via": "webhook",
+     "connection": "ops_hook"
+    }
+   }
+  }
+ ],
+ "invalid": [
+  {
+   "name": "not an object",
+   "notifications": "slack",
+   "message": "Say where to send the message when a run waits"
+  },
+  {
+   "name": "no waiting",
+   "notifications": {},
+   "message": "Say where to send the message when a run waits"
+  },
+  {
+   "name": "unknown top-level key",
+   "notifications": {
+    "waiting": {
+     "via": "webhook",
+     "connection": "ops_hook"
+    },
+    "done": {}
+   },
+   "message": "Unsupported notification setting: done"
+  },
+  {
+   "name": "unknown channel",
+   "notifications": {
+    "waiting": {
+     "via": "sms",
+     "connection": "ops_hook"
+    }
+   },
+   "message": "Choose Slack, Email or Webhook"
+  },
+  {
+   "name": "no connection",
+   "notifications": {
+    "waiting": {
+     "via": "webhook"
+    }
+   },
+   "message": "Choose one of your connections"
+  },
+  {
+   "name": "connection with a hyphen",
+   "notifications": {
+    "waiting": {
+     "via": "webhook",
+     "connection": "ops-hook"
+    }
+   },
+   "message": "Choose one of your connections"
+  },
+  {
+   "name": "connection too long",
+   "notifications": {
+    "waiting": {
+     "via": "webhook",
+     "connection": "a23456789012345678901234567890123"
+    }
+   },
+   "message": "Choose one of your connections"
+  },
+  {
+   "name": "slack without a channel",
+   "notifications": {
+    "waiting": {
+     "via": "slack",
+     "connection": "team_slack"
+    }
+   },
+   "message": "Name the Slack channel, such as #reviews"
+  },
+  {
+   "name": "slack channel with a space",
+   "notifications": {
+    "waiting": {
+     "via": "slack",
+     "connection": "team_slack",
+     "channel": "#team reviews"
+    }
+   },
+   "message": "Name the Slack channel, such as #reviews"
+  },
+  {
+   "name": "slack channel too long",
+   "notifications": {
+    "waiting": {
+     "via": "slack",
+     "connection": "team_slack",
+     "channel": "#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   },
+   "message": "Name the Slack channel, such as #reviews"
+  },
+  {
+   "name": "slack channel with a control character",
+   "notifications": {
+    "waiting": {
+     "via": "slack",
+     "connection": "team_slack",
+     "channel": "#reviews\n"
+    }
+   },
+   "message": "Name the Slack channel, such as #reviews"
+  },
+  {
+   "name": "email without an address",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail"
+    }
+   },
+   "message": "Give one email address"
+  },
+  {
+   "name": "email not an address",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail",
+     "address": "billing leads"
+    }
+   },
+   "message": "Give one email address"
+  },
+  {
+   "name": "email list",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail",
+     "address": "a@acme.example,b@acme.example"
+    }
+   },
+   "message": "Give one email address"
+  },
+  {
+   "name": "email display name",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail",
+     "address": "Ana <ana@acme.example>"
+    }
+   },
+   "message": "Give one email address"
+  },
+  {
+   "name": "email header injection",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail",
+     "address": "ana@acme.example\r\nBcc: x@evil.example"
+    }
+   },
+   "message": "Give one email address"
+  },
+  {
+   "name": "email too long",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail",
+     "address": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@acme.example"
+    }
+   },
+   "message": "Give one email address"
+  },
+  {
+   "name": "slack with an address",
+   "notifications": {
+    "waiting": {
+     "via": "slack",
+     "connection": "team_slack",
+     "channel": "#reviews",
+     "address": "a@acme.example"
+    }
+   },
+   "message": "Unsupported notification setting: address"
+  },
+  {
+   "name": "email with a channel",
+   "notifications": {
+    "waiting": {
+     "via": "email",
+     "connection": "ana_gmail",
+     "address": "a@acme.example",
+     "channel": "#reviews"
+    }
+   },
+   "message": "Unsupported notification setting: channel"
+  },
+  {
+   "name": "webhook with a channel",
+   "notifications": {
+    "waiting": {
+     "via": "webhook",
+     "connection": "ops_hook",
+     "channel": "#reviews"
+    }
+   },
+   "message": "Unsupported notification setting: channel"
+  },
+  {
+   "name": "unknown key",
+   "notifications": {
+    "waiting": {
+     "via": "webhook",
+     "connection": "ops_hook",
+     "url": "https://evil.example"
+    }
+   },
+   "message": "Unsupported notification setting: url"
+  }
+ ]
+}

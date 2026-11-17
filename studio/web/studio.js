@@ -17,8 +17,12 @@ import {runProgressMarkup,runStepWorking} from '/run-canvas.js';
 import {crewPollMarkup} from '/crew-poll.js';
 import {proposePlanChange,parseImportedDefinition,describeDefinitionChanges} from '/plan-assistant.js';
 import {projectLiveRun,liveRunMarkup,liveFollowMode,liveStreamPath} from '/live.js';
+import {actionPanelMarkup,continueGate,historyBadgeMarkup} from '/run-actions.js';
 import {createStepTestsController} from '/step-tests.js';
 import {apiUrl,apiHeaders} from '/api.js';
+import {notifyEditorMarkup,notifyWarnings,notifyPreviewMarkup,notifySummary,defaultNotification,runNoticeMarkup} from '/notify-ui.js';
+import {stepsAtOnceMarkup,stepsAtOnceIssue,pauseControl,pauseNotice} from '/parallel-ui.js';
+import {defaultSchedule,changeKind,scheduleWarnings,scheduleEditorMarkup,schedulePreviewMarkup,scheduleLineMarkup,scheduleActionMarkup,scheduleIncompleteMarkup,ownerChangeNotice,statusRefreshDelay,historyRows,slotText,triggerText,viewerZone} from '/schedule-ui.js';
 
 const $ = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -30,9 +34,22 @@ let pendingToolApprovals=[];
 const approvalViews={};
 // Each pending approval's full preview, fetched once; and the fetches in flight.
 const approvalDetails={},approvalFetches=new Set();
+// A run's uncertain external actions, as the host lists them, and where the
+// person is in deciding them. Choices live on the host; only the view is here.
+let runActions={runId:null,key:'',actions:[],minimised:false,confirm:null,deciding:[],notice:'',busy:false,needs:0};
 let integrationCatalogue=[],integrationConnections=[],integrationEnabled=false,oauthProviders=[];
 let runtime={local:false,available:false,tools:[],backends:[]},liveBusy=false,liveError='',liveTimer=null,liveWatch=null,liveClock=null;
 const liveRuns=new Map(),liveHistory=new Map();
+// A saved schedule as the host reports it (next time, paused, what became of
+// recent times), read once per saved version; and the preview of the schedule
+// being edited, keyed by what it was worked out for.
+const scheduleStatus=new Map(),scheduleStatusKeys=new Map();
+// "When a run waits for someone": the host's word on whether a message can be
+// sent and as whom, and the preview of the message, keyed by what it was built from.
+const notifyStatus=new Map(),notifyStatusKeys=new Map();
+let notifyPreview={key:'',data:null,error:''},notifyPreviewTimer=null,notifyPreviewWanted='';
+let schedulePreview={key:'',times:null,error:''},schedulePreviewTimer=null,schedulePreviewWanted='',scheduleRefreshTimer=null;
+const SCHEDULE_FOCUS=['notifyVia','notifyConnection','notifyTarget','scheduleKind','scheduleDay','scheduleTime','scheduleRemoveTime','scheduleAddTime','scheduleEvery','scheduleUnit','scheduleStarts','scheduleZone','scheduleCatchUp','scheduleTask','scheduleInput','scheduleSource','scheduleAction'];
 const steps = ['Purpose','Team','Access','Outputs','Plan','Controls'];
 const accessCatalog=toolDescriptors;
 let canvasZoom=null,runCanvasZoom=null,railOpen=false,showAllApplications=false,canvasPan=null,canvasNodeDrag=null,lastPlanPress={id:null,time:0},connectSource=null,selectedEdge=null,canvasConnect=null;
@@ -79,6 +96,9 @@ async function loadStepTests(){
 // before anyone opens the step. The guard is what stops this from looping.
 function ensureStepExamples(){
   if(stepExamplesApp===currentId)return;
+  // A load already going renders when it finishes. Chaining another render on
+  // to it here would resolve at once and call this again, without end.
+  if(stepExamplesBusy)return;
   loadStepTests().then(()=>{if(view==='plan')render();});
 }
 // The latest test of one step, or nothing. Tests come back newest first.
@@ -117,7 +137,7 @@ async function request(path,options={}){
   const settings=apiSettingsNow();
   const response=await fetch(apiUrl(settings,path),{...options,credentials:settings.credentials,headers:apiHeaders(settings,options)}),result=response.status===204?null:await response.json();
   if(!response.ok){
-    const error=new Error(result.error||'The server could not finish that. Try again.');error.status=response.status;error.login=result.login||'';
+    const error=new Error(result.error||'The server could not finish that. Try again.');error.status=response.status;error.login=result.login||'';error.actions=result.actions||null;
     // A 401 that names a sign-in is the host saying this page is not signed in —
     // a session that lapsed mid-use reads the same way as a first visit, so it
     // becomes the same screen rather than a stray message.
@@ -218,7 +238,7 @@ function render(){
   const running=!!preview?.live&&['pending','running','waiting_human'].includes(preview.mode);
   const disclosures=[...$('app').querySelectorAll('details[data-disclosure]')].map(element=>({key:element.dataset.disclosure,open:element.open}));
   const scrolls=['.plan-canvas','.workbench-resources','.workbench-inspector'].map(selector=>({selector,top:$('app').querySelector(selector)?.scrollTop||0,left:$('app').querySelector(selector)?.scrollLeft||0}));
-  const active=document.activeElement,key=$('app').contains(active)?['path','action','select','tab','record','request','step','filter','format','tool','outputKind','planDrag','assistantInput','requestField','humanInput','humanField','liveHistory','planSearch'].find(k=>active.dataset?.[k]):null,val=key?active.dataset[key]:null,start=active?.selectionStart,end=active?.selectionEnd,index=active?.dataset?.index;
+  const active=document.activeElement,key=$('app').contains(active)?['path','action','select','tab','record','request','step','filter','format','tool','outputKind','planDrag','assistantInput','requestField','humanInput','humanField','liveHistory','planSearch'].find(k=>active.dataset?.[k])||SCHEDULE_FOCUS.find(k=>active.dataset?.[k]!==undefined):null,val=key?active.dataset[key]:null,start=active?.selectionStart,end=active?.selectionEnd,index=active?.dataset?.index;
   const d=viewingRun?preview.definition:draft();
   // The plan is laid out for the canvas it is drawn in: measured from the canvas
   // on screen, and from the window on the very first render.
@@ -227,7 +247,7 @@ function render(){
     :{width:Math.max(760,Math.round(window.innerWidth*0.9)),height:Math.max(520,Math.round(window.innerHeight*0.8))};
   if(!(view==='plan'&&(viewingRun?renderedRunId===preview.runId:renderedPlanId===currentId))){let shape;try{shape=planShape(d);}catch{shape={levels:1,columns:d.workflow.length};}setCanvasMetrics({...size,...shape,narrow:window.innerWidth<=760});}
   const markup=`<div class="shell ${view==='plan'?(viewingRun?'canvas-first-run':'canvas-first-plan'):''} ${railOpen?'rail-open':''}"><aside class="rail ${railOpen?'open':''}" aria-label="Your applications"><button class="rail-toggle" data-action="toggle-rail" aria-expanded="${railOpen}" aria-label="${railOpen?'Collapse the sidebar':'Expand the sidebar'}" title="${railOpen?'Collapse the sidebar':'Expand the sidebar'}"><span class="rail-toggle-icon ${railOpen?'open':''}" aria-hidden="true">${uiIcon('chevron')}</span></button><div class="brand"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m23 8-7-4-9 5v14l9 5 7-4M7 9l9 6 7-4M16 15v13"/></svg><span class="rail-label">Conclave<small>STUDIO</small></span></div><button class="button rail-action" data-action="new" ${saving?'disabled':''} aria-label="New application" title="New application"><span class="rail-icon" aria-hidden="true">${uiIcon('plus')}</span><span class="rail-label">New application</span></button><button class="button catalogue-open rail-action" data-action="open-catalogue" aria-label="Templates" title="Templates"><span class="rail-icon" aria-hidden="true">${uiIcon('list')}</span><span class="rail-label">Templates</span></button><div class="rail-apps"><span class="eyebrow rail-label">Your applications</span><nav class="nav">${sidebarApplications().map(a=>`<button data-select="${escape(a.id)}" class="${a.id===currentId?'active':''}" ${a.id===currentId?'aria-current="true"':''} ${saving?'disabled':''} title="${escape(drafts.get(a.id).name)}"><span class="app-mark" aria-hidden="true">${escape(drafts.get(a.id).name.slice(0,1).toUpperCase())}</span><span class="rail-label">${escape(drafts.get(a.id).name)}<span class="nav-meta">${drafts.get(a.id).agents.length} ${drafts.get(a.id).agents.length===1?'member':'members'}${!a.revision?' · not saved':''}</span></span></button>`).join('')}</nav>${userApplications().length>3?`<button class="text-button rail-label" data-action="toggle-applications">${showAllApplications?'Show fewer':'Show all '+userApplications().length}</button>`:''}</div><div class="rail-foot">${accountMarkup()}<p class="runtime-label rail-label">${runtime.local?'On this computer':'Hosted'+(runtime.tenant&&runtime.tenant!=='local'?' · '+escape(runtime.tenant):'')}</p><details><summary><span class="rail-icon" aria-hidden="true">${uiIcon('sliders')}</span><span class="rail-label">Workspace settings</span></summary>${runtime.local?'<button class="text-button" data-action="source-settings">Source settings</button>':''}<button class="text-button" data-action="edit-catalogue">Custom catalog</button></details></div></aside>
-    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}</h1>${view==='plan'&&!viewingRun?`<p class="application-goal">${escape(d.description)}</p>${!current().revision?'<p class="field-help">Not saved yet. Review the plan and save it, then test any step with sample inputs.</p>':''}`:''}</div><div class="header-actions"><div class="actions">${dirty()?`<button class="button" data-action="save" ${saving?'disabled':''}>${saving?'Saving…':'Save'}</button>`:''}${liveHistory.get(currentId)?.length?`<button class="button" data-action="show-history" title="Run history" aria-label="Run history">${uiIcon('clock')}<span>History</span></button>`:''}${view==='setup'?`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>Run</button>`:''}${view==='setup'?`<button class="button icon-only" data-action="back-to-plan" title="Back to the canvas" aria-label="Back to the canvas">${uiIcon('fit')}</button>`:''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':`Saved · version ${current().revision}`}</span></div></header>
+    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}</h1>${view==='plan'&&!viewingRun?`<p class="application-goal">${escape(d.description)}</p>${scheduleLineMarkup(scheduleStatus.get(currentId),{escape,actions:false})||scheduleIncompleteMarkup(current().definition)}${!current().revision?'<p class="field-help">Not saved yet. Review the plan and save it, then test any step with sample inputs.</p>':''}`:''}</div><div class="header-actions"><div class="actions">${view==='plan'&&!viewingRun?scheduleActionMarkup(scheduleStatus.get(currentId)):''}${dirty()?`<button class="button" data-action="save" ${saving?'disabled':''}>${saving?'Saving…':'Save'}</button>`:''}${liveHistory.get(currentId)?.length||notRunSlots().length?`<button class="button" data-action="show-history" title="Run history" aria-label="Run history">${uiIcon('clock')}<span>History</span></button>`:''}${view==='setup'?`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>Run</button>`:''}${view==='setup'?`<button class="button icon-only" data-action="back-to-plan" title="Back to the canvas" aria-label="Back to the canvas">${uiIcon('fit')}</button>`:''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':`Saved · version ${current().revision}`}</span></div></header>
     ${view==='plan'?workspaceModesMarkup():''}<div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():workspaceMode==='results'?resultsWorkspaceMarkup():viewingRun?runMarkup():workspaceMode==='run'?`<section class="panel"><h2>Run the saved application</h2><p>${dirty()?'You have unsaved changes. A run uses the last saved version, so save first if you want them included. ':''}A run uses real inputs and the access you granted; tests use sample inputs.</p><button class="button primary" data-action="run">Set up a run</button></section>`:planMarkup(draft())}</div></main></div><div id="app-menu" class="canvas-menu-host" hidden></div>`;
   const stableRun=view==='plan'&&workspaceMode!=='results'&&(viewingRun?renderedRunId===preview.runId&&$('app').querySelector('[data-run-canvas]'):renderedPlanId===currentId&&$('app').querySelector('[data-canvas-drop]'));
   if(stableRun)updateRunDOM($('app'),markup);else $('app').innerHTML=markup;
@@ -241,6 +261,10 @@ function render(){
   syncMenu();
   if(view==='plan'&&!viewingRun)applyPlanSearch();
   ensureStepExamples();
+  ensureScheduleStatus();
+  ensureSchedulePreview();
+  ensureNotifyStatus();
+  ensureNotifyPreview();
   followActiveNode();
   if(!stableRun&&key){const attribute=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase()),next=$('app').querySelector(`[data-${attribute}="${CSS.escape(val)}"]${index!==undefined?`[data-index="${CSS.escape(index)}"]`:''}`);next?.focus({preventScroll:true});if(next&&typeof start==='number'&&['INPUT','TEXTAREA'].includes(next.tagName)&&next.type!=='number')try{next.setSelectionRange(start,end);}catch{}}
 }
@@ -583,7 +607,7 @@ function setStepGroup(stepId,id){
 }
 function planMarkup(d){
   if(!d.workflow.some(step=>step.id===selectedStepId))selectedStepId=d.workflow[0].id;
-  const command=commandState();return workbenchMarkup(d,{escape,field,agentName,outputName,capabilityName,search:planSearch,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,provider:runtime.provider||'',issues:planReadiness(d,readinessRuntime()),runtime:readinessRuntime(),connectionSettings:memberIndex=>connectionAssignmentMarkup(d.agents[memberIndex],memberIndex,integrationCatalogue,integrationConnections,currentId,escape),selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,controls:runControllerMarkup(),toolsDisabled:runInFlight(),backends:runtime.backends||[],run:preview?.live?preview:null,exampleFor:stepExample,exampleBadge:stepExample});
+  const command=commandState();return workbenchMarkup(d,{escape,field,agentName,outputName,capabilityName,search:planSearch,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,provider:runtime.provider||'',issues:planReadiness(d,readinessRuntime()),runtime:readinessRuntime(),connectionSettings:memberIndex=>connectionAssignmentMarkup(d.agents[memberIndex],memberIndex,integrationCatalogue,integrationConnections,currentId,escape),selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,controls:runControllerMarkup(actionGate()),toolsDisabled:runInFlight(),backends:runtime.backends||[],run:preview?.live?preview:null,exampleFor:stepExample,exampleBadge:stepExample});
 }
 
 function resultsWorkspaceMarkup(){
@@ -669,6 +693,7 @@ function selectLiveRecord(record){
   if(old?.runId!==run.runId){selectedRunStepId=null;activityExpanded=false;activityFilter='';followActive=true;lastFollowedStep=null;runCanvasZoom=renderedPlanId===currentId?canvasZoom:null;}
   if(preview?.runId!==run.runId)workspaceMode='run';
   preview=run;liveError='';
+  loadRunActions(run);
   if(run.mode==='running'){request(`/api/runs/${run.runId}/tool-approvals`).then(result=>{if(preview?.runId!==run.runId)return;
     // IDs, not the whole payload: a pending preview's summary never changes.
     const changed=pendingToolApprovals.map(item=>item.id).join()!==result.approvals.map(item=>item.id).join();pendingToolApprovals=result.approvals;
@@ -679,6 +704,48 @@ function selectLiveRecord(record){
   const url=new URL(location.href);url.searchParams.set('application',currentId);url.searchParams.set('run',run.runId);history.replaceState(null,'',url);
   render();followLiveRun();
 }
+// The actions a stopped run was sending, read again whenever its record
+// changes. The panel opens on its own when a new decision is needed, starts
+// minimised on a run that can no longer continue, and otherwise keeps the
+// person's own choice of open or minimised.
+const finishedRun=run=>['completed','cancelled','failed'].includes(run.mode);
+function loadRunActions(run){
+  const counts=run.actions||{},any=(counts.to_check||0)+(counts.needs_decision||0)+(counts.unknown||0)+(run.events.some(event=>event.type==='ActionUncertain')?1:0);
+  if(['pending','running'].includes(run.mode)||!any){if(runActions.runId!==run.runId||!any)runActions={...runActions,runId:run.runId,key:'',actions:[],needs:0};return;}
+  const key=`${run.runId}:${run.events.at(-1)?.sequence||0}`;
+  if(runActions.key===key)return;
+  const fresh=runActions.runId!==run.runId;
+  runActions={...runActions,runId:run.runId,key,...(fresh?{minimised:finishedRun(run)||!run.resumable,confirm:null,deciding:[],notice:''}:{})};
+  request(`/api/runs/${encodeURIComponent(run.runId)}/actions`).then(result=>{
+    if(preview?.runId!==run.runId)return;
+    const needs=continueGate(result.actions).pending.length;
+    runActions={...runActions,actions:result.actions,minimised:needs>runActions.needs&&run.resumable&&!finishedRun(run)?false:runActions.minimised,needs};
+    render();
+  }).catch(()=>{});
+}
+async function refreshRunAfterDecision(runId){
+  const record=await request(`/api/runs/${encodeURIComponent(runId)}`);
+  if(preview?.runId===runId)selectLiveRecord(record);
+}
+// The dock's Continue follows the same gate as the panel's.
+const actionGate=()=>preview?.live&&runActions.runId===preview.runId?continueGate(runActions.actions,{deciding:runActions.deciding}):undefined;
+function focusAction(selector){requestAnimationFrame(()=>$('app').querySelector(selector)?.focus({preventScroll:false}));}
+function actionPanelFor(run){
+  if(!run?.live||runActions.runId!==run.runId)return '';
+  return actionPanelMarkup(runActions.actions,{escape,resumable:run.resumable&&!finishedRun(run),minimised:runActions.minimised,confirm:runActions.confirm,
+    deciding:runActions.deciding,notice:runActions.notice,busy:liveBusy||runActions.busy,agentName:id=>agentName(run.definition,id)});
+}
+async function decideAction(runId,body,focusAfter){
+  runActions.busy=true;render();
+  try{
+    const path=body.check?`/api/runs/${encodeURIComponent(runId)}/actions/check`:`/api/runs/${encodeURIComponent(runId)}/actions`;
+    const result=await request(path,{method:'POST',body:JSON.stringify(body.check?{action_id:body.action_id}:body)});
+    runActions={...runActions,actions:result.actions,confirm:null,deciding:runActions.deciding.filter(id=>id!==body.action_id),notice:'',busy:false};
+    render();if(focusAfter)focusAction(focusAfter);
+    await refreshRunAfterDecision(runId);
+  }catch(error){runActions.busy=false;notify(error.message);render();}
+}
+
 function pollLiveRun(){
   stopLivePolling();
   if(view!=='plan'||!preview?.live||!['pending','running','waiting_human'].includes(preview.mode))return;
@@ -714,7 +781,7 @@ async function liveAction(action){
       record=await request('/api/runs',{method:'POST',body:JSON.stringify({version:1,application_id:currentId,revision:current().revision,task,inputs,...(source?{resources:{source}}:{})})});
     }else if(action==='pause-live'){
       record=await request(`/api/runs/${runId}/pause`,{method:'POST',body:'{}'});
-      notify('Pausing after the current step.');
+      notify(pauseNotice(preview));
     }else if(action==='cancel-live'){
       record=await request(`/api/runs/${runId}/cancel`,{method:'POST',body:'{}'});
     }else if(action==='submit-live-review'){
@@ -730,25 +797,40 @@ async function liveAction(action){
     selectLiveRecord(record);
     if(action==='start-live')$('run-dialog').close();
     await refreshLiveHistory();
-  }catch(error){liveError=error.message;notify(error.message);}
+  }catch(error){
+    if(action==='resume-live'&&error.status===409&&error.actions){
+      // Continue checked what it could; the rest waits for the person, and
+      // the panel says so rather than a passing notice.
+      const remaining=error.actions.length;
+      runActions={...runActions,key:'',minimised:false,notice:`Conclave checked what it could. ${remaining} ${remaining===1?'action still needs':'actions still need'} your decision before the run can continue.`};
+      try{await refreshRunAfterDecision(runId);}catch{}
+    }else{liveError=error.message;notify(error.message);}
+  }
   finally{liveBusy=false;render();if($('run-dialog').open)$('run-configuration').innerHTML=studioLiveMarkup(true);pollLiveRun();}
 }
   // Everything a person does to a run, in the canvas's own floating action bar:
 // start, pause, stop, and the one thing the run is waiting for. Icons carry
 // hovertext; the action that needs a decision keeps its words.
 const runInFlight=()=>!!preview?.live&&['pending','running','waiting_human','paused'].includes(preview.mode);
-function runControllerMarkup(){
+function runControllerMarkup(gate={enabled:true,reason:''}){
   // Icons only, one per thing a person can do to the run. What the run is waiting
   // for (Review input, View results) stays in words in the status line above the
   // canvas, so no action is offered twice and none is wordless-only.
   const busy=liveBusy?'disabled':'',run=()=>`<button type="button" class="canvas-action primary" data-action="run" ${busy} title="${preview?.live?'Run again':'Run this application'}" aria-label="${preview?.live?'Run again':'Run this application'}">${uiIcon('play')}<span>Run workflow</span></button>`;
   const stop=()=>`<button type="button" class="canvas-action stop" data-action="cancel-live" ${busy} title="Stop this run" aria-label="Stop this run">${uiIcon('stop')}</button>`;
   if(!preview?.live||['completed','stopped','failed','cancelled','interrupted'].includes(preview.mode)&&!preview.resumable)return run();
-  if(preview.mode==='paused'||(['stopped','failed','interrupted'].includes(preview.mode)&&preview.resumable))return `<button type="button" class="canvas-action primary" data-action="resume-live" ${busy||!runtime.available?'disabled':''} title="Continue from the next step" aria-label="Continue from the next step">${uiIcon('play')}</button>${stop()}`;
+  if(preview.mode==='paused'||(['stopped','failed','interrupted'].includes(preview.mode)&&preview.resumable)){
+    // One gate for the dock and the panel (passed in as `gate`): Continue
+    // waits for every decision about the run's uncertain actions.
+    const label=String(gate.enabled?'Continue from the next step':gate.reason).replace(/[&<>"']/g,c=>`&#${c.charCodeAt(0)};`);
+    return `<button type="button" class="canvas-action primary" data-action="resume-live" ${busy||!runtime.available||!gate.enabled?'disabled':''} title="${label}" aria-label="${label}">${uiIcon('play')}</button>${stop()}`;
+  }
   // Waiting for a person is not running: there is nothing to pause, and Run
   // comes back once the review is submitted.
   if(preview.mode==='waiting_human')return stop();
-  return `<button type="button" class="canvas-action" data-action="pause-live" ${busy} title="Pause after the current step" aria-label="Pause after the current step">${uiIcon('pause')}</button>${stop()}`;
+  // Named for what pressing it does, or, once pressed, for what it is doing.
+  const pause=pauseControl(preview),pauseLabel=pause.label.replace(/[&<>"']/g,c=>`&#${c.charCodeAt(0)};`);
+  return `<button type="button" class="canvas-action" data-action="pause-live" ${busy||(pause.disabled?'disabled':'')} title="${pauseLabel}" aria-label="${pauseLabel}">${uiIcon('pause')}</button>${stop()}`;
 }
 
 function studioLiveMarkup(requestOnly=false){
@@ -757,8 +839,9 @@ function studioLiveMarkup(requestOnly=false){
   const visible=d.views.filter(view=>Array.isArray(state[view.collection])?state[view.collection].length:!!state[view.collection]);
   const outputs=visible.length?`<details class="run-results" data-disclosure="live-results"><summary>Results · ${visible.length}</summary>${visible.map(view=>`<details class="quiet-details" data-disclosure="live-output-${escape(view.id)}"><summary>${escape(view.title)}</summary>${viewMarkup(view,state,d)}</details>`).join('')}</details>`:'<div class="empty">Results will appear as the team completes its work.</div>';
 const approvalPanel=toolApprovalMarkup(pendingToolApprovals,{escape,views:approvalViews});
-  const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{controls:runControllerMarkup(),toolsDisabled:runInFlight(),provider:runtime.provider||'',list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,activityExpanded,activityFilter,followActive,detail:selectedRunStepId?executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'',escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
-  return `${dirty()&&requestOnly?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${approvalPanel}${liveRunMarkup(saved,preview?.live?preview:null,{escape,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime:readinessRuntime(),busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion()})}`;
+  const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{controls:runControllerMarkup(actionGate()),toolsDisabled:runInFlight(),provider:runtime.provider||'',list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,activityExpanded,activityFilter,followActive,detail:selectedRunStepId?executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'',escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
+  const actionsPanel=requestOnly?'':actionPanelFor(preview);
+  return `${dirty()&&requestOnly?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${approvalPanel}${actionsPanel}${liveRunMarkup(saved,preview?.live?preview:null,{escape,runNoticeMarkup,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime:readinessRuntime(),busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion()})}`;
 }
 function recordFieldForm(collection){return (collection.fields||[]).map(f=>{const value=humanDraft.fields?.[f.key]??'',attrs=`id="human-field-${escape(f.key)}" data-human-field="${escape(f.key)}"`;return `<div class="field"><label for="human-field-${escape(f.key)}">${escape(f.label)}${f.required?' · required':''}</label>${['enum','boolean'].includes(f.type)?`<select ${attrs}><option value="">Choose…</option>${(f.type==='boolean'?['true','false']:f.options).map(option=>`<option value="${escape(option)}" ${String(value)===option?'selected':''}>${escape(option)}</option>`).join('')}</select>`:`<input ${attrs} type="${f.type==='number'?'number':f.type==='date'?'date':'text'}" ${f.type==='number'?'step="any"':''} value="${escape(value)}">`}</div>`;}).join('');}
 function humanRecordValues(collection){const values={};for(const f of collection.fields||[]){const value=humanDraft.fields?.[f.key];if(value===undefined||value==='')continue;values[f.key]=f.type==='number'?Number(value):f.type==='boolean'?value==='true':value;}return validateRecordValues(values,collection.fields||[]);}
@@ -787,10 +870,18 @@ function viewMarkup(view,state,d){
 
 function markDirty(){const span=$('save-state');if(span){span.textContent='Unsaved changes';span.classList.add('dirty');}const name=$('application-name');if(name&&['build','test'].includes(workspaceMode))name.textContent=draft().name;}
 function updateField(path,value){
+  if(path==='run_config.fan_out_limit'){
+    // Steps at once is 1 to the host's cap, or blank: anything else is said
+    // where it was typed, and not kept.
+    const issue=stepsAtOnceIssue(value===''?null:Number(value),stepsCap()),message=$('app').querySelector('#steps-at-once-issue');
+    if(message)message.textContent=issue;
+    if(issue)return;
+  }
   const d=draft(),parts=path.split('.');if(parts[0]==='budget_warnings')d.budget_warnings??={};let object=d;for(const part of parts.slice(0,-1))object=object[part];const key=parts.at(-1),before=object[key];
   if(path.endsWith('.statuses'))value=value.split(',').map(x=>x.trim()).filter(Boolean);if(path.endsWith('.required')||path==='autonomous_execution')value=value==='true';if(path.startsWith('run_config.')||path.startsWith('run_budget.')||path.startsWith('budget_warnings.'))value=value===''?null:Number(value);object[key]=value;
   if(parts[0]==='workflow'&&key==='id'){for(const edge of d.connections||[]){if(edge.from===before)edge.from=value;if(edge.to===before)edge.to=value;}if(d.canvas?.positions?.[before]){d.canvas.positions[value]=d.canvas.positions[before];delete d.canvas.positions[before];}}
   if(parts[0]==='integrations'&&key==='connector'){const connector=connectorDescriptors.find(c=>c.id===value);object.mode=connector.default_mode;object.scope='';render();}
+  if(path==='start_mode'){if(value==='schedule')d.schedule??=defaultSchedule();else delete d.schedule;}
   if(parts[0]==='agents'&&key==='kind'&&value==='human')object.tools=[];
   // A model belongs to the backend it was chosen for, so changing the backend
   // drops it rather than carrying a name across to a model that may not exist.
@@ -800,7 +891,7 @@ function updateField(path,value){
   if(parts[0]==='state'&&key==='type'){object.merge=value==='text'?'replace':'upsert';object.kind=value==='text'?'document':'findings';object.statuses=[];if(value==='text')delete object.fields;for(const view of d.views)if(view.collection===object.key)view.layout=value==='text'?'prose':'cards';}
   if(parts[0]==='views'&&key==='collection')object.layout=d.state.find(s=>s.key===value)?.type==='text'?'prose':'cards';
   if(parts[0]==='views'&&key==='title'&&d.views.filter(v=>v.collection===object.collection).length===1)d.state.find(s=>s.key===object.collection).label=value;
-  markDirty();if(['type','collection','kind','provider'].includes(key)||(parts[0]==='workflow'&&['agent','output'].includes(key))||(view==='plan'&&['workflow','agents'].includes(parts[0])))render();
+  markDirty();if(['type','collection','kind','provider','start_mode'].includes(key)||(parts[0]==='workflow'&&['agent','output'].includes(key))||(view==='plan'&&['workflow','agents'].includes(parts[0])))render();
 }
 function setOutputKind(index,id){
   const kind=outputTypes.find(type=>type.id===id);if(!kind)throw new Error('Choose a supported output type.');
@@ -848,9 +939,13 @@ function createApplication(templateId='blank',brief={}){
 function chooseApplication(id){if(saving||liveBusy||!applications.some(a=>a.id===id))return;resetRuns();const url=new URL(location.href);url.searchParams.delete('application');url.searchParams.delete('run');history.replaceState(null,'',url);showPlanResources=false;showPlanInspector=false;showPlanAssistant=false;showPlanReadiness=false;planInsertion=null;currentId=id;selectedStepId=null;selectedRunStepId=null;view=draft().workflow.length?'plan':'setup';buildStep=0;advanced=false;render();}
 // Requests, as a list of their own: the canvas stays the canvas.
 function historyMarkup(){
-  const runs=liveHistory.get(currentId)||[],revision=current().revision;
+  // Runs, and the scheduled times that did not start one, newest first.
+  const runs=historyRows(liveHistory.get(currentId)||[],notRunSlots()),revision=current().revision,status=scheduleStatus.get(currentId);
   if(!runs.length)return `<div class="section-head"><h2 id="history-title">Requests</h2></div><p class="field-help">No requests yet.</p>`;
-  return `<div class="section-head"><h2 id="history-title">Requests</h2></div><table class="history-table"><thead><tr><th>Started</th><th>Status</th><th>Version</th><th>Request</th><th></th></tr></thead><tbody>${runs.map(run=>`<tr><td>${escape(new Date(run.created_at).toLocaleString())}</td><td>${escape(String(run.status).replaceAll('_',' '))}</td><td>${run.revision===revision?`${run.revision} · current`:`${run.revision} · older`}</td><td>${escape(String(run.task||'').slice(0,90))}${String(run.task||'').length>90?'…':''}</td><td><button class="button" data-run-open="${escape(run.id)}">Open</button></td></tr>`).join('')}</tbody></table>`;
+  return `<div class="section-head"><h2 id="history-title">Requests</h2></div><table class="history-table"><thead><tr><th>Started</th><th>Status</th><th>Version</th><th>Request</th><th></th></tr></thead><tbody>${runs.map(row=>{
+    if(row.kind==='slot'){const text=slotText(row);return `<tr class="not-run"><td>${escape(new Date(row.scheduled_for).toLocaleString())}</td><td>not run<br><span class="run-trigger ${row.outcome==='failed'?'failed':'not-run'}">${escape(text.tag)}</span></td><td>—</td><td>${escape(text.detail)}</td><td></td></tr>`;}
+    const run=row,trigger=triggerText(run,status?.time_zone);
+    return `<tr><td>${escape(new Date(run.created_at).toLocaleString())}</td><td>${escape(String(run.status).replaceAll('_',' '))}${historyBadgeMarkup(run.actions,escape)?'<br>'+historyBadgeMarkup(run.actions,escape):''}${trigger?`<br><span class="run-trigger ${run.trigger?.kind==='schedule'?'':'not-run'}">${escape(trigger)}</span>`:''}</td><td>${run.revision===revision?`${run.revision} · current`:`${run.revision} · older`}</td><td>${escape(String(run.task||'').slice(0,90))}${String(run.task||'').length>90?'…':''}</td><td><button class="button" data-run-open="${escape(run.id)}">Open</button></td></tr>`;}).join('')}</tbody></table>`;
 }
 function showView(next){if(!['plan','setup'].includes(next)||saving||liveBusy)return;stopFollowingLiveRun();view=next;buildStep=next==='setup'?0:buildStep;advanced=false;humanDraft={decision:'',body:''};render();if(next==='plan'&&current().revision){refreshLiveHistory().catch(error=>{liveError=error.message;render();});followLiveRun();}}
 function openRunConfiguration(){
@@ -992,7 +1087,7 @@ function renderEditor(){
   else if(s.kind==='goal'){title='What do you want to achieve?';submit='Suggest a team';body=`${dialogField('Your goal','goal',s.goal,'textarea')}${goalRefineMarkup(s)}<button type="button" class="text-button" data-manual-goal>Use manual starter suggestions</button><p class="field-help">Example: Compare three suppliers and recommend one.</p><p class="field-help">${runtime.available?'AI generates a proposal for you to review.':'Choose a manual starter; AI is unavailable on this host.'}</p>`;}
   else if(s.kind==='new'&&s.goalBased){title='Review your suggested application';submit='Create and open canvas';body=goalReviewMarkup(s);}
   else if(s.kind==='proposed-new'){title='Review proposed application';submit='Create this draft';body=`<p>${escape(s.summary)}</p><p>${escape(s.definition.name)} · ${s.definition.agents.length} members · ${s.definition.workflow.length} steps</p><details><summary>Proposed definition</summary><pre class="code">${escape(JSON.stringify(s.definition,null,2))}</pre></details><p>No application has been saved or run. Apply this proposal to create an editable draft.</p>`;}
-  else if(s.kind==='source-settings'){title='Source settings';submit='Save sources';body=`<p>Authorize document folders or repositories on this host. Only agents with file or Git tools use them. Paths are local to the backend computer.</p>${dialogField('Authorized sources (JSON)','sourcesText',s.sourcesText,'textarea')}<p>Example: {"documents":{"name":"Documents","path":"/absolute/folder","applications":["${escape(currentId)}"]}}</p><p>File tools read documents (.txt, .md, .csv, .html) unless a source lists its own "extensions", such as [".rs", ".toml"], or "*" for every text file. Use "*" for a code repository the team changes.</p>${dialogField('Default source ID for this application (optional)','source',s.source)}`;}
+  else if(s.kind==='source-settings'){title='Source settings';submit='Save sources';body=`<p>Authorize document folders or repositories on this host. Only agents with file or Git tools use them. Paths are local to the backend computer.</p>${dialogField('Authorized sources (JSON)','sourcesText',s.sourcesText,'textarea')}<p>Example: {"documents":{"name":"Documents","path":"/absolute/folder","applications":["${escape(currentId)}"]}}</p><p>File tools read documents (.txt, .md, .csv, .html, and the text of .pdf and .docx files, with page and heading markers) unless a source lists its own "extensions", such as [".rs", ".toml"], or "*" for every text file. Use "*" for a code repository the team changes.</p>${dialogField('Default source ID for this application (optional)','source',s.source)}`;}
   else if(s.kind==='workspace-catalogue'){title='Custom workspace catalog';submit='Save catalog';body=`<p>Create or edit roles, application starters and output presets. Remove an entry to delete it. Bundled defaults remain available.</p><button type="button" class="button" data-catalogue-add-current>Use current application as a starter</button><button type="button" class="button" data-catalogue-export>Export catalog</button><div class="field"><label for="catalogue-import">Import catalog JSON</label><input id="catalogue-import" type="file" accept=".json,application/json" data-catalogue-import></div>${dialogField('Catalog JSON','catalogueText',s.catalogueText,'textarea')}<p class="field-help">Starters use {id, name, definition}; roles use member definitions; outputs use {id, name, kind, task}. Changes affect future applications; saved applications keep their definitions.</p>`;}
   else if(s.kind==='import'){title='Import an application definition';submit='Create imported draft';body=`<p class="dialog-copy">Import an exported application.json. Review it before creating a new draft.</p><div class="field"><label for="definition-file">Choose a JSON file</label><input id="definition-file" type="file" accept=".json,application/json" data-import-file></div>${s.filename?`<p class="field-help">${escape(s.filename)}</p>`:''}${dialogField('Or paste the definition','importText',s.importText,'textarea')}<button type="button" class="button" data-import-review>Validate and review</button>${s.parsed?`<div class="import-preview"><h3>${escape(s.parsed.name)}</h3><p>${escape(s.parsed.description)}</p><p>${s.parsed.agents.length} members · ${s.parsed.workflow.length} steps · ${s.parsed.views.length} outputs</p><p>${s.parsed.agents.map(member=>escape(member.name)).join(' · ')}</p></div>`:''}`;}
   else if(s.kind==='new'){title='Configure a catalog application';submit='Create application';const template=applicationTypes.find(app=>app.id===s.template);body=`${dialogField('Starting application type','template',s.template,'select',[...applicationTypes.map(app=>[app.id,app.name]),['blank','Custom application']])}${template?`<details class="template-summary quiet-details"><summary>Included in this template</summary><p>${escape(template.example)}</p><strong>Complete default team</strong><p>${template.members.map(member=>escape(member.name)+(rolePresets.find(role=>role.id===member.preset)?.kind==='human'?' (Human)':'')).join(' · ')}</p><strong>Outputs</strong><p>${template.outputs.map(output=>escape(output.name)).join(' · ')}</p><span>${template.tools.length} suggested tools · every role and plan step is editable</span></details>`:''}${dialogField('Application name','name',s.name)}${dialogField('What should it do?','purpose',s.purpose,'textarea')}<details class="quiet-details"><summary>Expected result</summary>${dialogField('What should the final result include?','result',s.result,'textarea')}</details><button type="button" class="button" data-suggest-from-purpose>Suggest options from this goal</button>${creationCatalogMarkup(s)}`;}
@@ -1121,7 +1216,7 @@ $('app').addEventListener('click',async event=>{
   if(button.dataset.stepTest){if(!current().revision){notify('Save the workflow once before storing test examples. You can test unsaved edits after that.');return;}if(button.dataset.testStep&&button.closest('.run-inspector-drawer'))selectedRunStepId=button.dataset.testStep;await stepTests.open(button.dataset.stepTest,button.dataset.testStep);return;}
   // A command that acts inside the step panel opens it, so its result is visible.
   if(button.dataset.menuReveal==='panel'&&!showPlanInspector){showPlanInspector=true;render();}if(button.hasAttribute('data-apply-schema')){try{const index=Number(button.dataset.applySchema),fields=JSON.parse($('schema-'+index).value);validateRecordFields(fields);draft().state[index].fields=fields;markDirty();render();notify('Record fields applied to the draft.');}catch(error){notify(error.message);}return;}
-  try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.removeRequirement!==undefined){const d=draft();d.requirements?.splice(Number(button.dataset.removeRequirement),1);if(d.requirements&&!d.requirements.length)delete d.requirements;markDirty();render();return;}if(button.dataset.step!==undefined){buildStep=Number(button.dataset.step);advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.downloadOutput){downloadResult(button.dataset.downloadOutput);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
+  try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.removeRequirement!==undefined){const d=draft();d.requirements?.splice(Number(button.dataset.removeRequirement),1);if(d.requirements&&!d.requirements.length)delete d.requirements;markDirty();render();return;}if(button.dataset.step!==undefined){const step=Number(button.dataset.step);if(view!=='setup')showView('setup');buildStep=step;advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.downloadOutput){downloadResult(button.dataset.downloadOutput);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
     if(button.dataset.connectTarget){if(!connectSource)throw new Error('Choose a step to connect from.');updatePlan(connectPlanSteps(draft(),connectSource,button.dataset.connectTarget),button.dataset.connectTarget);connectSource=null;render();return;}if(button.dataset.disconnectFrom){updatePlan(disconnectPlanSteps(draft(),button.dataset.disconnectFrom,button.dataset.disconnectTo));return;}if(button.dataset.resourcePane){resourcePane=button.dataset.resourcePane;render();return;}
     if(button.dataset.menuReverse){const [from,to]=button.dataset.menuReverse.split('|');updatePlan(connectPlanSteps(disconnectPlanSteps(draft(),from,to),to,from));selectedEdge=null;notify('Connection reversed.');return;}
     if(button.dataset.menuAddStep&&menuPoint){openStepPicker({at:menuPoint.canvas||null});return;}
@@ -1179,7 +1274,10 @@ $('app').addEventListener('click',async event=>{
     if(action==='edit-shared-member'){const member=draft().workflow.find(step=>step.id===selectedStepId)?.agent;const details=$('app').querySelector(`[data-disclosure="member-${CSS.escape(member)}-responsibility"]`);if(details){details.open=true;details.querySelector('input')?.focus({preventScroll:true});}return;}
     if(action==='manage-integrations'){await manageIntegrations();return;}
     if(action==='toggle-rail'){railOpen=!railOpen;render();return;}
-    if(action==='show-history'){renderHistory();return;}
+    // The list may have been opened before this page read the runs (a schedule's
+    // times that did not run show the button first), so it reads them as it opens.
+    if(action==='show-history'){renderHistory();refreshLiveHistory().then(()=>{if($('history-dialog').open)$('history-content').innerHTML=historyMarkup();}).catch(()=>{});return;}
+    if(action==='edit-schedule'){editScheduleView();return;}
     if(action==='run'){openRunConfiguration();return;}
     // The plan tools are in the same bar as the run controller. Using one while a
     // finished run is open leaves the run first: the canvas shows that run's
@@ -1257,11 +1355,13 @@ function inputDesignerMarkup(d){return `<section class="panel"><div class="secti
 function generatedRequestMarkup(d,mode){return `<div class="generated-inputs">${(d.inputs||[]).map(f=>{const value=(requestInputs[mode][currentId]||{}||{})[f.id]??'';const attrs=`data-request-field="${escape(f.id)}" data-input-mode="${mode}" id="${mode}-input-${escape(f.id)}" ${f.required?'required':''}`;return `<div class="field"><label for="${mode}-input-${escape(f.id)}">${escape(f.label)}${f.required?' · required':''}</label>${f.type==='textarea'?`<textarea ${attrs} maxlength="2000">${escape(value)}</textarea>`:`<input ${attrs} type="${f.type}" ${f.type==='number'?'step="any"':''} maxlength="2000" value="${escape(value)}">`}</div>`;}).join('')}</div>`;}
 // The limits a run will stop at, said once, so the form can stay closed.
 function limitsStated(d){
-  const set=[['tool_calls','Tool uses'],['wall_clock_seconds','Seconds'],['tokens','AI usage'],['cost_usd','Cost']];
+  const set=[['tool_calls','Tool uses'],['wall_clock_seconds','Working seconds'],['tokens','AI usage'],['cost_usd','Cost']];
   const stated=set.filter(([key])=>d.run_budget?.[key]!==undefined&&d.run_budget[key]!==null&&d.run_budget[key]!=='').map(([key,label])=>`${label.toLowerCase()} ${d.run_budget[key]}`);
   return stated.length?stated.join(' · '):'no limit';
 }
-function controlsMarkup(d){const warnings=d.budget_warnings||{};return `<div class="step-heading"><div><h2>Limits and approvals</h2></div></div><section class="panel"><details class="quiet-details" data-disclosure="budget-limits"><summary>Spending and time limits · ${limitsStated(d)}</summary><p class="field-help">Leave a field blank for no limit. Warnings are based on the usage the AI provider reports.</p><div class="budget-grid"><strong>Resource</strong><strong>Warn me</strong><strong>Stop</strong>${[['tool_calls','Tool uses'],['wall_clock_seconds','Seconds'],['tokens','AI usage (text units)'],['cost_usd','Cost · USD']].map(([key,label])=>`<span>${label}</span>${runtime.features?.budget_warnings?field('Warning',`budget_warnings.${key}`,warnings[key]??'','number'):'<span>Not supported on this host</span>'}${field('Stop work',`run_budget.${key}`,d.run_budget[key]??'','number')}`).join('')}</div></details></section><section class="panel"><h3>Workload limits</h3><p class="field-help">Leave a field blank for no limit. Parallel steps sets how many steps run at once. Character limits trim each tool response or report, not the results the team builds up.</p><div class="input-grid">${[['max_tool_steps','Agent action steps'],['max_notes','Retained private notes'],['max_note_chars','Characters per note'],['max_tool_output_chars','Characters per tool response / delegated report'],['fan_out_limit','Parallel steps']].map(([key,label])=>field(label,`run_config.${key}`,d.run_config[key]??'','number')).join('')}${[['max_delegations','Total AI step starts and delegations'],['max_per_agent','Starts per AI member'],['max_depth','Agent nesting depth']].map(([key,label])=>field(label,`run_budget.${key}`,d.run_budget[key]??'','number')).join('')}</div></section><section class="panel"><h3>Tool authorization</h3><label>Execution mode<select data-path="autonomous_execution"><option value="false" ${!d.autonomous_execution?'selected':''}>Approve each write</option><option value="true" ${d.autonomous_execution?'selected':''}>Autonomous execution</option></select></label><p class="field-help">Autonomous execution approves this application’s tools before the run starts, including edits, commands, pushes and writes to other services. Use it only for an application you trust. Human review steps still pause for input, and tools with unknown capabilities still ask for approval.</p></section>`;}
+// The most steps of one run this host lets work at once: the ceiling of Steps at once.
+const stepsCap=()=>runtime.max_parallel_steps||8;
+function controlsMarkup(d){const warnings=d.budget_warnings||{};return `<div class="step-heading"><div><h2>Limits and approvals</h2></div></div><section class="panel"><details class="quiet-details" data-disclosure="budget-limits"><summary>Spending and time limits · ${limitsStated(d)}</summary><p class="field-help">Leave a field blank for no limit. Warnings are based on the usage the AI provider reports.</p><p class="field-help">A <strong>Stop</strong> limit is firm: once it is reached, no new step starts, and steps already working stop asking the AI and write up what they have. <strong>Working seconds</strong> add up the time of every step: two steps working together for 10 seconds count 20.</p><div class="budget-grid"><strong>Resource</strong><strong>Warn me</strong><strong>Stop</strong>${[['tool_calls','Tool uses'],['wall_clock_seconds','Working seconds'],['tokens','AI usage (text units)'],['cost_usd','Cost · USD']].map(([key,label])=>`<span>${label}</span>${runtime.features?.budget_warnings?field('Warning',`budget_warnings.${key}`,warnings[key]??'','number'):'<span>Not supported on this host</span>'}${field('Stop work',`run_budget.${key}`,d.run_budget[key]??'','number')}`).join('')}</div></details></section><section class="panel"><h3>Workload limits</h3><p class="field-help">Leave a field blank for no limit. Character limits trim each tool response or report, not the results the team builds up.</p>${stepsAtOnceMarkup(d.run_config.fan_out_limit,{cap:stepsCap(),escape,disabled:saving})}<div class="input-grid">${[['max_tool_steps','Agent action steps'],['max_notes','Retained private notes'],['max_note_chars','Characters per note'],['max_tool_output_chars','Characters per tool response / delegated report']].map(([key,label])=>field(label,`run_config.${key}`,d.run_config[key]??'','number')).join('')}${[['max_delegations','Total AI step starts and delegations'],['max_per_agent','Starts per AI member'],['max_depth','Agent nesting depth']].map(([key,label])=>field(label,`run_budget.${key}`,d.run_budget[key]??'','number')).join('')}</div></section><section class="panel"><h3>Tool authorization</h3><label>Execution mode<select data-path="autonomous_execution"><option value="false" ${!d.autonomous_execution?'selected':''}>Approve each write</option><option value="true" ${d.autonomous_execution?'selected':''}>Autonomous execution</option></select></label><p class="field-help">Autonomous execution approves this application’s tools before the run starts, including edits, commands, pushes and writes to other services. Use it only for an application you trust. Human review steps still pause for input, and tools with unknown capabilities still ask for approval.</p></section>`;}
 
 function composeCatalogApplication(templateId,roles=[],tools={}){
   const template=templates.find(t=>t.id===templateId),d=template?structuredClone(template.definition):emptyDefinition();
@@ -1523,7 +1623,7 @@ $('app').addEventListener('pointerup',event=>{
 $('app').addEventListener('pointercancel',event=>{if(canvasConnect?.pointer===event.pointerId){canvasConnect=null;clearCanvasConnect();}});
 
 function addConnector(id){const connector=connectorDescriptors.find(c=>c.id===id);if(!connector)throw new Error('Choose a catalog connector.');const d=structuredClone(draft());d.integrations??=[];if(d.integrations.some(c=>c.connector===id)){notify('That service is already in this application’s connections.');return;}d.integrations.push({connector:id,purpose:connector.description,scope:'',mode:connector.default_mode});validateDefinition(d);drafts.set(currentId,d);notify('Connection added to the plan. No account is connected yet.');}
-function connectorSetupMarkup(d){return `<section class="panel"><p class="field-help">Choosing a service here records what the application needs. It does not grant access: an account must be connected, and each member given its tools.</p><span class="connection-status">${(d.integrations||[]).length} selected · ${(d.integrations||[]).filter(item=>connectorDescriptors.find(c=>c.id===item.connector)?.available).length} available</span>${d.connector_requirements?.length?`<details><summary>Suggested for this workflow</summary><ul>${d.connector_requirements.map(r=>`<li>${escape(r.purpose)} · ${escape(connectorDescriptors.find(c=>c.id===r.suggested)?.name||r.suggested)}${r.required?'':' · optional'}</li>`).join('')}</ul></details>`:''}${(d.integrations||[]).map((item,i)=>{const c=connectorDescriptors.find(c=>c.id===item.connector);if(!c)return '';return `<details class="connector-row quiet-row" data-disclosure="connector-${i}"><summary><strong>${escape(c.name)}</strong><span class="field-help">${c.available?'Available':'Not set up on this host'}</span></summary><div class="row-editor">${field('Use for',`integrations.${i}.purpose`,item.purpose)}${field('Choose service',`integrations.${i}.connector`,item.connector,'select',connectorDescriptors.filter(other=>other.group===c.group).map(other=>[other.id,other.name]))}${field('Allowed sources or destination',`integrations.${i}.scope`,item.scope)}${field('Allowed actions',`integrations.${i}.mode`,item.mode,'select',connectorModes(c))}<details><summary>Connection setup</summary><p>${c.available?'This service provides '+escape((c.tools||[]).map(capabilityName).join(', '))+'. Give these tools to the members that need them. Credentials and source limits are managed on the host.':'This service is not set up on this host yet. Whoever runs the host can add it. Never type passwords or access keys into these fields.'}</p></details><button class="icon-button remove" data-remove-connector="${i}" title="Remove this connection from the plan" aria-label="Remove this connection from the plan">${uiIcon('trash')}</button></div></details>`;}).join('')||'<p>No connections yet. Add one when the team needs to read from or write to another service.</p>'}<details class="quiet-details" data-disclosure="start-method"><summary>When to run · ${d.start_mode==='event'?'event':d.start_mode==='schedule'?'schedule':'manually'}</summary>${field('Start method','start_mode',d.start_mode||'manual','select',[['manual','Start manually'],...(runtime.features?.events?[['event','When an event arrives']]:d.start_mode==='event'?[['event','Saved event trigger — unavailable',true]]:[]),...(runtime.features?.schedules?[['schedule','On a schedule']]:d.start_mode==='schedule'?[['schedule','Saved schedule — unavailable',true]]:[])])}${runtime.features?.events||runtime.features?.schedules?'':'<p class="field-help">This host can only start runs manually. Event and schedule starts need a host that supports them.</p>'}</details></section>`;}
+function connectorSetupMarkup(d){return `<section class="panel"><p class="field-help">Choosing a service here records what the application needs. It does not grant access: an account must be connected, and each member given its tools.</p><span class="connection-status">${(d.integrations||[]).length} selected · ${(d.integrations||[]).filter(item=>connectorDescriptors.find(c=>c.id===item.connector)?.available).length} available</span>${d.connector_requirements?.length?`<details><summary>Suggested for this workflow</summary><ul>${d.connector_requirements.map(r=>`<li>${escape(r.purpose)} · ${escape(connectorDescriptors.find(c=>c.id===r.suggested)?.name||r.suggested)}${r.required?'':' · optional'}</li>`).join('')}</ul></details>`:''}${(d.integrations||[]).map((item,i)=>{const c=connectorDescriptors.find(c=>c.id===item.connector);if(!c)return '';return `<details class="connector-row quiet-row" data-disclosure="connector-${i}"><summary><strong>${escape(c.name)}</strong><span class="field-help">${c.available?'Available':'Not set up on this host'}</span></summary><div class="row-editor">${field('Use for',`integrations.${i}.purpose`,item.purpose)}${field('Choose service',`integrations.${i}.connector`,item.connector,'select',connectorDescriptors.filter(other=>other.group===c.group).map(other=>[other.id,other.name]))}${field('Allowed sources or destination',`integrations.${i}.scope`,item.scope)}${field('Allowed actions',`integrations.${i}.mode`,item.mode,'select',connectorModes(c))}<details><summary>Connection setup</summary><p>${c.available?'This service provides '+escape((c.tools||[]).map(capabilityName).join(', '))+'. Give these tools to the members that need them. Credentials and source limits are managed on the host.':'This service is not set up on this host yet. Whoever runs the host can add it. Never type passwords or access keys into these fields.'}</p></details><button class="icon-button remove" data-remove-connector="${i}" title="Remove this connection from the plan" aria-label="Remove this connection from the plan">${uiIcon('trash')}</button></div></details>`;}).join('')||'<p>No connections yet. Add one when the team needs to read from or write to another service.</p>'}<details class="quiet-details" data-disclosure="start-method"><summary>When to run · ${d.start_mode==='event'?'event':d.start_mode==='schedule'?'on a schedule':'manually'}</summary>${field('Start method','start_mode',d.start_mode||'manual','select',[['manual','Start manually'],...(runtime.features?.events?[['event','When an event arrives']]:d.start_mode==='event'?[['event','Saved event trigger — unavailable',true]]:[]),...(runtime.features?.schedules?[['schedule','On a schedule']]:d.start_mode==='schedule'?[['schedule','Saved schedule — unavailable',true]]:[])])}${runtime.features?.events||runtime.features?.schedules?'':'<p class="field-help">This host can only start runs manually. Event and schedule starts need a host that supports them.</p>'}${d.start_mode==='schedule'?scheduleEditorMarkup(d,{escape,...schedulePreviewFor(d),warnings:scheduleWarnings(d,runtime),zones:scheduleZones(),sources:scheduleSources(),viewer:viewerZone()}):''}</details>${runtime.features?.notifications?notifySectionMarkup(d):''}</section>`;}
 function connectorModes(c){return c.default_mode==='model'?[['model','Run AI roles']]:c.default_mode==='read'?[['read','Read only']]:[['read','Read only'],['draft','Prepare drafts'],['approved','Take action after approval']];}
 $('app').addEventListener('click',event=>{const button=event.target.closest('[data-remove-connector]');if(!button||button.dataset.removeConnector===undefined||saving)return;const d=structuredClone(draft());d.integrations.splice(Number(button.dataset.removeConnector),1);validateDefinition(d);drafts.set(currentId,d);render();});
 
@@ -1598,10 +1698,192 @@ $('record-detail').addEventListener('submit',async event=>{
   }catch(error){notify(error.message);}
 });
 
+// The action panel's controls. Each choice asks for confirmation in place,
+// Undo needs none, and focus follows the person to what they act on next.
+$('app').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-action-choose],[data-action-confirm],[data-action-back],[data-action-undo],[data-action-check],[data-action-decide-self],[data-action-minimise],[data-action-reopen]');
+  if(!button||!preview?.runId)return;
+  const runId=preview.runId,{actionChoose,actionConfirm,actionUndo,actionCheck,actionDecideSelf}=button.dataset,id=button.dataset.actionId;
+  if(actionChoose){runActions.confirm={id,decision:actionChoose};render();focusAction(`[data-action-card="${CSS.escape(id)}"] .action-confirm textarea, [data-action-card="${CSS.escape(id)}"] [data-action-confirm]`);return;}
+  if(button.hasAttribute('data-action-back')){const back=runActions.confirm?.id;runActions.confirm=null;render();if(back)focusAction(`[data-action-card="${CSS.escape(back)}"] [data-action-choose]`);return;}
+  if(actionConfirm){const note=$('app').querySelector(`[data-action-card="${CSS.escape(id)}"] [data-action-note]`)?.value.trim();
+    await decideAction(runId,{action_id:id,decision:actionConfirm,...(actionConfirm==='done'&&note?{note}:{})},`[data-action-undo="${CSS.escape(id)}"]`);return;}
+  if(actionUndo){await decideAction(runId,{action_id:actionUndo,decision:'undo'},`[data-action-card="${CSS.escape(actionUndo)}"] [data-action-choose]`);return;}
+  if(actionCheck){await decideAction(runId,{action_id:actionCheck,check:true});return;}
+  if(actionDecideSelf){runActions.deciding=[...runActions.deciding,actionDecideSelf];render();focusAction(`[data-action-card="${CSS.escape(actionDecideSelf)}"] [data-action-choose]`);return;}
+  if(button.hasAttribute('data-action-minimise')){runActions.minimised=true;render();focusAction('[data-action-reopen]');return;}
+  if(button.hasAttribute('data-action-reopen')){runActions.minimised=false;render();focusAction('#action-check-title');}
+});
+
 $('app').addEventListener('click',async event=>{
   const view=event.target.closest('[data-approval-view]');if(view){approvalViews[view.dataset.approvalId]=view.dataset.approvalView;render();return;}
   const button=event.target.closest('[data-tool-approval]');if(!button||!preview?.runId)return;
   button.disabled=true;
   try{await request(`/api/runs/${preview.runId}/tool-approvals`,{method:'POST',body:JSON.stringify({approval_id:button.dataset.toolApproval,approved:button.dataset.approved==='true'})});pendingToolApprovals=pendingToolApprovals.filter(item=>item.id!==button.dataset.toolApproval);render();}
   catch(error){notify(error.message);button.disabled=false;}
+});
+
+// -- Scheduled applications ---------------------------------------------------------
+// The host's word on a saved schedule, read once per saved version. Saving,
+// pausing or resuming changes what it says, so each of those reads it again.
+function ensureScheduleStatus(force=false){
+  const application=current(),id=currentId;
+  if(!runtime.features?.schedules||!application?.revision||application.definition?.start_mode!=='schedule'&&!scheduleStatus.has(id))return;
+  const key=`${id}:${application.revision}`;
+  if(!force&&scheduleStatusKeys.get(id)===key)return;
+  scheduleStatusKeys.set(id,key);
+  // A read that fails is tried again on a later render rather than never.
+  request(`/api/applications/${encodeURIComponent(id)}/schedule`).then(status=>{
+    // A save that changed what runs hands the schedule to whoever saved it.
+    const notice=ownerChangeNotice(scheduleStatus.get(id),status);
+    scheduleStatus.set(id,status);if(currentId===id&&view==='plan')render();if(notice&&currentId===id)notify(notice);
+    if(currentId===id)refreshScheduleStatusLater(id,status);},()=>{if(scheduleStatusKeys.get(id)===key)scheduleStatusKeys.delete(id);});
+}
+// Once the next run has passed, the header is out of date: read the status
+// again then (one request per scheduled time, not a polling loop).
+let scheduleRefreshFor={next:null,delay:0};
+function refreshScheduleStatusLater(id,status){
+  clearTimeout(scheduleRefreshTimer);scheduleRefreshTimer=null;
+  const delay=backedOff(id,status,statusRefreshDelay(status));
+  if(delay!==null)scheduleRefreshTimer=setTimeout(()=>{scheduleRefreshTimer=null;if(currentId===id&&!document.hidden)ensureScheduleStatus(true);},Math.min(delay,2147483647));
+}
+// A host that has not moved on yet (busy, or off) is asked less and less often.
+function backedOff(id,status,delay){
+  if(delay===null)return null;
+  const key=`${id}:${status.next_at}`;
+  if(scheduleRefreshFor.next===key)delay=Math.min(Math.max(delay,scheduleRefreshFor.delay*2),300000);
+  scheduleRefreshFor={next:key,delay};
+  return delay;
+}
+// A page looked at again may have missed that moment, or a pause elsewhere.
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&currentId&&scheduleStatus.has(currentId))ensureScheduleStatus(true);});
+function notRunSlots(){return (scheduleStatus.get(currentId)?.recent||[]).filter(slot=>slot.outcome!=='started');}
+function scheduleZones(){try{return Intl.supportedValuesOf('timeZone');}catch{return [viewerZone()];}}
+function scheduleSources(){
+  const d=draft();if(!d.agents.some(member=>(member.tools||[]).some(name=>runtime.resource_tools?.includes(name))))return [];
+  return (runtime.resources||[]).filter(item=>!item.applications||item.applications.includes(currentId));
+}
+// The preview shown in the editor is the one worked out for the schedule as
+// it is now; an older answer is kept on screen until the new one arrives.
+function schedulePreviewFor(d){return {preview:schedulePreview.times?{times:schedulePreview.times}:null,previewError:schedulePreview.error};}
+function ensureSchedulePreview(){
+  const d=draft();
+  if(view!=='setup'||d?.start_mode!=='schedule'||!d.schedule||!$('app').querySelector('[data-schedule-preview-slot]'))return;
+  const key=JSON.stringify([d.schedule,d.inputs||[]]);
+  if(key===schedulePreview.key||key===schedulePreviewWanted)return;
+  schedulePreviewWanted=key;clearTimeout(schedulePreviewTimer);
+  schedulePreviewTimer=setTimeout(async()=>{
+    let next;
+    try{const result=await request('/api/schedules/preview',{method:'POST',body:JSON.stringify({schedule:d.schedule,definition:{inputs:d.inputs||[]}})});next={key,times:result.times,error:''};}
+    catch(error){next={key,times:null,error:error.message};}
+    if(schedulePreviewWanted!==key)return;
+    schedulePreview=next;schedulePreviewWanted='';
+    const slot=$('app').querySelector('[data-schedule-preview-slot]');
+    if(slot)slot.innerHTML=schedulePreviewMarkup({escape,preview:next.times?{times:next.times}:null,previewError:next.error,viewer:viewerZone()});
+  },250);
+}
+// One change to the schedule being edited. Discrete choices redraw the editor;
+// typing does not, so the caret stays where it is.
+function editSchedule(change,redraw){
+  // A draft that says "on a schedule" without one is edited from the default
+  // the editor shows, not ignored.
+  const d=draft();if(d.start_mode!=='schedule')return;d.schedule??=defaultSchedule();
+  change(d.schedule);markDirty();
+  if(redraw)render();else ensureSchedulePreview();
+}
+function scheduleEvery(){
+  const every=Number($('app').querySelector('[data-schedule-every]')?.value),unit=$('app').querySelector('[data-schedule-unit]')?.value;
+  return Number.isFinite(every)?Math.round(unit==='hours'?every*60:every):every;
+}
+$('app').addEventListener('input',event=>{
+  const target=event.target,data=target.dataset;if(!data||saving)return;
+  if(data.scheduleTask!==undefined)editSchedule(schedule=>{schedule.request??={task:'',inputs:{}};schedule.request.task=target.value;});
+  else if(data.scheduleInput!==undefined)editSchedule(schedule=>{schedule.request??={task:'',inputs:{}};schedule.request.inputs??={};if(target.value==='')delete schedule.request.inputs[data.scheduleInput];else schedule.request.inputs[data.scheduleInput]=target.value;});
+  else if(data.scheduleEvery!==undefined)editSchedule(schedule=>{schedule.every_minutes=scheduleEvery();});
+});
+$('app').addEventListener('change',event=>{
+  const target=event.target,data=target.dataset;if(!data||saving)return;
+  if(data.scheduleTime!==undefined)editSchedule(schedule=>{schedule.times[Number(data.scheduleTime)]=target.value;},true);
+  else if(data.scheduleUnit!==undefined)editSchedule(schedule=>{schedule.every_minutes=scheduleEvery();},true);
+  else if(data.scheduleStarts!==undefined)editSchedule(schedule=>{if(target.value)schedule.starts_at=target.value.slice(0,16);else delete schedule.starts_at;},true);
+  else if(data.scheduleZone!==undefined)editSchedule(schedule=>{schedule.time_zone=target.value;},true);
+  else if(data.scheduleCatchUp!==undefined&&target.checked)editSchedule(schedule=>{schedule.catch_up=data.scheduleCatchUp;},true);
+  else if(data.scheduleSource!==undefined)editSchedule(schedule=>{schedule.request??={task:'',inputs:{}};if(target.value)schedule.request.resources={source:target.value};else delete schedule.request.resources;},true);
+});
+$('app').addEventListener('click',async event=>{
+  const button=event.target.closest('button');if(!button||button.disabled||saving)return;
+  const data=button.dataset;
+  if(data.scheduleKind){const d=draft();if(d.start_mode==='schedule')d.schedule??=defaultSchedule();if(d.schedule&&d.schedule.kind!==data.scheduleKind){d.schedule=changeKind(d.schedule,data.scheduleKind);markDirty();render();}return;}
+  if(data.scheduleDay)return editSchedule(schedule=>{const days=new Set(schedule.days||[]);if(days.has(data.scheduleDay))days.delete(data.scheduleDay);else days.add(data.scheduleDay);schedule.days=['mon','tue','wed','thu','fri','sat','sun'].filter(day=>days.has(day));},true);
+  if(data.scheduleAddTime!==undefined)return editSchedule(schedule=>{const used=new Set(schedule.times);let hour=9;while(used.has(`${String(hour).padStart(2,'0')}:00`)&&hour<23)hour++;schedule.times=[...schedule.times,`${String(hour).padStart(2,'0')}:00`];},true);
+  if(data.scheduleRemoveTime!==undefined)return editSchedule(schedule=>{if(schedule.times.length>1)schedule.times.splice(Number(data.scheduleRemoveTime),1);},true);
+  if(data.scheduleAction){
+    const id=currentId;button.disabled=true;
+    try{const status=await request(`/api/applications/${encodeURIComponent(id)}/schedule`,{method:'POST',body:JSON.stringify({action:data.scheduleAction})});scheduleStatus.set(id,status);if(currentId===id)render();
+      notify(data.scheduleAction==='pause'?'Schedule paused. Nothing runs until it is resumed.':data.scheduleAction==='resume'?'Schedule resumed.':'Schedule turned on. Its runs act as you.');}
+    catch(error){button.disabled=false;notify(error.message);}
+    return;
+  }
+  if(data.runOpen&&button.closest('.application-header')){openLiveRun(data.runOpen).catch(error=>notify(error.message));return;}
+});
+// "Edit the schedule" from the header's note: the editor, open, where the
+// saved request is, since that is what a failed start usually needs.
+function editScheduleView(){
+  if(liveBusy)return;stopFollowingLiveRun();view='setup';buildStep=2;advanced=false;render();
+  const details=$('app').querySelector('[data-disclosure="start-method"]');
+  if(details){details.open=true;details.querySelector('.schedule-editor')?.scrollIntoView({block:'start'});details.querySelector('[data-schedule-task]')?.focus({preventScroll:true});}
+  ensureSchedulePreview();
+}
+
+// -- "When a run waits for someone" ---------------------------------------------------
+// Where one message goes when a run stops for a review or a pause. Offered only
+// by a host with connections; the message is sent from the viewer's own account.
+function notifySectionMarkup(d){
+  const options={applicationId:currentId,connections:integrationConnections,status:notifyStatus.get(currentId)||null,viewer:account.principal?.name||'',runtime};
+  return `<details class="quiet-details notify-section" data-disclosure="notify-waiting"><summary>When a run waits for someone · ${escape(notifySummary(d))}</summary>${notifyEditorMarkup(d,{...options,escape,preview:notifyPreview.data,previewError:notifyPreview.error,warnings:notifyWarnings(d,options)})}</details>`;
+}
+function ensureNotifyStatus(){
+  const application=current(),id=currentId;
+  if(!runtime.features?.notifications||!application?.revision)return;
+  const key=`${id}:${application.revision}`;
+  if(notifyStatusKeys.get(id)===key)return;
+  notifyStatusKeys.set(id,key);
+  request(`/api/applications/${encodeURIComponent(id)}/notifications`).then(status=>{notifyStatus.set(id,status);if(currentId===id&&view==='setup')render();},()=>{if(notifyStatusKeys.get(id)===key)notifyStatusKeys.delete(id);});
+}
+// The preview is the host's own message, asked for again when what it is built
+// from changes; an older answer stays on screen until the new one arrives.
+function ensureNotifyPreview(){
+  const d=draft();
+  if(view!=='setup'||!d?.notifications?.waiting||!$('app').querySelector('[data-notify-preview-slot]'))return;
+  const key=JSON.stringify([d.notifications,d.name,d.workflow.map(step=>[step.id,step.name,step.agent]),d.agents.map(agent=>[agent.id,agent.kind]),currentId]);
+  if(key===notifyPreview.key||key===notifyPreviewWanted)return;
+  notifyPreviewWanted=key;clearTimeout(notifyPreviewTimer);
+  notifyPreviewTimer=setTimeout(async()=>{
+    let next;
+    try{next={key,data:await request('/api/notifications/preview',{method:'POST',body:JSON.stringify({definition:d,...(current()?.revision?{application_id:currentId}:{})})}),error:''};}
+    catch(error){next={key,data:null,error:error.message};}
+    if(notifyPreviewWanted!==key)return;
+    notifyPreview=next;notifyPreviewWanted='';
+    const slot=$('app').querySelector('[data-notify-preview-slot]');
+    if(slot)slot.innerHTML=notifyPreviewMarkup({preview:next.data,previewError:next.error,escape});
+  },250);
+}
+$('app').addEventListener('click',event=>{
+  const button=event.target.closest('[data-notify-via]');if(!button||saving)return;
+  const d=draft(),via=button.dataset.notifyVia;
+  if(via==='off'){if(!d.notifications)return;delete d.notifications;}
+  else if(d.notifications?.waiting?.via!==via)d.notifications={waiting:defaultNotification(via,integrationConnections)};
+  else return;
+  markDirty();render();
+});
+$('app').addEventListener('change',event=>{
+  if(event.target.dataset?.notifyConnection===undefined||saving)return;
+  const waiting=draft().notifications?.waiting;if(!waiting)return;
+  waiting.connection=event.target.value;markDirty();render();
+});
+$('app').addEventListener('input',event=>{
+  if(event.target.dataset?.notifyTarget===undefined||saving)return;
+  const waiting=draft().notifications?.waiting;if(!waiting)return;
+  if(waiting.via==='slack')waiting.channel=event.target.value;else if(waiting.via==='email')waiting.address=event.target.value;
+  markDirty();ensureNotifyPreview();
 });

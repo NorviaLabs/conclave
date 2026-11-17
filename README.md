@@ -148,13 +148,151 @@ uv run conclave status RUN_ID
 uv run conclave review RUN_ID REVIEW_ID --output review.json
 uv run conclave resume RUN_ID --provider codex
 uv run conclave cancel RUN_ID
+# A run that stopped while it was sending something:
+uv run conclave actions RUN_ID
+uv run conclave check RUN_ID ACTION_ID
+uv run conclave settle RUN_ID ACTION_ID --done --note "Posted at 10:41"   # or --resend, or --undo
 ```
 
 Human reviews are durable; resume continues from the saved checkpoint without
-replaying completed steps. `cancel` applies to waiting runs; stop an active CLI
-run with Ctrl+C. The command waits until the run completes or pauses for review.
+replaying completed steps. `cancel` applies to waiting, paused, stopped and
+interrupted runs, and records the run as cancelled; stop an active CLI run with
+Ctrl+C. The command waits until the run completes or pauses for review.
+
+**External writes are never sent twice without someone checking.** Every call
+to a tool that needs approval is recorded, with the agent's progress, before it
+is sent. If a run stops mid-write — the host stopped, the service did not answer
+clearly, the run was cut short — that write is *uncertain*, and the run cannot
+continue until it is settled:
+
+- Where the service offers a way to check (a GitHub pull request from that
+  branch, a file with that text, a pushed branch at that commit…), `resume`
+  checks first. Found: it is marked done and not sent again. Proved absent by a
+  reliable read of an approved call: it is sent once more, under the same
+  action.
+- Otherwise a person decides with `conclave settle`: `--done` (it happened; an
+  optional `--note` reaches the agent as your words) or `--resend` (send it once
+  more — that choice is the approval). Either can be `--undo`ne until the run
+  continues. `conclave resume` exits with status `3` and names what is left.
+
+Writes that completed are never sent again: a step that had already sent
+something continues from its last recorded action instead of starting over.
+Interrupted runs recorded before this journal existed cannot be continued.
 The `applications` Python package also exports `run_application` and
 `validate_definition`. Importing `conclave` itself remains a reusable core import.
+
+### Run an application on a schedule
+
+An application can start itself: every few minutes or hours, or daily or on
+chosen weekdays at set times, in a named time zone. In Studio, open **Settings →
+Connections → When to run**, choose **On a schedule**, and say what each run
+starts with (the task and request fields, saved with the application — never
+passwords or tokens). Studio shows the next three times as the host works them
+out. In a definition:
+
+```json
+"start_mode": "schedule",
+"schedule": {"kind": "weekly", "days": ["mon", "wed", "fri"], "times": ["09:00", "17:30"],
+             "time_zone": "Europe/London", "catch_up": "skip",
+             "request": {"task": "Summarise yesterday's support tickets", "inputs": {"team": "billing"}}}
+```
+
+A serving host (`conclave serve`, local or `--hosted`) runs it, using the latest
+saved version. Each scheduled time starts at most one run, even across restarts
+and with several processes on one store. If the previous scheduled run is still
+going, the next time is skipped. Times missed while the host was off are skipped
+and reported, not run late in a burst; `"catch_up": "latest"` runs only the most
+recent one. Studio's header shows the next run and why the last time did not
+run, and run history lists scheduled runs and the times that did not run.
+
+Nobody is there to approve anything, so **scheduled runs refuse writes** unless
+the application has autonomous execution on, exactly as `conclave run` does;
+Studio warns about this, and about having no limits, before you save. Runs act
+as the schedule's owner: whoever last saved a change to what the application
+runs (moving cards on the canvas does not count), so editing someone else's
+schedule makes it yours rather than borrowing their accounts. Studio shows
+whose it is. A hosted schedule with no owner waits until someone turns it on,
+and with Google sign-in a schedule whose owner is no longer admitted stops and
+waits the same way. Only the owner pauses or resumes it:
+
+```bash
+uv run conclave schedule status APP_ID
+uv run conclave schedule pause APP_ID
+uv run conclave schedule resume APP_ID
+```
+
+Pausing never creates a new version, and times that pass while paused are not
+run. The command only changes the schedule: a serving host starts the runs.
+
+### PDF and Word documents in a source folder
+
+Source folders list `.pdf` and `.docx` files alongside `.txt`, `.md`, `.csv` and
+`.html`, and an agent that reads one gets its text, not "Binary file":
+
+- **PDF:** a `[Page N]` line before each page's text. A page without a text
+  layer says `[Page N: no text layer]`, and a scanned PDF with no text at all
+  says so in one sentence (there is no OCR).
+- **Word (.docx):** headings as `#` (Title), `##` (Heading 1) and so on, list
+  items as `- `, table rows as `cell | cell`; deleted revisions, hidden text,
+  headers, footers and comments are left out — the agent reads what a person
+  reading the document sees. Document contents are untrusted input, and the
+  tool says so to the model.
+- **Paging and search.** Lines are numbered and paged with `start_line` /
+  `end_line` as for a text file, and `search_files` / `knowledge_search` in a
+  source folder find text inside documents at the same line numbers.
+  Repository (code) search skips documents.
+- **No text to give.** A PDF only locked against printing is read. One that
+  needs a password, a damaged file, a Word 97–2003 `.doc` (save it as `.docx`
+  or PDF) and other office formats each get one clear sentence.
+- **Limits.** Reading happens in a separate short-lived process, killed when
+  it runs over, so no file can crash or hang the host. Each limit's message
+  names its setting:
+
+  | Setting | Default |
+  |---|---|
+  | `CONCLAVE_DOCUMENT_MAX_BYTES` | 50 MB |
+  | `CONCLAVE_DOCUMENT_MAX_PAGES` | 1000 |
+  | `CONCLAVE_DOCUMENT_MAX_CHARS` | 2,000,000 |
+  | `CONCLAVE_DOCUMENT_TIMEOUT` (seconds) | 30 |
+  | `CONCLAVE_DOCUMENT_MAX_MEMORY_MB` | 1024 |
+  | `CONCLAVE_DOCUMENT_WORKERS` (reading processes at once) | 2 |
+
+  The memory cap is not enforced on systems that refuse to lower a process's
+  address-space limit, such as macOS; the time limit still applies there.
+
+  Text is kept in memory until the file changes, so reading and searching the
+  same folder does not extract each document again.
+
+### Tell someone when a run waits for them
+
+When a run stops for a human review or a pause, Conclave can send one message
+saying so: to a Slack channel, an email address or a webhook, through one of
+your own connections (this needs a host with connections, see
+`INTEGRATIONS.md`). In Studio, open **Settings → Connections → When a run waits
+for someone**, choose the channel and your connection, and Studio shows the
+exact message. In a definition:
+
+```json
+"notifications": {"waiting": {"via": "slack", "connection": "team_slack", "channel": "#reviews"}}
+```
+
+(`"via": "email"` takes an `"address"`; `"via": "webhook"` sends to the
+connection's own URL.) The message names the application and the step that
+waits and links to the run in Studio; nothing from the run — output, request
+values, credentials — is in it. There is one message per waiting point: a
+restart while the run waits sends nothing new, and a run that resumes and waits
+again sends a new one. A message that cannot be sent never fails or holds up
+the run; the run's activity says what happened. Messages are sent as whoever
+last saved a change to the application when the run started, from their own
+connection, which must be granted to it. So that nobody can flood that
+channel by pausing and resuming runs, a run that waits again within 10 minutes
+of its last message is not told again, and an application sends at most 20
+messages an hour (`CONCLAVE_NOTIFY_RUN_INTERVAL` in seconds,
+`CONCLAVE_NOTIFY_HOURLY_LIMIT`); what is not sent is recorded on the run. The
+channel or address is saved with the application, so anyone who can open it
+can see it. The link needs to know where Studio is:
+`CONCLAVE_STUDIO_URL`, or, locally, the address `conclave serve` prints.
+Without the setting an application behaves exactly as before.
 
 ### Serving a deployment's own adapter
 
@@ -211,9 +349,19 @@ it has been removed. The nearest catalogue starter is `research-desk`, and
 
 Limits belong to the application that chose them. A definition's `run_config` and
 `run_budget` bound action steps per member, notes and their size, tool-output
-size, fan-out concurrency, model timeout, delegations, per-member and depth caps,
-and the five measured dimensions. There is no framework-wide flag that overrides
-them: edit the definition, or pass the same file to `conclave run`.
+size, how many steps work at once, model timeout, delegations, per-member and
+depth caps, and the five measured dimensions. There is no framework-wide flag that
+overrides them: edit the definition, or pass the same file to `conclave run`. The
+one host bound is `CONCLAVE_MAX_PARALLEL_STEPS` (default 8), which caps how many
+steps of a run work at once, so a blank limit never means as many as a plan has.
+
+Steps that do not depend on each other run side by side: each starts as soon as
+the steps it needs have finished and a slot is free. Their outputs still join the
+shared results in plan order, so the run ends where it would have one step at a
+time. A pause lets the working steps finish and starts nothing new; a failure in
+one step lets the others finish and keeps their work; and a token, time or cost
+limit is a real stop for every step at once (see
+[REST_API.md](REST_API.md#steps-that-run-side-by-side)).
 
 Exit codes: `0` success, `1` error, `130` interrupted.
 

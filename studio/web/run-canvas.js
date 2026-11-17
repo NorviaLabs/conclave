@@ -1,6 +1,10 @@
 import {canvasMarkup,canvasStepMarkup,canvasDockMarkup,uiIcon} from '/canvas-ui.js';
 import {activityDockMarkup} from '/run-activity.js';
 import {backendLabel,stepBackendLabel} from '/definition.js';
+import {heldCardText,cutShortText} from '/parallel-ui.js';
+// The step details (workbench-ui.js) reach this through the canvas, which every
+// page that draws a run already loads.
+export {heldDetailNoteMarkup} from '/parallel-ui.js';
 // The run canvas: the same run the work plan lists, drawn on the plan's canvas,
 // with the exchanges between agents on the edges.
 //
@@ -10,7 +14,7 @@ import {backendLabel,stepBackendLabel} from '/definition.js';
 import {planConnections,canvasPositions,currentCanvasMetrics,canvasEdgeCurve,canvasEdgeMidpoint,canvasNodeWidth,canvasNodeHeight,staleRunSteps} from '/definition.js';
 
 const STOPPED=['stopped','failed','cancelled','interrupted'];
-const statusClasses={'Working':'working','Complete':'complete','Failed':'failed','Needs input':'needs-input','Ready':'ready','Waiting':'waiting','Incomplete':'incomplete'};
+const statusClasses={'Working':'working','Complete':'complete','Finished':'finished','Failed':'failed','Needs input':'needs-input','Needs check':'needs-input','Ready':'ready','Waiting':'waiting','Incomplete':'incomplete'};
 function runStatusClass(status){return statusClasses[status]||'waiting';}
 const flowArrow='<defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/></marker></defs>';
 
@@ -25,8 +29,16 @@ export function runStepStatus(d,run,index){
   if(!step)return 'Waiting';
   if(run.activeSteps?.includes(index)||run.activeStep===index)return run.mode==='waiting_human'&&run.review?.stage===step.id?'Needs input':run.mode==='waiting_human'&&!run.review?'Needs input':'Working';
   if(run.completedSteps?run.completedSteps.includes(step.id):index<=run.step)return 'Complete';
+  // Finished, but waiting for an earlier step before its result joins.
+  if(run.finishedSteps?.includes(step.id))return 'Finished';
+  // Each step's own end, whichever step the run as a whole names.
+  const outcome=run.stepOutcomes?.[step.id];
+  if(outcome)return outcome.status==='failed'?'Failed':'Incomplete';
   const finished=run.events?.findLast(event=>event.type==='ApplicationFinished');
   if(run.mode==='failed'&&(finished?.stage||(!finished?run.events?.findLast(event=>event.type==='StageStarted')?.stage:null))===step.id)return 'Failed';
+  // A step that was sending something when the run stopped waits on the
+  // person: whether that action happened is not known yet.
+  if(STOPPED.includes(run.mode)&&run.resumable&&run.needsCheck?.includes(step.id))return 'Needs check';
   if(STOPPED.includes(run.mode))return 'Incomplete';
   return planConnections(d).filter(edge=>edge.to===step.id).every(edge=>run.completedSteps?.includes(edge.from))?'Ready':'Waiting';
 }
@@ -80,14 +92,22 @@ export function runHandoffs(d,run){
 // A finished step says what it produced, so the canvas reads as work rather than
 // as a diagram. The titles are one hover away, and stay off the canvas.
 function runProduced(d,run,step,index){
-  if(runStepStatus(d,run,index)!=='Complete')return null;
-  const value=run?.state?.[step.output],label=(d.state.find(item=>item.key===step.output)?.label||step.output).toLowerCase();
+  const status=runStepStatus(d,run,index);
+  if(status==='Failed'&&run.stepOutcomes?.[step.id]?.reason)return {text:run.stepOutcomes[step.id].reason,title:''};
+  if(!['Complete','Finished'].includes(status))return null;
+  // A held step's result is on its StageFinished; it is not in the results yet.
+  const value=status==='Finished'?run.heldOutputs?.[step.id]:run?.state?.[step.output],label=(d.state.find(item=>item.key===step.output)?.label||step.output).toLowerCase();
+  let produced;
   if(Array.isArray(value)){
     const titles=value.map(item=>item.title).filter(Boolean).slice(0,3);
-    return {text:`${value.length} ${value.length===1?label.replace(/s$/,''):label}`,title:titles.join(' · ')};
+    produced={text:`${value.length} ${value.length===1?label.replace(/s$/,''):label}`,title:titles.join(' · ')};
+  }else{
+    const words=String(value??'').trim().split(/\s+/).filter(Boolean).length;
+    produced=words?{text:`${words} words`,title:String(value).slice(0,140)}:null;
   }
-  const words=String(value??'').trim().split(/\s+/).filter(Boolean).length;
-  return words?{text:`${words} words`,title:String(value).slice(0,140)}:null;
+  if(status==='Finished')return {text:heldCardText(d,run,step.id,produced?.text),title:produced?.title||''};
+  const cut=cutShortText(run.cutShort?.[step.id]);
+  return cut?{text:produced?`${produced.text} · ${cut}`:cut.replace(/^c/,'C'),title:produced?.title||''}:produced;
 }
 function delegationCurve(from,to){const x1=from.x+canvasNodeWidth,y1=from.y+canvasNodeHeight-60,x2=to.x,y2=to.y+30;return `M ${x1} ${y1} C ${x1+60} ${y1}, ${x2-40} ${y2}, ${x2} ${y2}`;}
 
@@ -101,7 +121,9 @@ export function runStepWorking(run,stageId,now=Date.now()){
   const events=(run?.events||[]).filter(event=>event.stage===stageId);
   const started=events.findLast(event=>event.type==='StageStarted');
   if(!started||!['pending','running'].includes(run?.mode))return null;
-  if(events.some(event=>['RunFinished','ApplicationStateChanged','ApplicationFinished'].includes(event.type)))return null;
+  // Only what happened since its latest start counts: a step resumed after a
+  // stop works again even though its earlier attempt ended.
+  if(events.slice(events.lastIndexOf(started)).some(event=>['RunFinished','StageFinished','ApplicationStateChanged','ApplicationFinished'].includes(event.type)))return null;
   const tools=events.filter(event=>event.type==='ToolCalled');
   const since=started.timestamp?Date.parse(started.timestamp):NaN;
   return {seconds:Number.isNaN(since)?null:Math.max(0,Math.round((now-since)/1000)),

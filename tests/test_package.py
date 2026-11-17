@@ -31,13 +31,15 @@ def test_the_core_ships_no_numbers():
             "wall_clock_seconds",
             "tokens",
             "cost_usd",
+            "post_limit_calls",
         }:
             # None means unmetered: an absence, not a chosen number.
             assert field.default is None
 
             continue
 
-        if field.name in {"used", "per_agent", "spent"}:
+        # Counters, not limits: what was spent, and what is under way.
+        if field.name in {"used", "per_agent", "spent", "largest_call", "calls_in_flight", "post_limit_used"}:
             continue
 
         assert (

@@ -1,0 +1,52 @@
+{
+  "note": "Shared by tests/test_schedule_definition.py and studio/scripts/check-schedules.mjs: the host and Studio validate a schedule the same way. Each case is applied to the base definition's schedule block.",
+  "base": {
+    "kind": "weekly",
+    "times": ["09:00", "17:30"],
+    "days": ["mon", "wed", "fri"],
+    "time_zone": "Europe/London",
+    "catch_up": "skip",
+    "request": {"task": "Summarise yesterday's support tickets", "inputs": {"team": "billing"}}
+  },
+  "valid": [
+    {"name": "weekly", "change": {}},
+    {"name": "daily", "change": {"kind": "daily", "days": null}},
+    {"name": "interval", "change": {"kind": "interval", "times": null, "days": null, "every_minutes": 120}},
+    {"name": "interval at the minimum", "change": {"kind": "interval", "times": null, "days": null, "every_minutes": 5}},
+    {"name": "interval at the maximum", "change": {"kind": "interval", "times": null, "days": null, "every_minutes": 10080}},
+    {"name": "a start time", "change": {"starts_at": "2026-11-17T09:00"}},
+    {"name": "catch up the latest", "change": {"catch_up": "latest"}},
+    {"name": "twenty-four times", "change": {"kind": "daily", "days": null, "times": ["00:00","01:00","02:00","03:00","04:00","05:00","06:00","07:00","08:00","09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00","17:00","18:00","19:00","20:00","21:00","22:00","23:59"]}},
+    {"name": "a named source", "change": {"request": {"task": "Summarise", "inputs": {"team": "billing"}, "resources": {"source": "support-exports"}}}},
+    {"name": "catch up omitted", "change": {"catch_up": null}}
+  ],
+  "invalid": [
+    {"name": "unknown kind", "change": {"kind": "hourly"}, "message": "Choose interval, daily or weekly"},
+    {"name": "interval too short", "change": {"kind": "interval", "times": null, "days": null, "every_minutes": 4}, "message": "Run at most every 5 minutes"},
+    {"name": "interval too long", "change": {"kind": "interval", "times": null, "days": null, "every_minutes": 10081}, "message": "Run at least once a week"},
+    {"name": "interval not a number", "change": {"kind": "interval", "times": null, "days": null, "every_minutes": "60"}, "message": "Run at most every 5 minutes"},
+    {"name": "interval with times", "change": {"kind": "interval", "days": null, "every_minutes": 60}, "message": "Unsupported schedule setting: times"},
+    {"name": "weekly without an interval", "change": {"every_minutes": 60}, "message": "Unsupported schedule setting: every_minutes"},
+    {"name": "no times", "change": {"times": []}, "message": "Give 1 to 24 times as HH:MM"},
+    {"name": "too many times", "change": {"kind": "daily", "days": null, "times": ["00:00","01:00","02:00","03:00","04:00","05:00","06:00","07:00","08:00","09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00","17:00","18:00","19:00","20:00","21:00","22:00","23:00","23:30"]}, "message": "Give 1 to 24 times as HH:MM"},
+    {"name": "a bad time", "change": {"times": ["9am"]}, "message": "Give 1 to 24 times as HH:MM"},
+    {"name": "an impossible time", "change": {"times": ["24:00"]}, "message": "Give 1 to 24 times as HH:MM"},
+    {"name": "a repeated time", "change": {"times": ["09:00", "09:00"]}, "message": "Use each time once"},
+    {"name": "daily with days", "change": {"kind": "daily"}, "message": "Unsupported schedule setting: days"},
+    {"name": "weekly without days", "change": {"days": []}, "message": "Choose the days"},
+    {"name": "an unknown day", "change": {"days": ["monday"]}, "message": "Choose the days"},
+    {"name": "a repeated day", "change": {"days": ["mon", "mon"]}, "message": "Choose each day once"},
+    {"name": "an unknown zone", "change": {"time_zone": "Mars/Olympus"}, "message": "Choose a time zone"},
+    {"name": "no zone", "change": {"time_zone": null}, "message": "Choose a time zone"},
+    {"name": "a bad start", "change": {"starts_at": "tomorrow"}, "message": "YYYY-MM-DDTHH:MM"},
+    {"name": "an impossible start", "change": {"starts_at": "2026-02-30T09:00"}, "message": "YYYY-MM-DDTHH:MM"},
+    {"name": "an unknown catch up", "change": {"catch_up": "all"}, "message": "Choose skip or latest"},
+    {"name": "an unknown setting", "change": {"cron": "0 9 * * *"}, "message": "Unsupported schedule setting: cron"},
+    {"name": "no request", "change": {"request": null}, "message": "Say what each scheduled run should do"},
+    {"name": "an empty task", "change": {"request": {"task": "  ", "inputs": {"team": "billing"}}}, "message": "Say what each scheduled run should do"},
+    {"name": "a missing required input", "change": {"request": {"task": "Summarise", "inputs": {}}}, "message": "Team"},
+    {"name": "an unknown input", "change": {"request": {"task": "Summarise", "inputs": {"team": "billing", "extra": "x"}}}, "message": "only declared fields"},
+    {"name": "a path for a source", "change": {"request": {"task": "Summarise", "inputs": {"team": "billing"}, "resources": {"path": "/etc"}}}, "message": "named source"},
+    {"name": "an unknown request key", "change": {"request": {"task": "Summarise", "inputs": {"team": "billing"}, "approve": true}}, "message": "Unsupported scheduled request setting: approve"}
+  ]
+}

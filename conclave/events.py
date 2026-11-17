@@ -103,6 +103,11 @@ class ToolCalled:
     truncated: bool
     ok: bool
 
+    # The action this call was recorded as, when the run keeps an action log,
+    # and whether it was sent again after a check or a person said to.
+    action_id: str = ""
+    resent: bool = False
+
 
 @dataclass(frozen=True)
 class ToolDenied:
@@ -270,6 +275,10 @@ def _as_data(
             "content": value.content,
             "data": value.data,
             "nested": value.nested,
+            # Which limit ended the agent, if one did: a run-wide limit that
+            # cut a step short, or its action steps, reads the same whether
+            # the loop ran here or in a sandbox.
+            "exhausted_by": value.exhausted_by,
         }
 
     if isinstance(value, RunConfig):
@@ -319,6 +328,7 @@ def _from_data(
             ),
             data=value["data"],
             nested=value["nested"],
+            exhausted_by=str(value.get("exhausted_by") or ""),
         )
 
     if get_origin(kind) is tuple:

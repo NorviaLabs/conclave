@@ -21,8 +21,10 @@ No ASGI framework is required: `application()` returns a plain ASGI callable for
 whatever server the deployment already runs.
 """
 
+import asyncio
 import hmac
 import json
+import logging
 
 from urllib.parse import (
     parse_qs,
@@ -34,6 +36,8 @@ from .api import TenantAPIs, reject_nonfinite
 from .identity import GoogleLoginError, cookie_value
 from .application.principal import Principal, resolve_principal
 from .application.service import public_record, setting, request_body_limit
+
+LOG = logging.getLogger(__name__)
 
 
 JSON_TYPE = "application/json"
@@ -200,10 +204,36 @@ def application(*, apis=None, token=None, origins=(), principal_for=None, fallba
     """An ASGI callable over one or more tenants' application services."""
 
     services = apis if apis is not None else TenantAPIs()
+    if login is not None and getattr(services, "admits", None) is None:
+        # With Google sign-in, a schedule acts as its owner only while the login
+        # file still admits them. Names that did not come from that sign-in
+        # (no address) belong to the deployment's own identity, which says.
+        config = login.config
+        services.admits = lambda owner: "@" not in owner or config.allows(owner.strip().lower())
     allowed = {origin.rstrip("/") for origin in origins}
     token = token if token is not None else setting("API_TOKEN")
 
     async def app(scope, receive, send):
+        if scope.get("type") == "lifespan":
+            # The server says when it starts and stops: schedules run from
+            # startup, for every tenant that has one, and stop at shutdown.
+            # Starting every tenant's host takes a while with many tenants, so
+            # start-up is reported at once and the tenants follow behind it.
+            scan = None
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    scan = asyncio.create_task(services.start_schedules())
+                    scan.add_done_callback(lambda task: task.cancelled() or task.exception() is None or LOG.warning(
+                        "Starting the tenants' schedules failed: %s", type(task.exception()).__name__))
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    if scan is not None and not scan.done():
+                        scan.cancel()
+                        await asyncio.gather(scan, return_exceptions=True)
+                    await services.close()
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
         if scope.get("type") != "http":
             raise RuntimeError("This application answers HTTP requests")
 
