@@ -18,6 +18,25 @@ def signature(secret, timestamp, body):
     return hmac.new(secret.encode(), str(timestamp).encode() + b'.' + body, hashlib.sha256).hexdigest()
 
 
+class SignatureRefused(ValueError):
+    """The delivery is not signed by whoever holds the secret (a 401, not a 400)."""
+
+
+def check_signature(secret, headers, body, *, clock=time.time):
+    """A constant-time check that `body` was signed with `secret` within the window."""
+
+    if not secret or len(secret) < 16:
+        raise SignatureRefused('Hook connection has no usable signing secret')
+    timestamp, provided = headers.get('x-conclave-timestamp'), headers.get('x-conclave-signature')
+    if not isinstance(timestamp, str) or not isinstance(provided, str) or not timestamp.isdigit():
+        raise SignatureRefused('Hook delivery is missing its signature and timestamp')
+    if abs(clock() - int(timestamp)) > MAX_SKEW:
+        raise SignatureRefused('Hook delivery timestamp is outside the accepted window')
+    # hmac.compare_digest, not ==, so a wrong signature costs the same time.
+    if not hmac.compare_digest(signature(secret, timestamp, body), provided.strip().lower()):
+        raise SignatureRefused('Hook signature does not match')
+
+
 def verify(secret, headers, body, *, clock=time.time):
     """A bounded, constant-time check of one delivery, or why it was refused."""
 

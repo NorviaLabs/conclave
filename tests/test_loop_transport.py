@@ -15,6 +15,7 @@ from conclave import (
     AgentStarted,
     AgentSpec,
     AgentStep,
+    ModelCalled,
     Approval,
     BudgetExceeded,
     Delegation,
@@ -72,6 +73,7 @@ def one_of_each():
         Delegation(run_id="r1", agent="writer", delegated_by="writer", depth=2, task="look", status="refused", reason="depth"),
         StoreChanged(keys=("brief",), writer="writer", version=2),
         BudgetExceeded(run_id="r1", dimension="tokens", limit=10.0, used=12.0),
+        ModelCalled(run_id="r1", agent="writer", provider="", model="", input_tokens=None, output_tokens=3, seconds=0.2),
     ]
 
 
@@ -155,7 +157,8 @@ def test_the_same_run_arrives_through_the_transport():
 def without_ids(event):
     projected = public_runtime_event(event) or {}
 
-    return {key: value for key, value in projected.items() if key not in {"run_id", "parent_run_id"}}
+    # How long a model call took is a measurement, not something the record can repeat.
+    return {key: value for key, value in projected.items() if key not in {"run_id", "parent_run_id", "seconds"}}
 
 
 def _local_loop(script):
@@ -192,7 +195,8 @@ def test_events_leave_the_sandbox_as_they_happen():
 
     received = asyncio.run(exercise())
 
-    assert channel.sent == ["RunStarted", "AgentStarted", "AgentStep", "ToolCalled", "AgentStep", "AgentFinished", "RunFinished"]
+    assert channel.sent == ["RunStarted", "AgentStarted", "ModelCalled", "AgentStep", "ToolCalled", "ModelCalled", "AgentStep",
+                            "AgentFinished", "RunFinished"]
     assert [type(event).__name__ for event in received] == channel.sent
 
 
@@ -278,8 +282,8 @@ def test_a_whole_application_runs_with_its_loop_in_a_sandbox(tmp_path):
     # The durable record drops the agent's steps and replies, wherever the loop
     # ran; the rest of the run is the same.
     assert [event["type"] for event in events] == ["ApplicationStarted", "StageStarted", "RunStarted", "AgentStarted",
-                                                  "AgentFinished", "RunFinished", "StageFinished", "ApplicationStateChanged",
-                                                  "ApplicationFinished"]
+                                                  "ModelCalled", "AgentFinished", "RunFinished", "StageFinished",
+                                                  "ApplicationStateChanged", "ApplicationFinished"]
     assert events[-1]["status"] == "completed" and events[-1]["state"]["brief"] == "Draft"
 
 

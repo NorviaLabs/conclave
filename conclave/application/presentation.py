@@ -12,6 +12,8 @@ different ways. What differs is the medium, not the account.
 import json
 
 from .definition import plan_connections
+from .usage import run_usage
+from .versions import duration_text
 
 
 # A run that is over but did not complete: its unfinished steps were not reached.
@@ -59,6 +61,7 @@ def fold(record: dict) -> dict:
     workflow = definition.get("workflow") or []
     position = {step["id"]: index for index, step in enumerate(workflow)}
     completed, working, finished_stage, state, views = [], set(), None, {}, []
+    timed_out: dict[str, int] = {}
     for item in record.get("events") or []:
         event = item.get("event", item)
         index = position.get(event.get("stage"))
@@ -68,6 +71,10 @@ def fold(record: dict) -> dict:
             views = event["views"]
         if event["type"] == "StageStarted" and index is not None:
             working.add(index)
+            timed_out.pop(event.get("stage"), None)
+        elif event["type"] == "StageFinished" and event.get("status") == "timed_out" and index is not None:
+            working.discard(index)
+            timed_out[event["stage"]] = event.get("time_limit_seconds")
         elif event["type"] == "ApplicationStateChanged" and index is not None:
             working.discard(index)
             if workflow[index]["id"] not in completed:
@@ -81,7 +88,8 @@ def fold(record: dict) -> dict:
     if mode not in ("running", "waiting_for_human"):
         working.clear()
     return {"definition": definition, "workflow": workflow, "completed": completed, "working": working,
-            "review": review, "state": state, "views": views, "finished_stage": finished_stage, "mode": mode}
+            "review": review, "state": state, "views": views, "finished_stage": finished_stage, "mode": mode,
+            "timed_out": timed_out}
 
 
 def step_status(step: dict, index: int, folded: dict) -> str:
@@ -91,6 +99,8 @@ def step_status(step: dict, index: int, folded: dict) -> str:
         return "needs your input" if (folded["review"] or {}).get("stage") == step["id"] else "working"
     if step["id"] in folded["completed"]:
         return "done"
+    if step["id"] in folded.get("timed_out", {}):
+        return f"timed out ({duration_text(folded['timed_out'][step['id']])} limit)"
     if folded["mode"] == "failed" and folded["finished_stage"] == step["id"]:
         return "failed"
     if folded["mode"] in STOPPED:
@@ -117,6 +127,13 @@ def value_lines(value, prefix: str = "    ") -> list[str]:
     return rendered or [f"{prefix}(empty)"]
 
 
+def _decision(output) -> str:
+    """How one answer decided, in words: "approved", "asked for changes"."""
+    statuses = [record.get("status") for record in (output or {}).get("records", []) if isinstance(record, dict)]
+    words = {"approved": "approved", "rejected": "rejected", "changes_requested": "asked for changes"}
+    return next((words[status] for status in statuses if status in words), "answered")
+
+
 def review_lines(review: dict, run_id: str) -> list[str]:
     """What a waiting step wants, and how a person answers it."""
 
@@ -127,6 +144,11 @@ def review_lines(review: dict, run_id: str) -> list[str]:
              f"  Task      {request.get('task') or request.get('application_task') or ''}",
              f"  Write     \"{output.get('key', '?')}\" ({output.get('type', 'text')}){merge}",
              f"  Answer    conclave review {run_id} {review.get('id', '?')} --output <file>"]
+    answers, required = review.get("answers") or [], review.get("required", 1)
+    if required > 1 or answers:
+        # Who has answered, and how: "1 of 3 · ana@acme.com approved".
+        given = ", ".join(f"{item['reviewer']} {_decision(item.get('output'))}".strip() for item in answers)
+        lines.append(f"  Answers   {len(answers)} of {required}" + (f" · {given}" if given else ""))
     if request.get("state"):
         lines.append("  Currently")
         lines.extend(value_lines(request["state"], "      "))
@@ -152,6 +174,103 @@ def budget_lines(record: dict, folded: dict) -> list[str]:
             continue
         parts.append(f"{name} {_number(used or 0)}" + ("" if limit is None else f"/{_number(limit)}"))
     return ["Budget     " + " · ".join(parts)] if parts else []
+
+
+LIMIT_NAMES = {"tokens": ("token limit", "tokens", "Token use"), "tool_calls": ("tool-use limit", "tool uses", "Tool use"),
+               "wall_clock_seconds": ("time limit", "seconds", "Working time"), "cost_usd": ("cost limit", "USD", "Cost")}
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count:,} {word}{'' if count == 1 else 's'}"
+
+
+def duration_text(seconds) -> str:
+    """How long something took, the way Studio says it: "1 m 48 s", "22 s"."""
+
+    seconds = float(seconds or 0)
+    if seconds < 1:
+        return "under 1 s"
+    whole = round(seconds)
+    if whole >= 3600:
+        return f"{whole // 3600} h {whole % 3600 // 60:02d} m"
+    if whole >= 60:
+        return f"{whole // 60} m {whole % 60:02d} s"
+    return f"{whole} s"
+
+
+def usage_lines(record: dict, definition: dict) -> list[str]:
+    """What each step used, and the warnings the run gave before a limit."""
+
+    usage = record.get("usage")
+    if not isinstance(usage, dict):
+        metrics = record.get("metrics") or {}
+        if not metrics:
+            for item in record.get("events") or []:
+                event = item.get("event", item)
+                metrics = event.get("metrics") or ((event.get("checkpoint") or {}).get("budget") or {}).get("spent") or metrics
+        usage = run_usage([item.get("event", item) for item in record.get("events") or []], definition, metrics)
+    if not usage["recorded"]:
+        return ["", "Usage", "  Per-step usage was not recorded for this run."]
+    lines = []
+    if usage["steps"]:
+        width = max(len(stage) for stage in usage["steps"])
+        lines += ["", "Usage"]
+        for stage, step in usage["steps"].items():
+            if not step["model_calls"]:
+                tokens = "no model calls"
+            elif not step["measured_calls"]:
+                tokens = "tokens not measured"
+            else:
+                tokens = ("" if step["measured_calls"] == step["model_calls"] else "at least ") + _plural(step["input_tokens"] + step["output_tokens"], "token")
+            parts = [_plural(step["model_calls"], "model call"), tokens, _plural(step["tool_calls"], "tool call")]
+            if step["tool_failures"]:
+                parts.append(f"{step['tool_failures']} failed")
+            if step["tool_denied"]:
+                parts.append(f"{step['tool_denied']} refused")
+            parts.append(duration_text(step["seconds"]))
+            if step["runs"] > 1:
+                parts.append(f"ran {step['runs']} times")
+            lines.append(f"  {stage:<{width}}  " + " · ".join(parts))
+    for warning in usage["warnings"]:
+        limit_name, unit, subject = LIMIT_NAMES.get(warning["dimension"], ("limit", "", "Use"))
+        used, limit = warning.get("used") or 0, warning.get("limit")
+        if limit:
+            text = f"Close to the {limit_name}: {_number(used)} of {_number(limit)} ({round(used / limit * 100)}%)"
+        else:
+            text = f"{subject} passed its warning level: {_number(used)} (warns at {_number(warning.get('threshold') or 0)})"
+        lines.append(f"Warning    {text}")
+    return lines
+
+
+def size_text(size) -> str:
+    """A file's size the way Studio says it: "46 B", "12.4 KB", "3.2 MB"."""
+
+    size = int(size or 0)
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / 1024 / 1024:.1f} MB"
+
+
+def file_lines(record: dict) -> list[str]:
+    """The files the run stored, each with its download path."""
+
+    files = record.get("files") or []
+    if not files:
+        return []
+    width = max(len(item["name"]) for item in files)
+    lines = ["", "Files"]
+    for item in files:
+        link = item.get("link") or f"/api/runs/{record['id']}/files/{item['id']}"
+        state = "" if item.get("available", True) else " · missing or changed"
+        rounds = f" · round {item['round']}" if item.get("round", 1) > 1 else ""
+        lines.append(f"  {item['name']:<{width}}  {FILE_FORMATS.get(item['format'], item['format'])} · {size_text(item['size'])}"
+                     f"{rounds}{state}  {link}")
+    return lines
+
+
+FILE_FORMATS = {"markdown": "Markdown", "csv": "CSV", "json": "JSON"}
 
 
 def render_run(record: dict) -> str:
@@ -182,6 +301,9 @@ def render_run(record: dict) -> str:
 
     if folded["review"]:
         lines += ["", "Waiting for you", *review_lines(folded["review"], record["id"])]
+        standing = record.get("can_answer") or {}
+        if standing.get("allowed") is False:
+            lines.append(f"  You       {standing['reason']}")
 
     if folded["views"]:
         lines += ["", "Outputs"]
@@ -205,5 +327,6 @@ def render_run(record: dict) -> str:
     calls = sum(1 for item in record.get("events") or []
                 if item.get("event", item).get("type") in {"ToolCalled", "ToolDenied"})
     lines += ["", f"Members    {len(definition.get('agents') or [])} · steps done {len(folded['completed'])}"
-                  f" of {len(workflow)} · tool calls {calls}", *budget_lines(record, folded)]
+                  f" of {len(workflow)} · tool calls {calls}", *budget_lines(record, folded),
+              *usage_lines(record, definition), *file_lines(record)]
     return "\n".join(lines) + "\n"

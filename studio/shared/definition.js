@@ -56,7 +56,8 @@ export function validateDefinition(d){
  str(d.name,'Application name',100);str(d.description,'Purpose',2000,false);array(d.agents,'Agents',16);array(d.state,'State collections',12);array(d.workflow,'Workflow stages',24);array(d.views,'Views',12);
  unique(d.agents,'id','Agent identifiers');unique(d.state,'key','State keys');unique(d.workflow,'id','Stage identifiers');unique(d.views,'id','View identifiers');
  for(const a of d.agents){identifier(a.id,'Agent identifier');if(a.kind!==undefined&&!['ai','human'].includes(a.kind))fail('Choose AI or human members.');if(a.kind==='human'&&Array.isArray(a.tools)&&a.tools.length)fail('Human members do not execute agent tools.');if(a.kind==='human'&&(a.provider||a.model))fail('Human members do not run on a model backend.');backend(a,'Member');str(a.name,'Agent name',100);str(a.instructions,'Agent instructions',8000);if(!Array.isArray(a.tools)||a.tools.length>100||a.tools.some(t=>typeof t!=='string'||! /^[a-zA-Z][a-zA-Z0-9_.-]{0,99}$/.test(t))||new Set(a.tools).size!==a.tools.length)fail('Use unique valid tool identifiers.');}
- for(const s of d.state){validateRecordFields(s.fields||[]);if(s.type==='text'&&s.fields?.length)fail('Text collections do not accept record fields.');identifier(s.key,'State key');str(s.label,'State label',100);if(s.kind!==undefined&&!outputTypes.some(k=>k.id===s.kind))fail('Choose a supported output type.');if(s.kind!==undefined&&(s.kind==='document')!==(s.type==='text'))fail('Documents require text; other output types require records.');if(!['records','text'].includes(s.type))fail('Choose records or text state.');if(!['upsert','append','replace'].includes(s.merge)||(s.type==='text'&&s.merge!=='replace'))fail('Text state requires replace; records support upsert, append or replace.');if(!Array.isArray(s.statuses)||s.statuses.length>12||s.statuses.some(x=>typeof x!=='string'||!x.trim()||x.length>40)||new Set(s.statuses).size!==s.statuses.length)fail('Statuses must be unique nonempty labels.');}
+ for(const s of d.state){validateRecordFields(s.fields||[]);if(s.type==='text'&&s.fields?.length)fail('Text collections do not accept record fields.');identifier(s.key,'State key');str(s.label,'State label',100);if(s.kind!==undefined&&!outputTypes.some(k=>k.id===s.kind))fail('Choose a supported output type.');if(s.kind!==undefined&&(s.kind==='document')!==(s.type==='text'))fail('Documents require text; other output types require records.');if(s.file!==undefined){const allowed={document:['markdown'],dataset:['csv','json'],artifact:['json']}[s.kind];if(s.file===false){if(!allowed)fail('Only a document, dataset or artifact has a stored file to turn off.');}else if(!s.file||typeof s.file!=='object'||Array.isArray(s.file)||Object.keys(s.file).join()!=='format'||!(allowed||[]).includes(s.file.format))fail(`Choose a stored file this output allows: ${(allowed||['none']).join(', ')}.`);}if(!['records','text'].includes(s.type))fail('Choose records or text state.');if(!['upsert','append','replace'].includes(s.merge)||(s.type==='text'&&s.merge!=='replace'))fail('Text state requires replace; records support upsert, append or replace.');if(!Array.isArray(s.statuses)||s.statuses.length>12||s.statuses.some(x=>typeof x!=='string'||!x.trim()||x.length>40)||new Set(s.statuses).size!==s.statuses.length)fail('Statuses must be unique nonempty labels.');}
+ for(const w of d.workflow){if(w.time_limit_seconds!==undefined){if(d.agents.find(a=>a.id===w.agent)?.kind==='human')fail('A person’s step has no time limit: it waits for the person.');if(!Number.isInteger(w.time_limit_seconds)||w.time_limit_seconds<10||w.time_limit_seconds>86400)fail('Give a time limit of at least 10 seconds and at most 24 hours.');}}
  for(const w of d.workflow){identifier(w.id,'Stage identifier');str(w.name,'Stage name',100);str(w.task,'Stage task',4000);if(!d.agents.some(a=>a.id===w.agent))fail(`Stage “${w.name}” needs an existing agent.`);if(!d.state.some(s=>s.key===w.output))fail(`Stage “${w.name}” needs an existing output collection.`);if(d.agents.some(a=>a.id===w.agent&&a.kind==='human')&&(w.provider||w.model))fail('Human steps do not run on a model backend.');backend(w,`Step “${w.name}”`);}
  for(const v of d.views){identifier(v.id,'View identifier');str(v.title,'View title',100);const s=d.state.find(s=>s.key===v.collection);if(!s)fail(`View “${v.title}” needs an existing state collection.`);if(!['cards','table','board','prose'].includes(v.layout)||(s.type==='text')!==(v.layout==='prose'))fail(`View “${v.title}” must use prose for text, or cards/table/board for records.`);}
  const rc=d.run_config,rb=d.run_budget;if(!rc||!rb)fail('Explicit runtime limits are required.');if(Object.keys(rc).sort().join(',')!==Object.keys(runtimeConfig).sort().join(',')||Object.keys(rb).sort().join(',')!==Object.keys(runBudget).sort().join(','))fail('Use the supported runtime configuration and budget fields.');
@@ -66,11 +67,25 @@ export function validateDefinition(d){
  if(d.inputs!==undefined){if(!Array.isArray(d.inputs)||d.inputs.length>12)fail('Use at most 12 request fields.');unique(d.inputs,'id','Request field identifiers');for(const f of d.inputs){identifier(f.id,'Request field identifier');str(f.label,'Request field label',100);if(!['text','textarea','number','date'].includes(f.type)||typeof f.required!=='boolean')fail('Choose a supported request field type and required setting.');}}
  if(d.budget_warnings!==undefined){if(!d.budget_warnings||typeof d.budget_warnings!=='object'||Array.isArray(d.budget_warnings))fail('Provide budget warnings.');for(const [key,value] of Object.entries(d.budget_warnings)){if(!['tool_calls','wall_clock_seconds','tokens','cost_usd'].includes(key)||value!==null&&(!Number.isFinite(value)||value<0))fail('Invalid warning budget.');if(value!==null&&rb[key]!==null&&value>=rb[key])fail('Warning thresholds must be below hard stops.');}}
  if(d.connections!==undefined){if(!Array.isArray(d.connections)||d.connections.length>552)fail('Use valid step connections.');const seen=new Set();for(const edge of d.connections){if(!edge||!d.workflow.some(w=>w.id===edge.from)||!d.workflow.some(w=>w.id===edge.to)||edge.from===edge.to)fail('Connect two different existing steps.');const key=edge.from+'>'+edge.to;if(seen.has(key))fail('This connection already exists.');seen.add(key);}executionOrder(d);}
+ // A condition checks a step this one depends on; the host checks the same.
+ for(const w of d.workflow)if(w.condition!==undefined)validateCondition(d,w);
+ // Who may answer reviews, and how many people each needs; the host checks the same.
+ validateReviewPolicy(d);
+ // A review that asks for changes sends earlier AI steps back; the host checks the same.
+ for(const w of d.workflow){if(w.revises===undefined&&w.max_revisions===undefined)continue;const human=member=>d.agents.find(a=>a.id===member)?.kind==='human';
+  if(!human(w.agent))fail(`Step “${w.name||w.id}”: only a human review sets revises or max_revisions.`);
+  if(w.max_revisions!==undefined&&w.max_revisions!==null&&(!Number.isInteger(w.max_revisions)||w.max_revisions<0||w.max_revisions>100))fail(`Step “${w.name||w.id}”: max_revisions is a whole number from 0 to 100, or blank.`);
+  if(w.revises!==undefined){const ancestors=ancestorSteps(d,w.id);if(!Array.isArray(w.revises)||!w.revises.length||w.revises.length>24||new Set(w.revises).size!==w.revises.length||w.revises.some(id=>typeof id!=='string'||!ancestors.has(id)||human(d.workflow.find(step=>step.id===id)?.agent)))fail(`Step “${w.name||w.id}”: revises names earlier AI steps this review depends on, once each.`);}}
  if(d.canvas!==undefined){if(!d.canvas||typeof d.canvas!=='object'||!d.canvas.positions||typeof d.canvas.positions!=='object'||Array.isArray(d.canvas.positions))fail('Use valid canvas positions.');for(const [id,pos] of Object.entries(d.canvas.positions)){if(!d.workflow.some(w=>w.id===id)||!pos||!Number.isFinite(pos.x)||!Number.isFinite(pos.y)||pos.x<0||pos.y<0||pos.x>10000||pos.y>10000)fail('Place steps within the canvas.');}}
  if(d.canvas!==undefined&&d.canvas.groups!==undefined){const groups=d.canvas.groups;if(!Array.isArray(groups)||groups.length>20)fail('Use up to 20 canvas groups.');const ids=new Set();for(const group of groups){if(!group||typeof group.id!=='string'||!/^[a-z][a-z0-9_-]{0,63}$/.test(group.id)||ids.has(group.id))fail('Use a valid group identifier.');ids.add(group.id);if(typeof group.name!=='string'||!group.name.trim()||group.name.length>100||(group.collapsed!==undefined&&typeof group.collapsed!=='boolean'))fail('Name each group.');}for(const step of d.workflow)if(step.group!==undefined&&!ids.has(step.group))fail('A step can only belong to a group the plan declares.');}
  if(d.start_mode!==undefined&&!['manual','event','schedule'].includes(d.start_mode))fail('Choose a supported start method.');
  if(d.notifications!==undefined)validateNotifications(d.notifications);
  if(d.schedule!==undefined){if(d.start_mode!=='schedule')fail("A schedule needs the start method 'On a schedule'.");validateSchedule(d.schedule,d);}
+ // What a run started by an event is asked to do; the host checks the same.
+ if(d.start_mode==='event'||d.event!==undefined){const event=d.event;
+  if(d.start_mode!=='event')fail("Event settings need the start method 'When an event arrives'.");
+  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).some(key=>!['task','allow_task_override'].includes(key))||typeof event.task!=='string'||!event.task.trim()||event.task.length>20000||event.allow_task_override!==undefined&&typeof event.allow_task_override!=='boolean')
+   fail('An event-started application needs event settings: a task of at most 20,000 characters, and whether an event may replace it.');}
  if(d.integrations!==undefined){if(!Array.isArray(d.integrations)||d.integrations.length>40)fail('Choose up to 40 connectors.');unique(d.integrations,'connector','Connector selections');for(const item of d.integrations){if(!item||Object.keys(item).some(k=>!['connector','purpose','scope','mode'].includes(k)))fail('Connector setup accepts choices only, not account credentials.');const connector=connectorDescriptors.find(c=>c.id===item.connector);identifier(item.connector,'Connector identifier');str(item.purpose,'Connector purpose',1000,false);str(item.scope,'Connector source or destination',1000,false);const modes=connector?.default_mode==='model'?['model']:connector?.default_mode==='read'?['read']:['read','draft','approved','model'];if(!modes.includes(item.mode))fail('Choose supported actions for this connector.');}}
  return d;
 }
@@ -245,6 +260,12 @@ export function preflightIssues(d){
  const issues=[];
  const mention=(text,name)=>new RegExp(`(?<![a-z0-9_])${name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}(?![a-z0-9_])`).test(text.toLowerCase());
  const warning=(step,code,label,message,evidence)=>issues.push({stage:step.id,code,severity:'warning',label,message,evidence});
+ // A condition decides whether a person reviews: the host then skips everything
+ // after the review, but whoever runs this should know a model's output decides.
+ for(const step of d.workflow){
+  if(step.condition&&d.agents.find(item=>item.id===step.agent)?.kind==='human')
+    warning(step,'conditional-review','Condition on a review',`Whether ${step.name||step.id} happens depends on what ${d.workflow.find(item=>item.id===step.condition.step)?.name||step.condition.step} produced. When it is skipped, every step after it is skipped too.`,`Run only when ${conditionPhrase(d,step.condition)}`);
+ }
  for(const step of d.workflow){
   const collection=d.state.find(item=>item.key===step.output),member=d.agents.find(item=>item.id===step.agent);
   const sentences=`${step.task}\n${member?.instructions||''}`.split(/[.!?\n]/);
@@ -304,3 +325,133 @@ export function resolvePreflightIssue(d,issue){
  validateDefinition(updated);
  return updated;
 }
+
+// Conditions: a step runs only when an earlier step's output says so. The host
+// (conclave/application/definition.py) decides; these mirror it for the editor.
+export const CONDITION_OPERATORS={equals:'exactly',not_equals:'not',in:'one of',not_in:'none of',contains:'contains'};
+const LIST_OPERATORS=['in','not_in'];
+// The fields a condition can check on a step's output, with their options where known.
+export function conditionFields(d,stepId){
+  const step=d.workflow.find(item=>item.id===stepId),collection=step&&d.state.find(item=>item.key===step.output);
+  if(!collection)return [];
+  if(collection.type==='text')return [{key:'text',label:'its text',options:null}];
+  return [{key:'status',label:'status',options:collection.statuses?.length?collection.statuses:null},
+    ...(collection.fields||[]).map(field=>({key:field.key,label:field.label||field.key,options:field.type==='enum'?field.options:field.type==='boolean'?['true','false']:null}))];
+}
+export function validateCondition(d,w){
+  const c=w.condition,named=`Step “${w.name||w.id}”`;
+  if(!c||typeof c!=='object'||Array.isArray(c)||Object.keys(c).sort().join()!=='field,operator,step,value')fail(`${named}: a condition has a step, a field, an operator and a value.`);
+  if(!ancestorSteps(d,w.id).has(c.step))fail(`${named}: a condition checks a step this one depends on.`);
+  const field=conditionFields(d,c.step).find(item=>item.key===c.field);
+  if(!field)fail(`${named}: the condition's field is not part of that step's output.`);
+  if(!(c.operator in CONDITION_OPERATORS))fail(`${named}: the condition's operator must be one of ${Object.keys(CONDITION_OPERATORS).join(', ')}.`);
+  const list=LIST_OPERATORS.includes(c.operator),values=list?c.value:[c.value];
+  if(list!==Array.isArray(c.value)||!values.length||values.length>20||values.some(item=>typeof item!=='string'||!item.trim()||item.length>200)||new Set(values.map(item=>item.trim().toLowerCase())).size!==values.length)
+    fail(`${named}: the condition's value must be ${list?'a list of 1 to 20 different nonblank text values':'one nonblank text value'} of at most 200 characters.`);
+  const collection=d.state.find(item=>item.key===d.workflow.find(step=>step.id===c.step).output);
+  const options=c.field==='status'?collection.statuses:(collection.fields||[]).find(item=>item.key===c.field&&item.type==='enum')?.options;
+  if(options?.length&&c.operator!=='contains'&&values.some(item=>!options.map(option=>option.trim().toLowerCase()).includes(item.trim().toLowerCase())))
+    fail(`${named}: the condition's value must be an option of ${c.field}: ${options.join(', ')}.`);
+}
+function conditionMatches(actual,operator,value){
+  if(typeof actual==='boolean')actual=actual?'true':'false';
+  if(operator==='contains')return String(actual).toLowerCase().includes(String(value).trim().toLowerCase());
+  const expected=LIST_OPERATORS.includes(operator)?value:[value];
+  const equal=item=>typeof actual==='number'?Number(String(item).trim())===actual&&String(item).trim()!=='':String(item).trim().toLowerCase()===String(actual).trim().toLowerCase();
+  const found=expected.some(equal);
+  return ['not_equals','not_in'].includes(operator)?!found:found;
+}
+export function conditionHolds(c,output){
+  if(typeof output==='string')return c.field==='text'&&!!output.trim()&&conditionMatches(output,c.operator,c.value);
+  if(!Array.isArray(output))return false;
+  return output.some(record=>record&&record[c.field]!==undefined&&record[c.field]!==null&&record[c.field]!==''&&conditionMatches(record[c.field],c.operator,c.value));
+}
+const either=values=>values.length<2?values.join(''):`${values.slice(0,-1).join(', ')} or ${values.at(-1)}`;
+// "type is bug or regression", "its text contains crash".
+export function conditionPhrase(d,c){
+  const field=conditionFields(d,c.step).find(item=>item.key===c.field)?.label||c.field,values=LIST_OPERATORS.includes(c.operator)?c.value:[c.value];
+  const verb={equals:'is',in:'is',not_equals:'is not',not_in:'is not',contains:'contains'}[c.operator];
+  return `${field} ${verb} ${either(values)}`;
+}
+// The badge on a plan card: "Only when Triage the issue: type is bug or regression".
+export function conditionBadgeText(d,step){
+  const c=step.condition;if(!c)return '';
+  return `Only when ${d.workflow.find(item=>item.id===c.step)?.name||c.step}: ${conditionPhrase(d,c)}`;
+}
+// The editor's sentence: "Runs when any Triage the issue record has type bug or regression."
+export function conditionSentence(d,c){
+  const source=d.workflow.find(item=>item.id===c.step),name=source?.name||c.step,text=c.field==='text';
+  return text?`Runs when the text of ${name} ${conditionPhrase(d,c).replace(/^its text /,'')}.`:`Runs when any ${name} record's ${conditionPhrase(d,c)}.`;
+}
+
+// A new condition for a step: the step it depends on most directly, the first
+// field with fixed options (else its first field), and the first option.
+export function defaultCondition(d,stepId){
+  const ancestors=ancestorSteps(d,stepId),direct=planConnections(d).filter(edge=>edge.to===stepId).map(edge=>edge.from);
+  const source=direct.find(id=>ancestors.has(id))||d.workflow.find(step=>ancestors.has(step.id))?.id;
+  if(!source)return null;
+  return conditionWithPart(d,{step:source},'step',source);
+}
+// A condition with one part changed, and whatever that part decides reset to fit:
+// another step chooses its field again, another field its values, and switching
+// between one value and a list keeps what can be kept.
+export function conditionWithPart(d,condition,part,value){
+  const next={...condition};
+  if(part==='step'){
+    next.step=value;const fields=conditionFields(d,value),field=fields.find(item=>item.options&&item.key!=='status')||fields.find(item=>item.options)||fields[0];
+    return conditionWithPart(d,next,'field',field?.key||'text');
+  }
+  if(part==='field'){
+    next.field=value;const field=conditionFields(d,next.step).find(item=>item.key===value);
+    next.operator=field?.options?'in':value==='text'?'contains':'equals';next.value=field?.options?[field.options[0]]:'';return next;
+  }
+  if(part==='operator'){
+    const list=LIST_OPERATORS.includes(value),values=Array.isArray(next.value)?next.value:[next.value].filter(item=>String(item||'').trim());
+    next.operator=value;next.value=list?values:values[0]||'';return next;
+  }
+  if(part==='value'){next.value=LIST_OPERATORS.includes(next.operator)&&!Array.isArray(value)?String(value).split(',').map(item=>item.trim()).filter(Boolean):value;return next;}
+  return next;
+}
+// Tick or untick one option of a list condition, keeping the options' own order.
+export function conditionWithOption(d,condition,option,checked){
+  const options=conditionFields(d,condition.step).find(item=>item.key===condition.field)?.options||[];
+  const chosen=new Set((condition.value||[]).map(item=>String(item)));if(checked)chosen.add(option);else chosen.delete(option);
+  return {...condition,value:options.filter(item=>chosen.has(item))};
+}
+
+// Who may answer reviews (conclave/application/definition.py and runs.py decide;
+// these mirror them for the editor and the review panel).
+export const MAX_REVIEWERS=50,MAX_ANSWERS_REQUIRED=50;
+const REVIEW_DOMAIN=/^@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+// How many people a list of reviewers names, or null when a domain leaves room for more.
+export function namedReviewers(policy){const list=policy?.reviewers;return !list||list.some(entry=>entry.startsWith('@'))?null:list.length;}
+export function validateReviewPolicy(d){
+  const policy=d.review_policy;
+  if(policy!==undefined){
+    if(!policy||typeof policy!=='object'||Array.isArray(policy)||Object.keys(policy).some(key=>!['reviewers','allow_starter'].includes(key)))fail('review_policy names reviewers and whether the person who started a run may answer its reviews.');
+    if(policy.allow_starter!==undefined&&typeof policy.allow_starter!=='boolean')fail('review_policy.allow_starter is true or false.');
+    const list=policy.reviewers;
+    if(list!==undefined&&(!Array.isArray(list)||!list.length||list.length>MAX_REVIEWERS||list.some(item=>typeof item!=='string'||!item.trim()||item!==item.trim()||item.length>100||item.startsWith('@')&&!REVIEW_DOMAIN.test(item))||new Set(list.map(item=>item.toLowerCase())).size!==list.length))
+      fail(`review_policy.reviewers lists 1 to ${MAX_REVIEWERS} different people, or whole domains such as @acme.com, each at most 100 characters.`);
+  }
+  const named=namedReviewers(policy);
+  for(const w of d.workflow){
+    if(w.answers_required===undefined)continue;
+    const title=`Step “${w.name||w.id}”`,n=w.answers_required,human=d.agents.find(a=>a.id===w.agent)?.kind==='human';
+    if(!human)fail(`${title}: answers_required belongs to human reviews.`);
+    if(!Number.isInteger(n)||n<1||n>MAX_ANSWERS_REQUIRED)fail(`${title}: answers_required is a whole number from 1 to ${MAX_ANSWERS_REQUIRED}.`);
+    if(n>1&&d.state.find(item=>item.key===w.output)?.kind!=='decision')fail(`${title}: answers_required above 1 needs a decision output.`);
+    if(named!==null&&n>named)fail(`${title}: answers_required is ${n}, but review_policy names only ${named} ${named===1?'person':'people'}.`);
+  }
+}
+// "ana@acme.com or anyone at @ops.acme.com".
+export function reviewersText(list){const words=list.map(entry=>entry.startsWith('@')?`anyone at ${entry}`:entry);return words.length<2?words.join(''):`${words.slice(0,-1).join(', ')} or ${words.at(-1)}`;}
+// How one answer decided: approved, rejected, changes_requested, or answered.
+export function answerDecision(output){const statuses=(output?.records||[]).map(record=>record?.status);return ['rejected','changes_requested','approved'].find(status=>statuses.includes(status))||'answered';}
+// The sentence under "People who must answer".
+export function answersRequiredText(d,step){
+  const n=step.answers_required||1;
+  if(n===1)return 'One person’s answer decides. Approving lets the run go on; rejecting stops it; asking for changes sends the work back.';
+  return `All ${n} must approve for the run to go on. The first rejection stops it at once; a request for changes waits for everyone’s answer, then sends the work back with every comment.`;
+}
+

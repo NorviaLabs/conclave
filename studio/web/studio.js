@@ -8,15 +8,24 @@ import {planConnections,canvasPositions,planShape,setCanvasMetrics,canvasEdgeCur
 import {catalogueMarkup} from '/catalogue-ui.js';
 import {canvasFitZoom,CANVAS_DOCK_SPACE,uiIcon,canvasContentScrolls} from '/canvas-ui.js';
 import {menuItem,menuSeparator,menuMarkup,menuTarget,menuFocusTargets} from '/menu-ui.js';
-import {preflightIssues,resolvePreflightIssue,staleRunSteps} from '/definition.js';
+import {preflightIssues,resolvePreflightIssue,staleRunSteps,defaultCondition,conditionWithPart,conditionWithOption,reviewersText,answerDecision} from '/definition.js';
 let preflightReviewed=null;
 const preflightVersion=()=>JSON.stringify([currentId,current().revision,current().definition,preflightIssues(current().definition)]);
 import {reorderPlan,duplicatePlanStep,removePlanStep,insertPlanStep,insertMemberStep,attachPlanTool,connectPlanSteps,disconnectPlanSteps,moveCanvasStep,tidyCanvas,layoutSaveDefinition,placeInsertedStep,copyStepMember,planReadiness} from '/plan.js';
 import {workbenchMarkup,executionPlanMarkup,executionDetailMarkup,canvasEdgePaths} from '/workbench-ui.js';
 import {runProgressMarkup,runStepWorking} from '/run-canvas.js';
 import {crewPollMarkup} from '/crew-poll.js';
+import {eventSettingsMarkup,eventPanelMarkup} from '/event-ui.js';
+import {versionsListMarkup,comparisonMarkup,restoreConfirmMarkup,runVersionMarkup,sensitiveChanges} from '/versions-ui.js';
+import {usageMarkup,stepUsageMarkup,usageWarningMarkup} from '/usage-ui.js';
+import {historyPickMarkup,compareBarMarkup,runComparisonMarkup,compareErrorMarkup,stepBodyMarkup} from '/run-compare-ui.js';
+import {fileCardMarkup,noFileMarkup,filesByStage,stepFileMarkup,storedFileFieldMarkup,fileSetting,wouldStoreMarkup,fileFormatFor} from '/output-files-ui.js';
+import {parseTimeLimit,timeLimitFieldMarkup,timeLimitBadgeMarkup,timedOutNoticeMarkup} from '/time-limit-ui.js';
+import {can,disabledReason,roleTagMarkup,peopleDialogMarkup} from '/access-ui.js';
+import {sourceChipsMarkup,sourceSummaryText,sourceListMarkup} from '/source-checks.js';
+import {revisionRoundMarkup,revisionHistoryMarkup,revisionConsequenceMarkup,answersProgressMarkup,answersMarkup,answerBlockedMarkup,policyInForceMarkup} from '/review-rounds.js';
 import {proposePlanChange,parseImportedDefinition,describeDefinitionChanges} from '/plan-assistant.js';
-import {projectLiveRun,liveRunMarkup,liveFollowMode,liveStreamPath} from '/live.js';
+import {projectLiveRun,liveRunMarkup,liveFollowMode,liveStreamPath,livePollDelay} from '/live.js';
 import {actionPanelMarkup,continueGate,historyBadgeMarkup} from '/run-actions.js';
 import {createStepTestsController} from '/step-tests.js';
 import {apiUrl,apiHeaders} from '/api.js';
@@ -129,6 +138,10 @@ async function manageIntegrations(error='',focus=''){
 const connectionName=id=>integrationConnections.find(c=>c.id===id)?.name||id;
 const connectionTools=()=>integrationConnections.filter(c=>c.applications.includes(currentId)).flatMap(c=>c.operations.map(op=>`connection.${c.id}.${op}`));
 const readinessRuntime=()=>({...runtime,tools:[...runtime.tools,...connectionTools()]});
+// What your role on the open application allows. An application not saved yet,
+// or a host without roles, allows everything; the host enforces it either way.
+const allowed=permission=>{const app=current();return !app?.revision||app.role===undefined||can(app.role,permission,{open:app.open});};
+const roleReason=permission=>{const app=current();return app?.revision&&!app.open?disabledReason(app.role,permission):'';};
 function notify(message){$('notice').textContent=message;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>$('notice').textContent='',6500);}
 // Where this bundle talks to, and how it authenticates: the page's own host by
 // default, or whatever config.json beside the page says.
@@ -145,7 +158,9 @@ async function request(path,options={}){
     throw error;
   }return result;
 }
-const stepTests=createStepTestsController({request,getContext:()=>({applicationId:currentId,runId:preview?.runId,stepId:selectedRunStepId,draft:draft(),backends:runtime.backends||[]}),escape,agentName,outputName,capabilityName,onTestsChanged:()=>{stepExamplesApp=null;ensureStepExamples();}});
+const stepTests=createStepTestsController({request,getContext:()=>({applicationId:currentId,runId:preview?.runId,stepId:selectedRunStepId,draft:draft(),backends:runtime.backends||[]}),escape,agentName,outputName,capabilityName,onTestsChanged:()=>{stepExamplesApp=null;ensureStepExamples();},
+  // A test stores no file; it says which one a run would store.
+  wouldStore:(definition,steps)=>steps.map(id=>{const step=definition.workflow.find(item=>item.id===id);return wouldStoreMarkup(definition.state.find(item=>item.key===step?.output),{escape});}).join('')});
 function fitCanvas(mode){
   const area=$('app').querySelector(`[data-canvas-mode="${mode}"]`),flow=area?.querySelector('.canvas-flow');if(!flow)return;
   const width=parseFloat(flow.style.width),height=parseFloat(flow.style.height);
@@ -238,7 +253,7 @@ function render(){
   const running=!!preview?.live&&['pending','running','waiting_human'].includes(preview.mode);
   const disclosures=[...$('app').querySelectorAll('details[data-disclosure]')].map(element=>({key:element.dataset.disclosure,open:element.open}));
   const scrolls=['.plan-canvas','.workbench-resources','.workbench-inspector'].map(selector=>({selector,top:$('app').querySelector(selector)?.scrollTop||0,left:$('app').querySelector(selector)?.scrollLeft||0}));
-  const active=document.activeElement,key=$('app').contains(active)?['path','action','select','tab','record','request','step','filter','format','tool','outputKind','planDrag','assistantInput','requestField','humanInput','humanField','liveHistory','planSearch'].find(k=>active.dataset?.[k])||SCHEDULE_FOCUS.find(k=>active.dataset?.[k]!==undefined):null,val=key?active.dataset[key]:null,start=active?.selectionStart,end=active?.selectionEnd,index=active?.dataset?.index;
+  const active=document.activeElement,key=$('app').contains(active)?['path','action','select','tab','record','request','step','filter','format','tool','outputKind','planDrag','assistantInput','requestField','humanInput','humanField','liveHistory','conditionPart','conditionOption','conditionAdd','planSearch'].find(k=>active.dataset?.[k])||SCHEDULE_FOCUS.find(k=>active.dataset?.[k]!==undefined):null,val=key?active.dataset[key]:null,start=active?.selectionStart,end=active?.selectionEnd,index=active?.dataset?.index;
   const d=viewingRun?preview.definition:draft();
   // The plan is laid out for the canvas it is drawn in: measured from the canvas
   // on screen, and from the window on the very first render.
@@ -247,7 +262,7 @@ function render(){
     :{width:Math.max(760,Math.round(window.innerWidth*0.9)),height:Math.max(520,Math.round(window.innerHeight*0.8))};
   if(!(view==='plan'&&(viewingRun?renderedRunId===preview.runId:renderedPlanId===currentId))){let shape;try{shape=planShape(d);}catch{shape={levels:1,columns:d.workflow.length};}setCanvasMetrics({...size,...shape,narrow:window.innerWidth<=760});}
   const markup=`<div class="shell ${view==='plan'?(viewingRun?'canvas-first-run':'canvas-first-plan'):''} ${railOpen?'rail-open':''}"><aside class="rail ${railOpen?'open':''}" aria-label="Your applications"><button class="rail-toggle" data-action="toggle-rail" aria-expanded="${railOpen}" aria-label="${railOpen?'Collapse the sidebar':'Expand the sidebar'}" title="${railOpen?'Collapse the sidebar':'Expand the sidebar'}"><span class="rail-toggle-icon ${railOpen?'open':''}" aria-hidden="true">${uiIcon('chevron')}</span></button><div class="brand"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m23 8-7-4-9 5v14l9 5 7-4M7 9l9 6 7-4M16 15v13"/></svg><span class="rail-label">Conclave<small>STUDIO</small></span></div><button class="button rail-action" data-action="new" ${saving?'disabled':''} aria-label="New application" title="New application"><span class="rail-icon" aria-hidden="true">${uiIcon('plus')}</span><span class="rail-label">New application</span></button><button class="button catalogue-open rail-action" data-action="open-catalogue" aria-label="Templates" title="Templates"><span class="rail-icon" aria-hidden="true">${uiIcon('list')}</span><span class="rail-label">Templates</span></button><div class="rail-apps"><span class="eyebrow rail-label">Your applications</span><nav class="nav">${sidebarApplications().map(a=>`<button data-select="${escape(a.id)}" class="${a.id===currentId?'active':''}" ${a.id===currentId?'aria-current="true"':''} ${saving?'disabled':''} title="${escape(drafts.get(a.id).name)}"><span class="app-mark" aria-hidden="true">${escape(drafts.get(a.id).name.slice(0,1).toUpperCase())}</span><span class="rail-label">${escape(drafts.get(a.id).name)}<span class="nav-meta">${drafts.get(a.id).agents.length} ${drafts.get(a.id).agents.length===1?'member':'members'}${!a.revision?' · not saved':''}</span></span></button>`).join('')}</nav>${userApplications().length>3?`<button class="text-button rail-label" data-action="toggle-applications">${showAllApplications?'Show fewer':'Show all '+userApplications().length}</button>`:''}</div><div class="rail-foot">${accountMarkup()}<p class="runtime-label rail-label">${runtime.local?'On this computer':'Hosted'+(runtime.tenant&&runtime.tenant!=='local'?' · '+escape(runtime.tenant):'')}</p><details><summary><span class="rail-icon" aria-hidden="true">${uiIcon('sliders')}</span><span class="rail-label">Workspace settings</span></summary>${runtime.local?'<button class="text-button" data-action="source-settings">Source settings</button>':''}<button class="text-button" data-action="edit-catalogue">Custom catalog</button></details></div></aside>
-    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}</h1>${view==='plan'&&!viewingRun?`<p class="application-goal">${escape(d.description)}</p>${scheduleLineMarkup(scheduleStatus.get(currentId),{escape,actions:false})||scheduleIncompleteMarkup(current().definition)}${!current().revision?'<p class="field-help">Not saved yet. Review the plan and save it, then test any step with sample inputs.</p>':''}`:''}</div><div class="header-actions"><div class="actions">${view==='plan'&&!viewingRun?scheduleActionMarkup(scheduleStatus.get(currentId)):''}${dirty()?`<button class="button" data-action="save" ${saving?'disabled':''}>${saving?'Saving…':'Save'}</button>`:''}${liveHistory.get(currentId)?.length||notRunSlots().length?`<button class="button" data-action="show-history" title="Run history" aria-label="Run history">${uiIcon('clock')}<span>History</span></button>`:''}${view==='setup'?`<button class="button primary" data-action="run" ${liveBusy?'disabled':''}>Run</button>`:''}${view==='setup'?`<button class="button icon-only" data-action="back-to-plan" title="Back to the canvas" aria-label="Back to the canvas">${uiIcon('fit')}</button>`:''}</div><span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':`Saved · version ${current().revision}`}</span></div></header>
+    <main class="workspace"><header class="application-header"><div><span class="crumb">Your applications <span class="breadcrumb-separator">/</span> ${view==='setup'?'Set up':'Canvas'}</span><h1 id="application-name">${escape(d.name)}${roleTagMarkup(current())}</h1>${view==='plan'&&!viewingRun?`<p class="application-goal">${escape(d.description)}</p>${scheduleLineMarkup(scheduleStatus.get(currentId),{escape,actions:false})||scheduleIncompleteMarkup(current().definition)}${!current().revision?'<p class="field-help">Not saved yet. Review the plan and save it, then test any step with sample inputs.</p>':''}`:''}</div><div class="header-actions"><div class="actions">${view==='plan'&&!viewingRun?scheduleActionMarkup(scheduleStatus.get(currentId)):''}${current().revision?'<button class="button" data-action="open-people">People</button>':''}${dirty()?`<button class="button" data-action="save" ${saving||!allowed('edit')?'disabled':''} ${roleReason('edit')?'aria-describedby="why-save"':''}>${saving?'Saving…':'Save'}</button>`:''}${liveHistory.get(currentId)?.length||notRunSlots().length?`<button class="button" data-action="show-history" title="Run history" aria-label="Run history">${uiIcon('clock')}<span>History</span></button>`:''}${view==='setup'?`<button class="button primary" data-action="run" ${liveBusy||!allowed('run')?'disabled':''}>Run</button>`:''}${view==='setup'?`<button class="button icon-only" data-action="back-to-plan" title="Back to the canvas" aria-label="Back to the canvas">${uiIcon('fit')}</button>`:''}</div>${(reason=>reason?`<p class="why-disabled" id="why-save">${escape(reason)}</p>`:'')(roleReason(allowed('run')?'edit':'run'))}<span class="save-state ${dirty()?'dirty':''}" id="save-state">${saving?'Saving…':dirty()?'Unsaved changes':`Saved · version ${current().revision}`}</span></div></header>
     ${view==='plan'?workspaceModesMarkup():''}<div class="main ${view==='plan'?'plan-workspace':''}" id="main-panel">${view==='setup'?buildMarkup():workspaceMode==='results'?resultsWorkspaceMarkup():viewingRun?runMarkup():workspaceMode==='run'?`<section class="panel"><h2>Run the saved application</h2><p>${dirty()?'You have unsaved changes. A run uses the last saved version, so save first if you want them included. ':''}A run uses real inputs and the access you granted; tests use sample inputs.</p><button class="button primary" data-action="run">Set up a run</button></section>`:planMarkup(draft())}</div></main></div><div id="app-menu" class="canvas-menu-host" hidden></div>`;
   const stableRun=view==='plan'&&workspaceMode!=='results'&&(viewingRun?renderedRunId===preview.runId&&$('app').querySelector('[data-run-canvas]'):renderedPlanId===currentId&&$('app').querySelector('[data-canvas-drop]'));
   if(stableRun)updateRunDOM($('app'),markup);else $('app').innerHTML=markup;
@@ -262,6 +277,7 @@ function render(){
   if(view==='plan'&&!viewingRun)applyPlanSearch();
   ensureStepExamples();
   ensureScheduleStatus();
+  ensureEventStatus();
   ensureSchedulePreview();
   ensureNotifyStatus();
   ensureNotifyPreview();
@@ -286,7 +302,7 @@ function accessMarkup(d){return `<div class="step-heading"><h2>Connections</h2><
 
 function outputKind(state){return outputTypes.find(type=>type.id===(state.kind||(state.type==='text'?'document':'findings')))||outputTypes[1];}
 function outputLayouts(type){return type==='text'?[['prose','Written report']]:[['cards','Cards'],['table','Table'],['board','Status board']];}
-function outputsMarkup(d){return `<div class="step-heading"><div><h2>Results</h2><p class="field-help">What the team produces and how it is shown.</p></div><button class="button" data-action="add-output">Add output</button></div><div class="output-grid">${d.views.map((v,i)=>{const state=d.state.find(s=>s.key===v.collection),stageIndex=d.workflow.findIndex(w=>w.output===state.key),kind=outputKind(state);return `<details class="panel output-card quiet-row" data-disclosure="result-${escape(v.id)}"><summary><strong>${escape(v.title)}</strong><span class="field-help">${escape(kind.name)}</span></summary><div class="row-editor"><div class="panel-top"><span class="output-symbol" aria-hidden="true">${uiIcon(state.type==='text'?'list':'tidy')}</span><span class="kind-tag">${escape(kind.name)}</span><button class="icon-button" data-action="remove-output" data-index="${i}" title="Remove this output" aria-label="Remove ${escape(v.title)}" ${d.views.length<2?'disabled':''}>${uiIcon('close')}</button></div>${field('Output name',`views.${i}.title`,v.title)}<div class="field"><label for="output-kind-${i}">Output type</label><select id="output-kind-${i}" data-output-kind="${i}">${outputTypes.map(k=>`<option value="${k.id}" ${kind.id===k.id?'selected':''}>${k.name}</option>`).join('')}</select></div><div class="field"><label for="output-format-${i}">Presentation</label><select id="output-format-${i}" data-format="${i}">${outputLayouts(state.type).map(([key,label])=>`<option value="${key}" ${v.layout===key?'selected':''}>${label}</option>`).join('')}</select></div>${stageIndex>=0?field('Prepared by',`workflow.${stageIndex}.agent`,d.workflow[stageIndex].agent,'select',d.agents.map(a=>[a.id,a.name+(a.kind==='human'?' · Human':'')])):'<p class="field-help">No step writes to this yet.</p>'}<p class="field-help">${escape(kind.description)}</p>${kind.id==='artifact'?'<p class="tool-hint">Shows links to files once file access is connected.</p>':''}</div></details>`;}).join('')}</div>`;}
+function outputsMarkup(d){return `<div class="step-heading"><div><h2>Results</h2><p class="field-help">What the team produces and how it is shown.</p></div><button class="button" data-action="add-output">Add output</button></div><div class="output-grid">${d.views.map((v,i)=>{const state=d.state.find(s=>s.key===v.collection),stageIndex=d.workflow.findIndex(w=>w.output===state.key),kind=outputKind(state);return `<details class="panel output-card quiet-row" data-disclosure="result-${escape(v.id)}"><summary><strong>${escape(v.title)}</strong><span class="field-help">${escape(kind.name)}</span></summary><div class="row-editor"><div class="panel-top"><span class="output-symbol" aria-hidden="true">${uiIcon(state.type==='text'?'list':'tidy')}</span><span class="kind-tag">${escape(kind.name)}</span><button class="icon-button" data-action="remove-output" data-index="${i}" title="Remove this output" aria-label="Remove ${escape(v.title)}" ${d.views.length<2?'disabled':''}>${uiIcon('close')}</button></div>${field('Output name',`views.${i}.title`,v.title)}<div class="field"><label for="output-kind-${i}">Output type</label><select id="output-kind-${i}" data-output-kind="${i}">${outputTypes.map(k=>`<option value="${k.id}" ${kind.id===k.id?'selected':''}>${k.name}</option>`).join('')}</select></div><div class="field"><label for="output-format-${i}">Presentation</label><select id="output-format-${i}" data-format="${i}">${outputLayouts(state.type).map(([key,label])=>`<option value="${key}" ${v.layout===key?'selected':''}>${label}</option>`).join('')}</select></div>${stageIndex>=0?field('Prepared by',`workflow.${stageIndex}.agent`,d.workflow[stageIndex].agent,'select',d.agents.map(a=>[a.id,a.name+(a.kind==='human'?' · Human':'')])):'<p class="field-help">No step writes to this yet.</p>'}<p class="field-help">${escape(kind.description)}</p>${storedFileFieldMarkup(state,d.state.indexOf(state),{escape})}</div></details>`;}).join('')}</div>`;}
 // The canvas shows the whole plan: one scale, computed from the board and the
 // box it is drawn in, recomputed on resize and in full screen.
 // Fit to the box, but never so small that the steps stop being readable.
@@ -605,16 +621,34 @@ function setStepGroup(stepId,id){
   if(id)step.group=id;else delete step.group;
   validateDefinition(d);drafts.set(currentId,d);markDirty();render();
 }
+// A condition being made in step settings, kept here until it is valid enough
+// to save: {application, stepId, condition, issue}.
+let conditionDraft=null;
+function editingCondition(stepId){
+  if(conditionDraft?.application===currentId&&conditionDraft.stepId===stepId)return conditionDraft.condition;
+  return draft().workflow.find(step=>step.id===stepId)?.condition||null;
+}
+function commitCondition(stepId,condition){
+  const d=structuredClone(draft()),step=d.workflow.find(item=>item.id===stepId);
+  if(!step)return;
+  if(condition)step.condition=condition;else delete step.condition;
+  try{validateDefinition(d);conditionDraft=null;drafts.set(currentId,d);markDirty();}
+  catch(error){conditionDraft={application:currentId,stepId,condition,issue:error.message};}
+  render();
+}
 function planMarkup(d){
   if(!d.workflow.some(step=>step.id===selectedStepId))selectedStepId=d.workflow[0].id;
-  const command=commandState();return workbenchMarkup(d,{escape,field,agentName,outputName,capabilityName,search:planSearch,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,provider:runtime.provider||'',issues:planReadiness(d,readinessRuntime()),runtime:readinessRuntime(),connectionSettings:memberIndex=>connectionAssignmentMarkup(d.agents[memberIndex],memberIndex,integrationCatalogue,integrationConnections,currentId,escape),selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,controls:runControllerMarkup(actionGate()),toolsDisabled:runInFlight(),backends:runtime.backends||[],run:preview?.live?preview:null,exampleFor:stepExample,exampleBadge:stepExample});
+  const command=commandState();return workbenchMarkup(d,{conditionDraft:conditionDraft?.application===currentId?conditionDraft:null,answersIssue,escape,
+    // A step's own time limit: its field in the inspector, its label on the card.
+    mayDelete:allowed('own'),deleteReason:roleReason('own'),
+    timeLimitField:(step,index,human)=>timeLimitFieldMarkup(step,index,{escape,human,...(timeLimitIssue?.application===currentId&&timeLimitIssue.stepId===step.id?{issue:timeLimitIssue.message,typed:timeLimitIssue.typed}:{})}),timeLimitBadge:step=>timeLimitBadgeMarkup(step),field,agentName,outputName,capabilityName,search:planSearch,showResources:showPlanResources,showInspector:showPlanInspector,showAssistant:showPlanAssistant,showReadiness:showPlanReadiness,insertion:planInsertion,provider:runtime.provider||'',issues:planReadiness(d,readinessRuntime()),runtime:readinessRuntime(),connectionSettings:memberIndex=>connectionAssignmentMarkup(d.agents[memberIndex],memberIndex,integrationCatalogue,integrationConnections,currentId,escape),selectedId:selectedStepId,pane:resourcePane,connectSource,selectedEdge,canvasZoom,saving,members:memberLibrary,libraryError,memberSaving,proposal:command.proposal,assistantText:command.text,assistantError:command.error,aiAvailable:runtime.available,controls:runControllerMarkup(actionGate()),toolsDisabled:runInFlight(),backends:runtime.backends||[],run:preview?.live?preview:null,exampleFor:stepExample,exampleBadge:stepExample});
 }
 
 function resultsWorkspaceMarkup(){
   if(!preview?.live)return '<section class="panel"><h2>No results yet</h2><p>Results appear here once a run of the saved application produces them.</p></section>';
   const run=preview,d=run.definition;
   const visible=d.views.filter(item=>Array.isArray(run.state[item.collection])?run.state[item.collection].length:!!run.state[item.collection]);
-  return `<section class="results-workspace"><header><h2>${run.mode==='completed'?'Results':'Work saved so far'}</h2><p>Saved version ${escape(run.revision)} · ${run.completedSteps.length} of ${d.workflow.length} steps complete. These are run outputs, not test outputs.</p><button class="button" data-action="show-history">Previous runs</button><button class="button" data-workspace-mode="run">Back to the run</button></header>${visible.map(item=>`<article class="panel"><h3>${escape(item.title||item.id)}</h3>${viewMarkup(item,run.state,d)}</article>`).join('')||'<p>No step has produced a result yet.</p>'}<details><summary>Request and technical activity</summary><p>${escape(run.task)}</p><pre class="code">${escape(JSON.stringify(run.events,null,2))}</pre></details></section>`;
+  return `<section class="results-workspace"><header><h2>${run.mode==='completed'?'Results':'Work saved so far'}</h2><p>Saved version ${escape(run.revision)} · ${run.completedSteps.length} of ${d.workflow.length} steps complete. These are run outputs, not test outputs.</p><button class="button" data-action="show-history">Previous runs</button><button class="button" data-workspace-mode="run">Back to the run</button></header>${visible.map(item=>`<article class="panel"><h3>${escape(item.title||item.id)}</h3>${resultMarkup(item,run.state,d,run.live?run:null)}</article>`).join('')||'<p>No step has produced a result yet.</p>'}<details><summary>Request and technical activity</summary><p>${escape(run.task)}</p><pre class="code">${escape(JSON.stringify(run.events,null,2))}</pre></details></section>`;
 }
 function runMarkup(){
   if(!current().revision)return `<section class="panel"><h2>Save this application first</h2><p>A run uses the saved version, so there is nothing to run until you save.</p></section>`;
@@ -638,7 +672,7 @@ function stopFollowingLiveRun(){stopLivePolling();stopLiveWatch();stopLiveClock(
 // Both end up calling selectLiveRecord with the same record.
 function followLiveRun(){
   followLiveClock();
-  const active=preview?.live&&['pending','running','waiting_human'].includes(preview.mode);
+  const active=preview?.live&&(['pending','running','waiting_human'].includes(preview.mode)||!!preview.retry);
   if(view!=='plan'||!active){stopLivePolling();stopLiveWatch();return;}
   if(liveFollowMode(runtime)!=='push'){stopLiveWatch();return pollLiveRun();}
   stopLivePolling();
@@ -673,13 +707,11 @@ function followLiveRun(){
     }
   })();
 }
-function sourceReferenceMarkup(source){
-  try{const url=new URL(source);if(['http:','https:'].includes(url.protocol)&&!url.username&&!url.password)return `<a href="${escape(url.href)}" target="_blank" rel="noopener noreferrer">${escape(source)}</a>`;}catch{}
+// An address an agent wrote into an artifact is shown as text: the only links
+// to what a run made are the files the host stored and checked.
+function sourceReferenceMarkup(source,{linkable=true}={}){
+  try{const url=new URL(source);if(linkable&&['http:','https:'].includes(url.protocol)&&!url.username&&!url.password)return `<a href="${escape(url.href)}" target="_blank" rel="noopener noreferrer">${escape(source)}</a>`;}catch{}
   return `<span>${escape(source)}</span>`;
-}
-function downloadResult(collection){
-  const value=preview?.state[collection];if(!preview?.live||typeof value!=='string')throw new Error('Choose a completed text result.');
-  const url=URL.createObjectURL(new Blob([value],{type:'text/plain;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download=collection+'.txt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 function selectLiveRecord(record){
   const run=projectLiveRun(record),old=liveRuns.get(record.request.application_id);
@@ -748,12 +780,12 @@ async function decideAction(runId,body,focusAfter){
 
 function pollLiveRun(){
   stopLivePolling();
-  if(view!=='plan'||!preview?.live||!['pending','running','waiting_human'].includes(preview.mode))return;
+  if(view!=='plan'||!preview?.live||!(['pending','running','waiting_human'].includes(preview.mode)||preview.retry))return;
   const applicationId=currentId,runId=preview.runId;
   liveTimer=setTimeout(async()=>{
     try{const record=await request(`/api/runs/${runId}`);if(currentId===applicationId&&view==='plan'&&preview?.runId===runId)selectLiveRecord(record);}
     catch(error){if(currentId===applicationId){liveError=error.message;render();pollLiveRun();}}
-  },1200);
+  },livePollDelay(preview));
 }
 async function openLiveRun(id){
   const record=await request(`/api/runs/${encodeURIComponent(id)}`);
@@ -790,7 +822,11 @@ async function liveAction(action){
       const output=collection.type==='text'?{text:humanDraft.body.trim()}:{records:[{id:'human-'+review.stage,title:preview.definition.workflow.find(step=>step.id===review.stage).name,body:humanDraft.body.trim(),status:humanDraft.decision||(!collection.statuses.length?'recorded':''),source_refs:[],...humanRecordValues(collection)}]};
       record=await request(`/api/runs/${runId}/reviews`,{method:'POST',body:JSON.stringify({review_id:review.id,output})});
       selectLiveRecord(record);
-      record=await request(`/api/runs/${runId}/resume`,{method:'POST',body:'{}'});
+      // A review that still needs other people waits; one an application's
+      // review policy continues by itself is already going.
+      if(record.status==='waiting_for_human'&&!record.reviews.some(item=>item.status==='pending'))record=await request(`/api/runs/${runId}/resume`,{method:'POST',body:'{}'});
+    }else if(action==='cancel-retry'){
+      record=await request(`/api/runs/${runId}/retry/cancel`,{method:'POST',body:'{}'});
     }else if(action==='resume-live'){
       record=await request(`/api/runs/${runId}/resume`,{method:'POST',body:'{}'});
     }
@@ -816,7 +852,7 @@ function runControllerMarkup(gate={enabled:true,reason:''}){
   // Icons only, one per thing a person can do to the run. What the run is waiting
   // for (Review input, View results) stays in words in the status line above the
   // canvas, so no action is offered twice and none is wordless-only.
-  const busy=liveBusy?'disabled':'',run=()=>`<button type="button" class="canvas-action primary" data-action="run" ${busy} title="${preview?.live?'Run again':'Run this application'}" aria-label="${preview?.live?'Run again':'Run this application'}">${uiIcon('play')}<span>Run workflow</span></button>`;
+  const busy=liveBusy||!allowed('run')?'disabled':'',run=()=>`<button type="button" class="canvas-action primary" data-action="run" ${busy} title="${preview?.live?'Run again':'Run this application'}" aria-label="${preview?.live?'Run again':'Run this application'}">${uiIcon('play')}<span>Run workflow</span></button>`;
   const stop=()=>`<button type="button" class="canvas-action stop" data-action="cancel-live" ${busy} title="Stop this run" aria-label="Stop this run">${uiIcon('stop')}</button>`;
   if(!preview?.live||['completed','stopped','failed','cancelled','interrupted'].includes(preview.mode)&&!preview.resumable)return run();
   if(preview.mode==='paused'||(['stopped','failed','interrupted'].includes(preview.mode)&&preview.resumable)){
@@ -833,15 +869,17 @@ function runControllerMarkup(gate={enabled:true,reason:''}){
   return `<button type="button" class="canvas-action" data-action="pause-live" ${busy||(pause.disabled?'disabled':'')} title="${pauseLabel}" aria-label="${pauseLabel}">${uiIcon('pause')}</button>${stop()}`;
 }
 
+// One step's usage, in its details, with how often a reviewer sent it back.
+const stepUsage=(run,id)=>stepUsageMarkup(run,id,{escape,revisions:(run?.events||[]).filter(event=>event.type==='RevisionRequested'&&(event.revises||[]).includes(id)).length});
 function studioLiveMarkup(requestOnly=false){
   const saved=current().definition,d=preview?.live?preview.definition:saved,state=preview?.live?preview.state:initialState(d);
   const requestForm=`<div class="field"><label for="live-request">What do you need the team to do?</label><textarea id="live-request" data-request="live" rows="2" maxlength="20000" required>${escape(requests.live)}</textarea></div>${(saved.inputs||[]).length?`<details class="quiet-details" data-disclosure="live-context" open><summary>Context and sources · ${(saved.inputs||[]).length} ${(saved.inputs||[]).length===1?'field':'fields'}</summary>${generatedRequestMarkup(saved,'live')}</details>`:''}`;
   const visible=d.views.filter(view=>Array.isArray(state[view.collection])?state[view.collection].length:!!state[view.collection]);
-  const outputs=visible.length?`<details class="run-results" data-disclosure="live-results"><summary>Results · ${visible.length}</summary>${visible.map(view=>`<details class="quiet-details" data-disclosure="live-output-${escape(view.id)}"><summary>${escape(view.title)}</summary>${viewMarkup(view,state,d)}</details>`).join('')}</details>`:'<div class="empty">Results will appear as the team completes its work.</div>';
+  const outputs=visible.length?`<details class="run-results" data-disclosure="live-results"><summary>Results · ${visible.length}</summary>${visible.map(view=>`<details class="quiet-details" data-disclosure="live-output-${escape(view.id)}"><summary>${escape(view.title)}</summary>${resultMarkup(view,state,d,preview?.live?preview:null)}</details>`).join('')}</details>`:'<div class="empty">Results will appear as the team completes its work.</div>';
 const approvalPanel=toolApprovalMarkup(pendingToolApprovals,{escape,views:approvalViews});
-  const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{controls:runControllerMarkup(actionGate()),toolsDisabled:runInFlight(),provider:runtime.provider||'',list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,activityExpanded,activityFilter,followActive,detail:selectedRunStepId?executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'',escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
+  const progress=preview?.live?runProgressMarkup(d,preview,selectedRunStepId,{controls:runControllerMarkup(actionGate()),toolsDisabled:runInFlight(),provider:runtime.provider||'',list:executionPlanMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName}),zoom:runCanvasZoom??1,activityExpanded,activityFilter,followActive,detail:selectedRunStepId?executionDetailMarkup(d,preview,selectedRunStepId,{escape,agentName,outputName,capabilityName,backends:runtime.backends||[],usageMarkup:stepUsage,fileMarkup:(run,id)=>stepFileMarkup(run?.files||[],id,{escape}),timedOutMarkup:(run,id)=>run?.timedOut?.[id]?timedOutNoticeMarkup(run.timedOut[id]):''}):'',escape,agentName,outputName,capabilityName,backends:runtime.backends||[]}):'';
   const actionsPanel=requestOnly?'':actionPanelFor(preview);
-  return `${dirty()&&requestOnly?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${approvalPanel}${actionsPanel}${liveRunMarkup(saved,preview?.live?preview:null,{escape,runNoticeMarkup,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime:readinessRuntime(),busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion()})}`;
+  return `${dirty()&&requestOnly?'<p class="version-note">New requests use your saved application. Save edits first.</p>':''}${approvalPanel}${actionsPanel}${liveRunMarkup(saved,preview?.live?preview:null,{escape,runNoticeMarkup,requestForm,outputs,human:humanCheckpointMarkup(d),progress,runtime:readinessRuntime(),busy:liveBusy,error:liveError,source:requestResources[currentId]||'',applicationId:currentId,requestOnly,warningsReviewed:preflightReviewed===preflightVersion(),versionMarkup:run=>runVersionMarkup(run,current().revision,{escape}),usageMarkup:run=>usageMarkup(run,{escape}),usageWarningMarkup:run=>usageWarningMarkup(run,{escape})})}`;
 }
 function recordFieldForm(collection){return (collection.fields||[]).map(f=>{const value=humanDraft.fields?.[f.key]??'',attrs=`id="human-field-${escape(f.key)}" data-human-field="${escape(f.key)}"`;return `<div class="field"><label for="human-field-${escape(f.key)}">${escape(f.label)}${f.required?' · required':''}</label>${['enum','boolean'].includes(f.type)?`<select ${attrs}><option value="">Choose…</option>${(f.type==='boolean'?['true','false']:f.options).map(option=>`<option value="${escape(option)}" ${String(value)===option?'selected':''}>${escape(option)}</option>`).join('')}</select>`:`<input ${attrs} type="${f.type==='number'?'number':f.type==='date'?'date':'text'}" ${f.type==='number'?'step="any"':''} value="${escape(value)}">`}</div>`;}).join('');}
 function humanRecordValues(collection){const values={};for(const f of collection.fields||[]){const value=humanDraft.fields?.[f.key];if(value===undefined||value==='')continue;values[f.key]=f.type==='number'?Number(value):f.type==='boolean'?value==='true':value;}return validateRecordValues(values,collection.fields||[]);}
@@ -850,21 +888,56 @@ function humanCheckpointMarkup(d){
   if(preview?.mode!=='waiting_human')return '';
   if(preview.live&&preview.review?.status==='submitted')return `<section class="human-checkpoint"><h2>Your review is recorded</h2><p>Recorded as ${escape(preview.review.reviewer)}. Resume to let the team continue${runtime.available?'.':' once an AI provider is available.'}</p><button class="button primary" data-action="resume-live" ${liveBusy||!runtime.available?'disabled':''}>Resume</button></section>`;
   const step=d.workflow[preview.activeStep],output=d.state.find(s=>s.key===step.output),statuses=output.statuses.filter(status=>status!=='proposed');
-  return `<section class="human-checkpoint" aria-labelledby="human-checkpoint-title"><h2 id="human-checkpoint-title">${escape(step.name)}</h2><p>Assigned to <strong>${escape(agentName(d,step.agent))}</strong> · writes to ${escape(output.label)}</p>${crewPollMarkup(d,preview,{escape})}<div class="flight-plate"><p class="checkpoint-task">${escape(step.task)}</p>${output.type==='records'&&statuses.length?`<div class="field"><label for="human-decision">${output.kind==='decision'?'Decision':'Result status'}</label><select id="human-decision" data-human-input="decision"><option value="">Choose explicitly…</option>${statuses.map(status=>`<option value="${escape(status)}" ${humanDraft.decision===status?'selected':''}>${escape(status.replaceAll('_',' '))}</option>`).join('')}</select></div>`:''}<div class="field"><label for="human-response">${output.type==='text'?'Your contribution':'Reason or contribution'}</label><textarea id="human-response" data-human-input="body" rows="3" maxlength="20000" placeholder="Your decision and the reason.">${escape(humanDraft.body)}</textarea></div>${recordFieldForm(output)}<div class="checkpoint-actions"><p class="field-help">This is recorded as ${escape(runtime.reviewer)}. It does not approve any external action.</p><button class="button primary" data-action="submit-live-review" ${preview.live&&liveBusy?'disabled':''}>Record and continue</button></div></div></section>`;
+  const revision=preview.live?preview.review?.request?.revision:null,review=preview.live?preview.review:null,standing=preview.live?preview.canAnswer:null;
+  // However many people the review needs: how many answered, and how; and, when
+  // the person looking may not answer, the host's reason in place of the form.
+  const heading=`<h2 id="human-checkpoint-title">${escape(step.name)}${revision?revisionRoundMarkup(revision,{escape}):''}${answersProgressMarkup(review,{escape})}</h2><p>Assigned to <strong>${escape(agentName(d,step.agent))}</strong> · writes to ${escape(output.label)}</p>${answersMarkup(review,{escape,viewer:runtime.reviewer||''})}${preview.live?policyInForceMarkup(preview.definition.review_policy,{escape,revision:preview.revision,verified:identityVerified()}):''}${revision?revisionHistoryMarkup(d,revision,{escape}):''}`;
+  if(standing?.allowed===false)return `<section class="human-checkpoint" aria-labelledby="human-checkpoint-title">${heading}${answerBlockedMarkup(standing,review,preview.definition.review_policy,{escape})}</section>`;
+  const several=(review?.required||1)>1,last=standing?.completes!==false;
+  return `<section class="human-checkpoint" aria-labelledby="human-checkpoint-title">${heading}${crewPollMarkup(d,preview,{escape})}<div class="flight-plate"><p class="checkpoint-task">${escape(step.task)}</p>${output.type==='records'&&statuses.length?`<div class="field"><label for="human-decision">${output.kind==='decision'?'Decision':'Result status'}</label><select id="human-decision" data-human-input="decision"><option value="">Choose explicitly…</option>${statuses.map(status=>`<option value="${escape(status)}" ${humanDraft.decision===status?'selected':''}>${escape(status.replaceAll('_',' '))}</option>`).join('')}</select></div>${output.kind==='decision'&&humanDraft.decision==='changes_requested'?revisionConsequenceMarkup(d,step,revision,{escape}):''}`:''}<div class="field"><label for="human-response">${output.type==='text'?'Your contribution':'Reason or contribution'}</label><textarea id="human-response" data-human-input="body" rows="3" maxlength="20000" placeholder="Your decision and the reason.">${escape(humanDraft.body)}</textarea></div>${recordFieldForm(output)}<div class="checkpoint-actions"><p class="field-help">This is recorded as ${escape(runtime.reviewer)}. It does not approve any external action.${several?(last?' Yours is the last answer needed: the run goes on with it.':' The run goes on by itself once everyone needed has answered.'):''}</p><button class="button primary" data-action="submit-live-review" ${preview.live&&liveBusy?'disabled':''}>${last?'Record and continue':'Record my answer'}</button></div></div></section>`;
 }
 // One line is enough to recognise a record; the body is a click away, and the
 // sources are named rather than counted.
 function excerpt(body){const text=String(body||'').replace(/\s+/g,' ').trim();return text.length>120?`${text.slice(0,120).replace(/[ ,.;:]$/,'')}…`:text;}
-function sourceChips(refs){const list=refs||[];return list.length>9?`<span class="source-chip" title="${list.length} sources">${list.length}</span>`:list.map((ref,index)=>`<span class="source-chip" title="${escape(ref)}">${index+1}</span>`).join('');}
+function sourceChips(record){return sourceChipsMarkup(record,{escape});}
 // A document reads as paragraphs, not as one escaped block.
 function prose(value){return String(value||'').split(/\n{2,}/).map(block=>`<p>${escape(block.trim()).replaceAll('\n','<br>')}</p>`).join('');}
+// A result a run stored as a file is shown as that file: its card, first lines
+// and checked download, not the whole text. Anything else is shown as before.
+const fileDownloads=new Map();
+function resultMarkup(view,state,d,run){
+  const collection=d.state.find(item=>item.key===view.collection);
+  if(!run||!fileFormatFor(collection))return viewMarkup(view,state,d);
+  const stages=d.workflow.filter(step=>step.output===view.collection).map(step=>step.id),grouped=filesByStage(run.files||[]);
+  const cards=stages.filter(id=>grouped[id]).map(id=>fileCardMarkup(grouped[id].latest,{escape,label:view.title,earlier:grouped[id].earlier,busy:fileDownloads.get(grouped[id].latest.id)==='busy',error:fileDownloads.get(grouped[id].latest.id)==='refused'}));
+  if(cards.length)return `<div class="file-list">${cards.join('')}</div>`;
+  const skipped=(run.events||[]).filter(event=>event.type==='OutputFileSkipped'&&stages.includes(event.stage)).at(-1);
+  if(skipped)return `<p class="field-help">Not stored as a file: ${escape(skipped.reason)}</p>${viewMarkup(view,state,d)}`;
+  return `${noFileMarkup(view.title,{escape})}${viewMarkup(view,state,d)}`;
+}
+// A stored file, fetched through its checked link and saved on this computer.
+async function downloadStoredFile(runId,fileId){
+  if(fileDownloads.get(fileId)==='busy')return;
+  fileDownloads.set(fileId,'busy');render();
+  try{
+    const settings=apiSettingsNow(),path=`/api/runs/${encodeURIComponent(runId)}/files/${encodeURIComponent(fileId)}`;
+    const response=await fetch(apiUrl(settings,path),{credentials:settings.credentials,headers:apiHeaders(settings,{})});
+    if(!response.ok)throw new Error(response.status===410?'refused':'failed');
+    const name=(/filename="([^"]+)"/.exec(response.headers.get('content-disposition')||'')||[])[1]||'result',url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
+    link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    fileDownloads.delete(fileId);
+  }catch(error){
+    fileDownloads.set(fileId,'refused');if(error.message!=='refused')notify('The file could not be downloaded. Try again.');
+  }
+  render();
+}
 function viewMarkup(view,state,d){
   const value=state[view.collection];let markup;
-  if(view.layout==='prose')markup=value?`${preview?.live?`<button class="button" data-download-output="${escape(view.collection)}">Download text</button>`:''}<div class="prose">${prose(value)}</div>${preview?.textOrigins[view.collection]?`<p class="state-meta">Prepared by ${escape(agentName(d,preview.textOrigins[view.collection].agent))}</p>`:''}`:'<div class="empty">This appears when the step that writes it completes.</div>';
+  if(view.layout==='prose')markup=value?`<div class="prose">${prose(value)}</div>${preview?.textOrigins[view.collection]?`<p class="state-meta">Prepared by ${escape(agentName(d,preview.textOrigins[view.collection].agent))}</p>`:''}`:'<div class="empty">This appears when the step that writes it completes.</div>';
   else if(!value.length)markup='<div class="empty">Nothing recorded yet. Entries appear as steps complete.</div>';
-  else if(view.layout==='board'){const stateDef=d.state.find(s=>s.key===view.collection),statuses=[...new Set([...stateDef.statuses,...value.map(item=>item.status||'recorded')])];markup=`<div class="status-board" style="--columns:${statuses.length}">${statuses.map(status=>`<section class="board-column"><h3>${escape(status.replaceAll('_',' '))}<span>${value.filter(item=>(item.status||'recorded')===status).length}</span></h3>${value.map((item,i)=>(item.status||'recorded')===status?`<button class="record" data-record="${escape(view.collection)}" data-index="${i}"><h3>${escape(item.title)}</h3><p class="record-excerpt">${escape(excerpt(item.body))}</p>${recordFieldMarkup(d.state.find(s=>s.key===view.collection),item)}<div class="by">${escape(agentName(d,item.contributions.at(-1)?.agent))}<span class="by-right">${sourceChips(item.source_refs)}</span></div></button>`:'').join('')}</section>`).join('')}</div>`;}
+  else if(view.layout==='board'){const stateDef=d.state.find(s=>s.key===view.collection),statuses=[...new Set([...stateDef.statuses,...value.map(item=>item.status||'recorded')])];markup=`<div class="status-board" style="--columns:${statuses.length}">${statuses.map(status=>`<section class="board-column"><h3>${escape(status.replaceAll('_',' '))}<span>${value.filter(item=>(item.status||'recorded')===status).length}</span></h3>${value.map((item,i)=>(item.status||'recorded')===status?`<button class="record" data-record="${escape(view.collection)}" data-index="${i}"><h3>${escape(item.title)}</h3><p class="record-excerpt">${escape(excerpt(item.body))}</p>${recordFieldMarkup(d.state.find(s=>s.key===view.collection),item)}<div class="by">${escape(agentName(d,item.contributions.at(-1)?.agent))}<span class="by-right">${sourceChips(item)}</span></div></button>`:'').join('')}</section>`).join('')}</div>`;}
   else if(view.layout==='table')markup=`<div class="table-wrap"><table><thead><tr><th>Finding</th><th>Status</th><th>Contributor</th>${(d.state.find(s=>s.key===view.collection).fields||[]).map(f=>`<th>${escape(f.label)}</th>`).join('')}</tr></thead><tbody>${value.map((item,i)=>`<tr><td><button data-record="${escape(view.collection)}" data-index="${i}">${escape(item.title)}</button></td><td><span class="finding-status ${['supported','refuted','open'].includes(item.status)?item.status:''}">${escape(item.status||'recorded')}</span></td><td>${escape(agentName(d,item.contributions.at(-1)?.agent))}</td>${(d.state.find(s=>s.key===view.collection).fields||[]).map(f=>`<td>${escape(item[f.key]??'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
-  else markup=value.map((item,i)=>`<button class="record" data-record="${escape(view.collection)}" data-index="${i}"><div class="record-head"><span class="record-id">${escape(item.id)}</span><span class="finding-status ${['supported','refuted','open'].includes(item.status)?item.status:''}">${escape(item.status||'recorded')}</span></div><h3>${escape(item.title)}</h3><p class="record-excerpt">${escape(excerpt(item.body))}</p>${recordFieldMarkup(d.state.find(s=>s.key===view.collection),item)}<div class="by">${escape(agentName(d,item.contributions.at(-1)?.agent))}<span class="by-right">${sourceChips(item.source_refs)}${item.source_refs.length?`${item.source_refs.length} ${item.source_refs.length===1?'source':'sources'} · `:''}Open finding</span></div></button>`).join('');
+  else markup=value.map((item,i)=>`<button class="record" data-record="${escape(view.collection)}" data-index="${i}"><div class="record-head"><span class="record-id">${escape(item.id)}</span><span class="finding-status ${['supported','refuted','open'].includes(item.status)?item.status:''}">${escape(item.status||'recorded')}</span></div><h3>${escape(item.title)}</h3><p class="record-excerpt">${escape(excerpt(item.body))}</p>${recordFieldMarkup(d.state.find(s=>s.key===view.collection),item)}<div class="by">${escape(agentName(d,item.contributions.at(-1)?.agent))}<span class="by-right">${sourceChips(item)}${item.source_refs.length?`${escape(sourceSummaryText(item))} · `:''}Open finding</span></div></button>`).join('');
   return `<section class="section output-section"><div class="view-header"><h2>${escape(view.title)}</h2>${Array.isArray(value)?`<span class="output-count">${value.length}</span>`:''}</div>${markup}</section>`;
 }
 
@@ -881,7 +954,9 @@ function updateField(path,value){
   if(path.endsWith('.statuses'))value=value.split(',').map(x=>x.trim()).filter(Boolean);if(path.endsWith('.required')||path==='autonomous_execution')value=value==='true';if(path.startsWith('run_config.')||path.startsWith('run_budget.')||path.startsWith('budget_warnings.'))value=value===''?null:Number(value);object[key]=value;
   if(parts[0]==='workflow'&&key==='id'){for(const edge of d.connections||[]){if(edge.from===before)edge.from=value;if(edge.to===before)edge.to=value;}if(d.canvas?.positions?.[before]){d.canvas.positions[value]=d.canvas.positions[before];delete d.canvas.positions[before];}}
   if(parts[0]==='integrations'&&key==='connector'){const connector=connectorDescriptors.find(c=>c.id===value);object.mode=connector.default_mode;object.scope='';render();}
-  if(path==='start_mode'){if(value==='schedule')d.schedule??=defaultSchedule();else delete d.schedule;}
+  if(path==='start_mode'){if(value==='schedule')d.schedule??=defaultSchedule();else delete d.schedule;
+    // An event needs a task: the application's goal, until the person writes one.
+    if(value==='event')d.event??={task:(d.description||'').trim()||'Handle the event described in the request values.'};else delete d.event;}
   if(parts[0]==='agents'&&key==='kind'&&value==='human')object.tools=[];
   // A model belongs to the backend it was chosen for, so changing the backend
   // drops it rather than carrying a name across to a model that may not exist.
@@ -893,9 +968,15 @@ function updateField(path,value){
   if(parts[0]==='views'&&key==='title'&&d.views.filter(v=>v.collection===object.collection).length===1)d.state.find(s=>s.key===object.collection).label=value;
   markDirty();if(['type','collection','kind','provider','start_mode'].includes(key)||(parts[0]==='workflow'&&['agent','output'].includes(key))||(view==='plan'&&['workflow','agents'].includes(parts[0])))render();
 }
+// Which stored file an output becomes: its usual one, another it allows, or none.
+function setStoredFile(index,choice){
+  const d=structuredClone(draft()),item=d.state[index];if(!item)throw new Error('Choose an output.');
+  const setting=fileSetting(item,choice);if(setting===undefined)delete item.file;else item.file=setting;
+  validateDefinition(d);drafts.set(currentId,d);markDirty();render();
+}
 function setOutputKind(index,id){
   const kind=outputTypes.find(type=>type.id===id);if(!kind)throw new Error('Choose a supported output type.');
-  const d=draft(),view=d.views[index],state=d.state.find(s=>s.key===view.collection);state.kind=kind.id;state.type=kind.type;if(kind.type==='text')delete state.fields;state.merge=kind.type==='text'?'replace':'upsert';state.statuses=[...kind.statuses];for(const v of d.views)if(v.collection===state.key)v.layout=kind.layout;markDirty();render();
+  const d=draft(),view=d.views[index],state=d.state.find(s=>s.key===view.collection);state.kind=kind.id;state.type=kind.type;delete state.file;if(kind.type==='text')delete state.fields;state.merge=kind.type==='text'?'replace':'upsert';state.statuses=[...kind.statuses];for(const v of d.views)if(v.collection===state.key)v.layout=kind.layout;markDirty();render();
 }
 function setOutputFormat(index,layout){
   if(!['cards','table','board','prose'].includes(layout))throw new Error('Choose a supported presentation.');
@@ -904,14 +985,14 @@ function setOutputFormat(index,layout){
 }
 async function saveApplication(){
   validateDefinition(draft());const target=currentId,submitted=structuredClone(draft()),revision=current().revision;saving=true;render();
-  try{const result=await request(revision?`/api/applications/${encodeURIComponent(target)}`:'/api/applications',{method:revision?'PUT':'POST',body:JSON.stringify({definition:submitted,...(revision?{revision}:{})})});applications[applications.findIndex(a=>a.id===target)]=result;drafts.delete(target);drafts.set(result.id,submitted);if(currentId===target){currentId=result.id;layoutSaved=!!revision&&result.revision===revision;}notify(result.revision===revision?'Layout saved.':'Application saved.');return {id:result.id,revision:result.revision};}
+  try{const result=await request(revision?`/api/applications/${encodeURIComponent(target)}`:'/api/applications',{method:revision?'PUT':'POST',body:JSON.stringify({definition:submitted,...(revision?{revision}:{})})});applications[applications.findIndex(a=>a.id===target)]={...(revision?{role:current()?.role,open:current()?.open}:runtime.features?.application_roles?{role:'owner',open:false}:{}),...result};drafts.delete(target);drafts.set(result.id,submitted);if(currentId===target){currentId=result.id;layoutSaved=!!revision&&result.revision===revision;}notify(result.revision===revision?'Layout saved.':'Application saved.');return {id:result.id,revision:result.revision};}
   finally{saving=false;render();}
 }
 // Where a step sits on the canvas is part of the definition, so the arrangement
 // is saved on its own: nobody should press Save to keep where they put their
 // steps. Only the positions are written — anything else still being edited stays
 // in the draft and still waits for Save.
-function scheduleLayoutSave(){clearTimeout(layoutSaveTimer);layoutSaveTimer=setTimeout(saveLayout,700);}
+function scheduleLayoutSave(){if(!allowed('edit'))return;clearTimeout(layoutSaveTimer);layoutSaveTimer=setTimeout(saveLayout,700);}
 async function saveLayout(){
   layoutSaveTimer=null;const target=currentId,application=current();
   if(!application?.revision)return;
@@ -930,7 +1011,7 @@ async function saveLayout(){
   finally{saving=false;render();}
 }
 function pauseActiveRun(){stopFollowingLiveRun();}
-function resetRuns(){workspaceMode='build';stepExamples=null;stepExamplesApp=null;layoutSaved=false;clearTimeout(layoutSaveTimer);layoutSaveTimer=null;stopFollowingLiveRun();liveError='';preview=null;requests={live:''};}
+function resetRuns(){workspaceMode='build';stepExamples=null;stepExamplesApp=null;layoutSaved=false;clearTimeout(layoutSaveTimer);layoutSaveTimer=null;stopFollowingLiveRun();liveError='';preview=null;requests={live:''};chosenRuns=[];}
 function createApplication(templateId='blank',brief={}){
   const definition=composeCatalogApplication(templateId,brief.roles||[],brief.tools||{});
   if(brief.name)definition.name=brief.name.trim();if(brief.purpose)definition.description=brief.purpose.trim();if(brief.result)definition.workflow.at(-1).task=brief.result.trim();validateDefinition(definition);
@@ -938,14 +1019,19 @@ function createApplication(templateId='blank',brief={}){
 }
 function chooseApplication(id){if(saving||liveBusy||!applications.some(a=>a.id===id))return;resetRuns();const url=new URL(location.href);url.searchParams.delete('application');url.searchParams.delete('run');history.replaceState(null,'',url);showPlanResources=false;showPlanInspector=false;showPlanAssistant=false;showPlanReadiness=false;planInsertion=null;currentId=id;selectedStepId=null;selectedRunStepId=null;view=draft().workflow.length?'plan':'setup';buildStep=0;advanced=false;render();}
 // Requests, as a list of their own: the canvas stays the canvas.
+let historyVersion=null;
+// Two runs chosen in Run history, and the comparison open for them.
+let chosenRuns=[],comparisonState=null;
 function historyMarkup(){
-  // Runs, and the scheduled times that did not start one, newest first.
-  const runs=historyRows(liveHistory.get(currentId)||[],notRunSlots()),revision=current().revision,status=scheduleStatus.get(currentId);
+  // Runs, and the scheduled times that did not start one, newest first; or the runs of one version.
+  const runs=historyRows(liveHistory.get(currentId)||[],notRunSlots()).filter(row=>historyVersion===null||row.kind!=='slot'&&row.revision===historyVersion),revision=current().revision,status=scheduleStatus.get(currentId);
   if(!runs.length)return `<div class="section-head"><h2 id="history-title">Requests</h2></div><p class="field-help">No requests yet.</p>`;
-  return `<div class="section-head"><h2 id="history-title">Requests</h2></div><table class="history-table"><thead><tr><th>Started</th><th>Status</th><th>Version</th><th>Request</th><th></th></tr></thead><tbody>${runs.map(row=>{
-    if(row.kind==='slot'){const text=slotText(row);return `<tr class="not-run"><td>${escape(new Date(row.scheduled_for).toLocaleString())}</td><td>not run<br><span class="run-trigger ${row.outcome==='failed'?'failed':'not-run'}">${escape(text.tag)}</span></td><td>—</td><td>${escape(text.detail)}</td><td></td></tr>`;}
+  // Two runs can be chosen to compare; a time that did not run has nothing to compare.
+  const comparable=runs.filter(row=>row.kind!=='slot').length>1;
+  return `<div class="section-head"><h2 id="history-title">Requests</h2></div><table class="history-table"><thead><tr>${comparable?'<th><span class="sr-only">Compare</span></th>':''}<th>Started</th><th>Status</th><th>Version</th><th>Request</th><th></th></tr></thead><tbody>${runs.map(row=>{
+    if(row.kind==='slot'){const text=slotText(row);return `<tr class="not-run">${comparable?'<td class="history-pick"></td>':''}<td>${escape(new Date(row.scheduled_for).toLocaleString())}</td><td>not run<br><span class="run-trigger ${row.outcome==='failed'?'failed':'not-run'}">${escape(text.tag)}</span></td><td>—</td><td>${escape(text.detail)}</td><td></td></tr>`;}
     const run=row,trigger=triggerText(run,status?.time_zone);
-    return `<tr><td>${escape(new Date(run.created_at).toLocaleString())}</td><td>${escape(String(run.status).replaceAll('_',' '))}${historyBadgeMarkup(run.actions,escape)?'<br>'+historyBadgeMarkup(run.actions,escape):''}${trigger?`<br><span class="run-trigger ${run.trigger?.kind==='schedule'?'':'not-run'}">${escape(trigger)}</span>`:''}</td><td>${run.revision===revision?`${run.revision} · current`:`${run.revision} · older`}</td><td>${escape(String(run.task||'').slice(0,90))}${String(run.task||'').length>90?'…':''}</td><td><button class="button" data-run-open="${escape(run.id)}">Open</button></td></tr>`;}).join('')}</tbody></table>`;
+    return `<tr${chosenRuns.includes(run.id)?' class="chosen"':''}>${comparable?historyPickMarkup(run,chosenRuns,{escape,time:at=>new Date(at).toLocaleString()}):''}<td>${escape(new Date(run.created_at).toLocaleString())}</td><td>${escape(String(run.status).replaceAll('_',' '))}${historyBadgeMarkup(run.actions,escape)?'<br>'+historyBadgeMarkup(run.actions,escape):''}${trigger?`<br><span class="run-trigger ${run.trigger?.kind==='schedule'?'':'not-run'}">${escape(trigger)}</span>`:''}</td><td>${run.revision===revision?`${run.revision} · current`:`${run.revision} · older`}</td><td>${escape(String(run.task||'').slice(0,90))}${String(run.task||'').length>90?'…':''}</td><td><button class="button" data-run-open="${escape(run.id)}">Open</button></td></tr>`;}).join('')}</tbody></table>${comparable?compareBarMarkup(chosenRuns,{escape}):''}`;
 }
 function showView(next){if(!['plan','setup'].includes(next)||saving||liveBusy)return;stopFollowingLiveRun();view=next;buildStep=next==='setup'?0:buildStep;advanced=false;humanDraft={decision:'',body:''};render();if(next==='plan'&&current().revision){refreshLiveHistory().catch(error=>{liveError=error.message;render();});followLiveRun();}}
 function openRunConfiguration(){
@@ -1041,7 +1127,7 @@ function addResource(drag){
 function findRecord(id){for(const[collection,items]of Object.entries(preview?.state||{}))if(Array.isArray(items)){const index=items.findIndex(item=>item.id===id);if(index>=0)return {collection,index};}return null;}
 function inspectRecord(collection,index,follow=false,history=null){
   const item=preview?.state[collection]?.[index];if(!item)throw new Error('Run the application before inspecting findings.');if(history)detailHistory=history;else if(!follow)detailHistory=[];else if(dialogState?.record)detailHistory.push(dialogState.record);dialogState={record:{collection,index}};const d=preview.definition;
-  $('record-detail').innerHTML=`${detailHistory.length?'<button class="text-button" data-detail-back>Back to finding</button>':''}<h2 id="detail-title">${escape(item.title)}</h2><span class="finding-status">${escape(item.status)}</span><p class="finding-body">${escape(item.body).replaceAll('\n','<br>')}</p><span class="detail-label">Supporting sources</span>${item.source_refs.length?`<ul class="source-list">${item.source_refs.map(source=>{const target=findRecord(source);return `<li>${target?`<button class="source-link" data-source="${escape(source)}">${escape(source)} · ${escape(preview.state[target.collection][target.index].title)}</button>`:`${sourceReferenceMarkup(source)}`}</li>`;}).join('')}</ul>`:'<p>No supporting source attached.</p>'}<span class="detail-label">Contributors</span><ol class="contributor-list">${item.contributions.map(c=>`<li><strong>${escape(agentName(d,c.agent))}</strong><span>${escape(d.workflow.find(w=>w.id===c.stage)?.name||c.stage)}</span></li>`).join('')}</ol><details class="technical-events"><summary>Technical provenance</summary><p>${escape(item.id)} · ${escape(collection)}</p>${item.contributions.map(c=>`<p>${escape(c.agent)} · ${escape(c.stage)}<br>Run ${escape(c.run_id)}</p>`).join('')}</details><p class="field-help">Contributor metadata records the actual member and completed step. Source references still require checking.</p>`;if(!$('record-dialog').open)$('record-dialog').showModal();
+  $('record-detail').innerHTML=`${detailHistory.length?'<button class="text-button" data-detail-back>Back to finding</button>':''}<h2 id="detail-title">${escape(item.title)}</h2><span class="finding-status">${escape(item.status)}</span><p class="finding-body">${escape(item.body).replaceAll('\n','<br>')}</p>${sourceListMarkup(item,{escape,stepName:d.workflow.find(w=>w.id===item.contributions.at(-1)?.stage)?.name||'',link:source=>{const target=findRecord(source);return target?`<button class="source-link" data-source="${escape(source)}">${escape(source)} · ${escape(preview.state[target.collection][target.index].title)}</button>`:sourceReferenceMarkup(source,{linkable:d.state.find(item=>item.key===collection)?.kind!=='artifact'});}})}<span class="detail-label">Contributors</span><ol class="contributor-list">${item.contributions.map(c=>`<li><strong>${escape(agentName(d,c.agent))}</strong><span>${escape(d.workflow.find(w=>w.id===c.stage)?.name||c.stage)}</span></li>`).join('')}</ol><details class="technical-events"><summary>Technical provenance</summary><p>${escape(item.id)} · ${escape(collection)}</p>${item.contributions.map(c=>`<p>${escape(c.agent)} · ${escape(c.stage)}<br>Run ${escape(c.run_id)}</p>`).join('')}</details><p class="field-help">Contributor metadata records the actual member and completed step. ${item.source_checks?'A found source was read during that step; whether it supports the claim is still yours to judge.':'Source references still require checking.'}</p>`;if(!$('record-dialog').open)$('record-dialog').showModal();
 }
 function dialogField(label,key,value,kind='input',options=[]){const id='dialog-'+key;return `<div class="field"><label for="${id}">${escape(label)}</label>${kind==='textarea'?`<textarea id="${id}" data-dialog-field="${key}" rows="3" maxlength="${['importText','catalogueText','sourcesText'].includes(key)?200000:key==='purpose'?2000:4000}">${escape(value)}</textarea>`:kind==='select'?`<select id="${id}" data-dialog-field="${key}">${options.map(([val,text])=>`<option value="${escape(val)}" ${val===value?'selected':''}>${escape(text)}</option>`).join('')}</select>`:`<input id="${id}" data-dialog-field="${key}" value="${escape(value)}" maxlength="100">`}</div>`;}
 let catalogueAudience='all';
@@ -1156,8 +1242,8 @@ function finishCanvasDrop(drag,clientX,clientY){
 }
 function dragAutoScroll(clientY){const canvas=$('app').querySelector('.plan-canvas');if(!canvas)return;const rect=canvas.getBoundingClientRect();if(clientY<rect.top+60)panCanvas(canvas,0,24);else if(clientY>rect.bottom-60)panCanvas(canvas,0,-24);}
 let skipPlanClickUntil=0;
-$('app').addEventListener('change',event=>{try{if(event.target.hasAttribute('data-activity-filter')){activityFilter=event.target.value;render();return;}if(event.target.hasAttribute('data-source-resource')){requestResources[currentId]=event.target.value;render();return;}if(event.target.dataset.stepGroup!==undefined){setStepGroup(event.target.dataset.stepGroup,event.target.value);return;}
-    if(event.target.dataset.stepParent){const {stepParent:from,stepChild:to}=event.target.dataset;updatePlan(event.target.checked?connectPlanSteps(draft(),from,to):disconnectPlanSteps(draft(),from,to),to);return;}if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.dataset.tool){const role=draft().agents[Number(event.target.dataset.index)],tool=event.target.dataset.tool;if(role.kind==='human')throw new Error('Human members do not use agent tools.');if(event.target.checked&&!role.tools.includes(tool))role.tools.push(tool);else if(!event.target.checked)role.tools=role.tools.filter(t=>t!==tool);markDirty();render();}if(event.target.dataset.format!==undefined)setOutputFormat(Number(event.target.dataset.format),event.target.value);if(event.target.dataset.outputKind!==undefined)setOutputKind(Number(event.target.dataset.outputKind),event.target.value);}catch(error){if(event.target.dataset.stepParent)render();notify(error.message);}});
+$('app').addEventListener('change',event=>{try{if(event.target.hasAttribute('data-activity-filter')){activityFilter=event.target.value;render();return;}if(event.target.dataset.humanInput==='decision'){humanDraft.decision=event.target.value;render();return;}if(event.target.hasAttribute('data-source-resource')){requestResources[currentId]=event.target.value;render();return;}if(event.target.dataset.stepGroup!==undefined){setStepGroup(event.target.dataset.stepGroup,event.target.value);return;}
+    if(event.target.dataset.stepParent){const {stepParent:from,stepChild:to}=event.target.dataset;updatePlan(event.target.checked?connectPlanSteps(draft(),from,to):disconnectPlanSteps(draft(),from,to),to);return;}if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.dataset.tool){const role=draft().agents[Number(event.target.dataset.index)],tool=event.target.dataset.tool;if(role.kind==='human')throw new Error('Human members do not use agent tools.');if(event.target.checked&&!role.tools.includes(tool))role.tools.push(tool);else if(!event.target.checked)role.tools=role.tools.filter(t=>t!==tool);markDirty();render();}if(event.target.dataset.format!==undefined)setOutputFormat(Number(event.target.dataset.format),event.target.value);if(event.target.dataset.outputKind!==undefined)setOutputKind(Number(event.target.dataset.outputKind),event.target.value);if(event.target.dataset.fileFormat!==undefined)setStoredFile(Number(event.target.dataset.fileFormat),event.target.value);}catch(error){if(event.target.dataset.stepParent)render();notify(error.message);}});
 $('app').addEventListener('input',event=>{if(event.target.dataset.path)updateField(event.target.dataset.path,event.target.value);if(event.target.dataset.requestField){const mode=event.target.dataset.inputMode;requestInputs[mode][currentId]??={};requestInputs[mode][currentId][event.target.dataset.requestField]=event.target.value;}if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;if(event.target.dataset.humanInput)humanDraft[event.target.dataset.humanInput]=event.target.value;if(event.target.dataset.humanField){humanDraft.fields??={};humanDraft.fields[event.target.dataset.humanField]=event.target.value;}if(event.target.hasAttribute('data-assistant-input'))commandState().text=event.target.value;if(event.target.dataset.requirementAnswer!==undefined){const d=draft();if(d.requirements?.[event.target.dataset.requirementAnswer]){d.requirements[event.target.dataset.requirementAnswer].answer=event.target.value;markDirty();}}});
 $('run-form').addEventListener('input',event=>{
   if(event.target.dataset.request)requests[event.target.dataset.request]=event.target.value;
@@ -1216,7 +1302,7 @@ $('app').addEventListener('click',async event=>{
   if(button.dataset.stepTest){if(!current().revision){notify('Save the workflow once before storing test examples. You can test unsaved edits after that.');return;}if(button.dataset.testStep&&button.closest('.run-inspector-drawer'))selectedRunStepId=button.dataset.testStep;await stepTests.open(button.dataset.stepTest,button.dataset.testStep);return;}
   // A command that acts inside the step panel opens it, so its result is visible.
   if(button.dataset.menuReveal==='panel'&&!showPlanInspector){showPlanInspector=true;render();}if(button.hasAttribute('data-apply-schema')){try{const index=Number(button.dataset.applySchema),fields=JSON.parse($('schema-'+index).value);validateRecordFields(fields);draft().state[index].fields=fields;markDirty();render();notify('Record fields applied to the draft.');}catch(error){notify(error.message);}return;}
-  try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.removeRequirement!==undefined){const d=draft();d.requirements?.splice(Number(button.dataset.removeRequirement),1);if(d.requirements&&!d.requirements.length)delete d.requirements;markDirty();render();return;}if(button.dataset.step!==undefined){const step=Number(button.dataset.step);if(view!=='setup')showView('setup');buildStep=step;advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.downloadOutput){downloadResult(button.dataset.downloadOutput);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
+  try{if(button.dataset.select){chooseApplication(button.dataset.select);return;}if(button.dataset.removeRequirement!==undefined){const d=draft();d.requirements?.splice(Number(button.dataset.removeRequirement),1);if(d.requirements&&!d.requirements.length)delete d.requirements;markDirty();render();return;}if(button.dataset.step!==undefined){const step=Number(button.dataset.step);if(view!=='setup')showView('setup');buildStep=step;advanced=false;render();return;}if(button.hasAttribute('data-open-plan')){buildStep=4;advanced=false;render();return;}if(button.dataset.newTemplate){openEditor('new',null,button.dataset.newTemplate);return;}if(button.dataset.record){inspectRecord(button.dataset.record,Number(button.dataset.index));return;}
     if(button.dataset.connectTarget){if(!connectSource)throw new Error('Choose a step to connect from.');updatePlan(connectPlanSteps(draft(),connectSource,button.dataset.connectTarget),button.dataset.connectTarget);connectSource=null;render();return;}if(button.dataset.disconnectFrom){updatePlan(disconnectPlanSteps(draft(),button.dataset.disconnectFrom,button.dataset.disconnectTo));return;}if(button.dataset.resourcePane){resourcePane=button.dataset.resourcePane;render();return;}
     if(button.dataset.menuReverse){const [from,to]=button.dataset.menuReverse.split('|');updatePlan(connectPlanSteps(disconnectPlanSteps(draft(),from,to),to,from));selectedEdge=null;notify('Connection reversed.');return;}
     if(button.dataset.menuAddStep&&menuPoint){openStepPicker({at:menuPoint.canvas||null});return;}
@@ -1276,6 +1362,8 @@ $('app').addEventListener('click',async event=>{
     if(action==='toggle-rail'){railOpen=!railOpen;render();return;}
     // The list may have been opened before this page read the runs (a schedule's
     // times that did not run show the button first), so it reads them as it opens.
+    if(action==='versions'){await openVersions();return;}
+    if(action==='open-people'){openPeople().catch(error=>notify(error.message));return;}
     if(action==='show-history'){renderHistory();refreshLiveHistory().then(()=>{if($('history-dialog').open)$('history-content').innerHTML=historyMarkup();}).catch(()=>{});return;}
     if(action==='edit-schedule'){editScheduleView();return;}
     if(action==='run'){openRunConfiguration();return;}
@@ -1287,7 +1375,7 @@ $('app').addEventListener('click',async event=>{
     if(action==='sign-out'){try{await request(account.login.logout,{method:'POST',body:'{}'});}finally{location.reload();}return;}
     if(action==='set-up'){showView('setup');return;}
 
-    if(['start-live','cancel-live','pause-live','submit-live-review','resume-live'].includes(action)){await liveAction(action);return;}if(action==='source-settings'){const result=await request('/api/settings/sources');dialogState={kind:'source-settings',sourcesText:JSON.stringify(result.sources,null,2),source:draft().resources?.source||''};renderEditor();$('editor-dialog').showModal();return;}if(action==='edit-catalogue'){openEditor('workspace-catalogue');return;}if(action==='cancel-connect'){connectSource=null;render();}else if(action==='canvas-fullscreen'){canvasFullscreen();}else if(action==='tidy-canvas'){updatePlan(tidyCanvas(draft()));scheduleLayoutSave();}else if(action==='toggle-applications'){showAllApplications=!showAllApplications;render();}else if(action==='add-input'){const d=draft();d.inputs??=[];if(d.inputs.length>=12)throw new Error('Use at most 12 fields.');let n=1;while(d.inputs.some(f=>f.id==='field_'+n))n++;d.inputs.push({id:'field_'+n,label:'New field',type:'text',required:false});markDirty();render();}else if(action==='remove-input'){draft().inputs.splice(index,1);markDirty();render();}else if(action==='new')openEditor('goal');else if(action==='import')openEditor('import');else if(action==='save-member')await saveCurrentMember();else if(action==='reload-members')await reloadMembers();else if(action==='isolate-member')isolateSelectedMember();else if(action==='propose-plan')proposeCommand();else if(action==='apply-proposal')applyPlanProposal();else if(action==='discard-proposal'){commandState().proposal=null;commandState().error='';render();}else if(action==='open-catalogue')openCatalogue(button.dataset.pane||'applications');else if(action==='toggle-plan-resources'){if(showPlanResources){showPlanResources=false;render();}else openStepPicker();}else if(action==='close-plan-inspector'){showPlanInspector=false;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId)}"]`)?.focus({preventScroll:true});}else if(['add-role','add-output','remove-role','remove-output'].includes(action))openEditor(action,index);else if(action==='delete-application')await deleteApplication();else if(action==='save')await saveApplication();else if(action==='export')exportDefinition();else if(action==='toggle-advanced'){advanced=!advanced;render();}else if(action)mutate(action,index);
+    if(['start-live','cancel-live','pause-live','submit-live-review','resume-live','cancel-retry'].includes(action)){await liveAction(action);return;}if(action==='source-settings'){const result=await request('/api/settings/sources');dialogState={kind:'source-settings',sourcesText:JSON.stringify(result.sources,null,2),source:draft().resources?.source||''};renderEditor();$('editor-dialog').showModal();return;}if(action==='edit-catalogue'){openEditor('workspace-catalogue');return;}if(action==='cancel-connect'){connectSource=null;render();}else if(action==='canvas-fullscreen'){canvasFullscreen();}else if(action==='tidy-canvas'){updatePlan(tidyCanvas(draft()));scheduleLayoutSave();}else if(action==='toggle-applications'){showAllApplications=!showAllApplications;render();}else if(action==='add-input'){const d=draft();d.inputs??=[];if(d.inputs.length>=12)throw new Error('Use at most 12 fields.');let n=1;while(d.inputs.some(f=>f.id==='field_'+n))n++;d.inputs.push({id:'field_'+n,label:'New field',type:'text',required:false});markDirty();render();}else if(action==='remove-input'){draft().inputs.splice(index,1);markDirty();render();}else if(action==='new')openEditor('goal');else if(action==='import')openEditor('import');else if(action==='save-member')await saveCurrentMember();else if(action==='reload-members')await reloadMembers();else if(action==='isolate-member')isolateSelectedMember();else if(action==='propose-plan')proposeCommand();else if(action==='apply-proposal')applyPlanProposal();else if(action==='discard-proposal'){commandState().proposal=null;commandState().error='';render();}else if(action==='open-catalogue')openCatalogue(button.dataset.pane||'applications');else if(action==='toggle-plan-resources'){if(showPlanResources){showPlanResources=false;render();}else openStepPicker();}else if(action==='close-plan-inspector'){showPlanInspector=false;render();$('app').querySelector(`[data-plan-select="${CSS.escape(selectedStepId)}"]`)?.focus({preventScroll:true});}else if(['add-role','add-output','remove-role','remove-output'].includes(action))openEditor(action,index);else if(action==='delete-application')await deleteApplication();else if(action==='save')await saveApplication();else if(action==='export')exportDefinition();else if(action==='toggle-advanced'){advanced=!advanced;render();}else if(action)mutate(action,index);
   }catch(error){notify(error.message);}
 });
 $('app').addEventListener('click',event=>{
@@ -1330,9 +1418,102 @@ $('editor-form').addEventListener('click',async event=>{const button=event.targe
 $('catalogue-content').addEventListener('click',event=>{const button=event.target.closest('button');if(!button||saving)return;if(button.dataset.catalogueAudience){catalogueAudience=button.dataset.catalogueAudience;openCatalogue('applications');return;}if(button.dataset.catalogueTab){openCatalogue(button.dataset.catalogueTab);return;}if(button.dataset.catalogueConnect){$('catalogue-dialog').close();manageIntegrations('',button.dataset.catalogueConnect);return;}
   if(button.dataset.catalogueConnector){addConnector(button.dataset.catalogueConnector);$('catalogue-dialog').close();buildStep=2;render();return;}if(button.dataset.catalogueCreate){$('catalogue-dialog').close();openEditor('new',null,button.dataset.catalogueCreate);}else if(button.dataset.catalogueTool){$('catalogue-dialog').close();try{openEditor('assign-tool',null,button.dataset.catalogueTool);}catch(error){notify(error.message);}}else if(button.dataset.catalogueBlank){$('catalogue-dialog').close();openEditor('new',null,'blank');}else if(button.dataset.catalogueRole){$('catalogue-dialog').close();openEditor('add-role',null,button.dataset.catalogueRole);}else if(button.dataset.catalogueOutput){$('catalogue-dialog').close();openEditor('add-output',null,button.dataset.catalogueOutput);}});
 $('close-catalogue').addEventListener('click',()=>$('catalogue-dialog').close());
-function renderHistory(){$('history-content').innerHTML=historyMarkup();if(!$('history-dialog').open)$('history-dialog').showModal();}
+function renderHistory(version=null){historyVersion=version;$('history-content').innerHTML=historyMarkup();if(!$('history-dialog').open)$('history-dialog').showModal();}
 $('close-history').addEventListener('click',()=>$('history-dialog').close());
 $('history-content').addEventListener('click',event=>{const button=event.target.closest('[data-run-open]');if(!button)return;$('history-dialog').close();openLiveRun(button.dataset.runOpen).catch(error=>notify(error.message));});
+// People and roles: who may view, run, edit or own the open application.
+let peopleState=null;
+const accessPath=()=>`/api/applications/${encodeURIComponent(currentId)}/access`;
+function drawPeople(focus=null){
+  const p=peopleState;if(!p)return;
+  $('people-content').innerHTML=peopleDialogMarkup(p.access,{escape,name:current().definition.name,me:account?.principal?.name||runtime.reviewer||'',message:p.message,error:p.error,confirmLeave:p.confirmLeave});
+  (focus?$('people-content').querySelector(focus):null)?.focus();
+}
+async function openPeople(){
+  peopleState={access:await request(accessPath()),message:'',error:'',confirmLeave:false};
+  drawPeople();if(!$('people-dialog').open)$('people-dialog').showModal();$('people-title')?.focus?.();
+}
+// One change, then everything read again: the host says what is true now.
+async function changeAccess(change,said,focus){
+  const p=peopleState;if(!p)return;
+  try{await change();p.access=await request(accessPath());p.message=said;p.error='';p.confirmLeave=false;}
+  catch(error){p.error=error.message;p.message='';if(error.status===404){$('people-dialog').close();peopleState=null;await load();return;}}
+  const me=p.access.people?.some(item=>item.person.toLowerCase()===String(account?.principal?.name||runtime.reviewer||'').toLowerCase())||p.access.open;
+  applications=applications.map(app=>app.id===currentId?{...app,role:p.access.you,open:p.access.open}:app);
+  drawPeople(focus);render();
+  if(!me){$('people-dialog').close();peopleState=null;await load();}
+}
+$('close-people').addEventListener('click',()=>{$('people-dialog').close();peopleState=null;});
+$('people-content').addEventListener('click',event=>{
+  const button=event.target.closest('button'),p=peopleState;if(!button||!p)return;
+  const me=account?.principal?.name||runtime.reviewer;
+  if(button.dataset.accessLimit!==undefined)changeAccess(()=>request(accessPath(),{method:'POST',body:JSON.stringify({person:me,role:'owner'})}),'Access is limited. You are its owner.','[data-access-person]');
+  else if(button.dataset.accessAdd!==undefined){
+    const person=$('people-content').querySelector('[data-access-person]')?.value.trim(),role=$('people-content').querySelector('[data-access-new-role]')?.value;
+    if(!person){p.error='Name the person to add.';drawPeople('[data-access-person]');return;}
+    changeAccess(()=>request(accessPath(),{method:'POST',body:JSON.stringify({person,role})}),`${person} was added as ${role}.`,'[data-access-person]');
+  }
+  else if(button.dataset.accessRemove){
+    const person=button.dataset.accessRemove;
+    // Removing yourself ends your access: asked first.
+    if(person.toLowerCase()===String(me||'').toLowerCase()&&!p.confirmLeave){p.confirmLeave=true;drawPeople('[data-access-leave-cancel]');return;}
+    changeAccess(()=>request(`${accessPath()}/${encodeURIComponent(person)}`,{method:'DELETE',body:'{}'}),`${person} was removed.`);
+  }
+  else if(button.dataset.accessLeaveConfirm!==undefined)changeAccess(()=>request(`${accessPath()}/${encodeURIComponent(me)}`,{method:'DELETE',body:'{}'}),'You were removed.');
+  else if(button.dataset.accessLeaveCancel!==undefined){p.confirmLeave=false;drawPeople();}
+});
+$('people-content').addEventListener('change',event=>{
+  const select=event.target.closest('[data-access-role]');if(!select||!peopleState)return;
+  const person=select.dataset.accessRole,role=select.value;
+  changeAccess(()=>request(accessPath(),{method:'POST',body:JSON.stringify({person,role})}),`${person} is now ${['editor','owner'].includes(role)?'an':'a'} ${role}.`,`[data-access-role="${CSS.escape(person)}"]`);
+});
+// A stored file's Download, wherever its card is.
+$('app').addEventListener('click',event=>{const button=event.target.closest?.('[data-file-download]');if(!button)return;downloadStoredFile(button.dataset.fileRun,button.dataset.fileDownload);});
+$('history-content').addEventListener('change',event=>{
+  const box=event.target.closest('[data-run-choose]');if(!box)return;
+  const id=box.dataset.runChoose;chosenRuns=box.checked?[...chosenRuns.filter(item=>item!==id),id].slice(-2):chosenRuns.filter(item=>item!==id);
+  $('history-content').innerHTML=historyMarkup();$('history-content').querySelector(`[data-run-choose="${CSS.escape(id)}"]`)?.focus();
+});
+$('history-content').addEventListener('click',event=>{
+  const button=event.target.closest('button');
+  if(button?.dataset.action==='compare-runs'&&chosenRuns.length===2){$('history-dialog').close();openComparison(...chosenRuns);}
+});
+// Two runs, step by step: the earlier is A unless Swap asked for the other order.
+function drawComparison(focus=null){
+  const c=comparisonState;if(!c)return;
+  $('compare-content').innerHTML=c.error?compareErrorMarkup(c.error,{escape}):runComparisonMarkup(c.data,{escape,onlyDiffering:c.onlyDiffering,open:c.open});
+  (focus?$('compare-content').querySelector(focus):null)?.focus();
+}
+async function openComparison(first,second,order=null){
+  const keep=comparisonState&&!comparisonState.error?{onlyDiffering:comparisonState.onlyDiffering,open:comparisonState.open}:{onlyDiffering:true,open:new Set()};
+  try{
+    const data=await request(`/api/runs/compare?a=${encodeURIComponent(first)}&b=${encodeURIComponent(second)}${order?'&order=given':''}`);
+    comparisonState={data,error:'',...keep};
+  }catch(error){
+    comparisonState={data:null,error:/different applications/.test(error.message)?'These runs can’t be compared: they belong to different applications.':`Couldn’t load a run: ${error.message}`,onlyDiffering:true,open:new Set()};
+  }
+  if(!$('compare-dialog').open)$('compare-dialog').showModal();
+  drawComparison(order?'[data-action="swap-compare"]':'#compare-title');
+}
+$('close-compare').addEventListener('click',()=>{$('compare-dialog').close();comparisonState=null;});
+$('compare-content').addEventListener('click',event=>{
+  const button=event.target.closest('button'),c=comparisonState;if(!button||!c)return;
+  if(button.dataset.action==='swap-compare'&&c.data){openComparison(c.data.runs.b.id,c.data.runs.a.id,'given');return;}
+  if(button.dataset.action==='show-history'){$('compare-dialog').close();comparisonState=null;renderHistory();return;}
+  if(button.dataset.compareFilterOff!==undefined){c.onlyDiffering=false;drawComparison('[data-compare-filter]');return;}
+  if(button.dataset.compareVersions){$('compare-dialog').close();comparisonState=null;openVersions(button.dataset.compareVersions.split(',').map(Number)).catch(error=>notify(error.message));}
+});
+$('compare-content').addEventListener('change',event=>{
+  if(event.target.dataset?.compareFilter===undefined||!comparisonState)return;
+  comparisonState.onlyDiffering=event.target.checked;drawComparison('[data-compare-filter]');
+});
+// Which steps are open survives drawing the comparison again.
+$('compare-content').addEventListener('toggle',event=>{
+  const step=event.target.dataset?.compareStep;if(!step||!comparisonState)return;
+  if(event.target.open)comparisonState.open.add(step);else comparisonState.open.delete(step);
+  // Its details are drawn the first time it is opened.
+  if(event.target.open&&comparisonState.data&&!event.target.querySelector('.step-compare-body'))event.target.insertAdjacentHTML('beforeend',stepBodyMarkup(comparisonState.data,step,{escape}));
+},true);
 $('editor-form').addEventListener('change',async event=>{if(!event.target.hasAttribute('data-import-file'))return;const file=event.target.files?.[0],state=dialogState;if(!file||state?.kind!=='import')return;state.parsed=null;const submit=$('editor-content').querySelector('button[type=submit]');if(submit)submit.disabled=true;try{if(file.size>200000)throw new Error('This file is too large. Application files must be under 200 KB.');const text=await file.text();if(dialogState!==state)return;state.filename=file.name;state.importText=text;state.parsed=parseImportedDefinition(text);renderEditor();}catch(error){if(dialogState===state){state.parsed=null;renderEditor();$('editor-error').textContent=error.message;}}});
 $('editor-form').addEventListener('submit',async event=>{event.preventDefault();try{await submitEditor();}catch(error){$('editor-error').textContent=error.message;}});
 $('close-editor').addEventListener('click',()=>{$('editor-dialog').close();dialogState=null;});
@@ -1361,7 +1542,47 @@ function limitsStated(d){
 }
 // The most steps of one run this host lets work at once: the ceiling of Steps at once.
 const stepsCap=()=>runtime.max_parallel_steps||8;
-function controlsMarkup(d){const warnings=d.budget_warnings||{};return `<div class="step-heading"><div><h2>Limits and approvals</h2></div></div><section class="panel"><details class="quiet-details" data-disclosure="budget-limits"><summary>Spending and time limits · ${limitsStated(d)}</summary><p class="field-help">Leave a field blank for no limit. Warnings are based on the usage the AI provider reports.</p><p class="field-help">A <strong>Stop</strong> limit is firm: once it is reached, no new step starts, and steps already working stop asking the AI and write up what they have. <strong>Working seconds</strong> add up the time of every step: two steps working together for 10 seconds count 20.</p><div class="budget-grid"><strong>Resource</strong><strong>Warn me</strong><strong>Stop</strong>${[['tool_calls','Tool uses'],['wall_clock_seconds','Working seconds'],['tokens','AI usage (text units)'],['cost_usd','Cost · USD']].map(([key,label])=>`<span>${label}</span>${runtime.features?.budget_warnings?field('Warning',`budget_warnings.${key}`,warnings[key]??'','number'):'<span>Not supported on this host</span>'}${field('Stop work',`run_budget.${key}`,d.run_budget[key]??'','number')}`).join('')}</div></details></section><section class="panel"><h3>Workload limits</h3><p class="field-help">Leave a field blank for no limit. Character limits trim each tool response or report, not the results the team builds up.</p>${stepsAtOnceMarkup(d.run_config.fan_out_limit,{cap:stepsCap(),escape,disabled:saving})}<div class="input-grid">${[['max_tool_steps','Agent action steps'],['max_notes','Retained private notes'],['max_note_chars','Characters per note'],['max_tool_output_chars','Characters per tool response / delegated report']].map(([key,label])=>field(label,`run_config.${key}`,d.run_config[key]??'','number')).join('')}${[['max_delegations','Total AI step starts and delegations'],['max_per_agent','Starts per AI member'],['max_depth','Agent nesting depth']].map(([key,label])=>field(label,`run_budget.${key}`,d.run_budget[key]??'','number')).join('')}</div></section><section class="panel"><h3>Tool authorization</h3><label>Execution mode<select data-path="autonomous_execution"><option value="false" ${!d.autonomous_execution?'selected':''}>Approve each write</option><option value="true" ${d.autonomous_execution?'selected':''}>Autonomous execution</option></select></label><p class="field-help">Autonomous execution approves this application’s tools before the run starts, including edits, commands, pushes and writes to other services. Use it only for an application you trust. Human review steps still pause for input, and tools with unknown capabilities still ask for approval.</p></section>`;}
+function controlsMarkup(d){const warnings=d.budget_warnings||{};return `<div class="step-heading"><div><h2>Limits and approvals</h2></div></div><section class="panel"><details class="quiet-details" data-disclosure="budget-limits"><summary>Spending and time limits · ${limitsStated(d)}</summary><p class="field-help">Leave a field blank for no limit. Warnings are based on the usage the AI provider reports.</p><p class="field-help">A <strong>Stop</strong> limit is firm: once it is reached, no new step starts, and steps already working stop asking the AI and write up what they have. <strong>Working seconds</strong> add up the time of every step: two steps working together for 10 seconds count 20.</p><div class="budget-grid"><strong>Resource</strong><strong>Warn me</strong><strong>Stop</strong>${[['tool_calls','Tool uses'],['wall_clock_seconds','Working seconds'],['tokens','AI usage (text units)'],['cost_usd','Cost · USD']].map(([key,label])=>`<span>${label}</span>${runtime.features?.budget_warnings?field('Warning',`budget_warnings.${key}`,warnings[key]??'','number'):'<span>Not supported on this host</span>'}${field('Stop work',`run_budget.${key}`,d.run_budget[key]??'','number')}`).join('')}</div></details></section><section class="panel"><h3>Workload limits</h3><p class="field-help">Leave a field blank for no limit. Character limits trim each tool response or report, not the results the team builds up.</p>${stepsAtOnceMarkup(d.run_config.fan_out_limit,{cap:stepsCap(),escape,disabled:saving})}<div class="input-grid">${[['max_tool_steps','Agent action steps'],['max_notes','Retained private notes'],['max_note_chars','Characters per note'],['max_tool_output_chars','Characters per tool response / delegated report']].map(([key,label])=>field(label,`run_config.${key}`,d.run_config[key]??'','number')).join('')}${[['max_delegations','Total AI step starts and delegations'],['max_per_agent','Starts per AI member'],['max_depth','Agent nesting depth']].map(([key,label])=>field(label,`run_budget.${key}`,d.run_budget[key]??'','number')).join('')}</div></section><section class="panel"><h3>Tool authorization</h3><label>Execution mode<select data-path="autonomous_execution"><option value="false" ${!d.autonomous_execution?'selected':''}>Approve each write</option><option value="true" ${d.autonomous_execution?'selected':''}>Autonomous execution</option></select></label><p class="field-help">Autonomous execution approves this application’s tools before the run starts, including edits, commands, pushes and writes to other services. Use it only for an application you trust. Human review steps still pause for input, and tools with unknown capabilities still ask for approval.</p></section>${reviewPolicyMarkup(d)}`;}
+// Who may answer this application's reviews. No policy: anyone who can open a
+// run, including whoever started it, as before.
+let reviewPolicyIssue='';
+// Whether the names this host records come from a sign-in it checked.
+const identityVerified=()=>account?.principal?.source==='google';
+function reviewPolicyMarkup(d){
+  const policy=d.review_policy,list=policy?.reviewers||[],starter=!policy||policy.allow_starter===true;
+  return `<section class="panel review-policy"><h3>Reviews</h3><label class="field-label" for="reviewer-add">Who may answer reviews</label>${list.length?`<ul class="reviewer-list" aria-label="People who may answer reviews">${list.map(entry=>`<li>${escape(entry)}<button type="button" data-reviewer-remove="${escape(entry)}" aria-label="Remove ${escape(entry)}" title="Remove ${escape(entry)}">${uiIcon('close')}</button></li>`).join('')}</ul>`:''}<div class="reviewer-add"><input id="reviewer-add" data-reviewer-input maxlength="100" placeholder="name@acme.com, or @acme.com for everyone there"><button type="button" class="button" data-reviewer-add>Add</button></div>${reviewPolicyIssue?`<p class="validation" role="alert">${escape(reviewPolicyIssue)}</p>`:''}<p class="field-help">${list.length?`Only ${escape(reviewersText(list))} may answer this application’s reviews.`:'Leave the list empty to let anyone who can open a run answer its reviews.'}</p><label class="review-starter"><input type="checkbox" data-review-allow-starter ${starter?'checked':''}><span>The person who started a run may answer its reviews<span class="field-help">Off: someone else always signs off, including on scheduled runs (started by the schedule’s owner).</span></span></label>${policy&&!identityVerified()?'<p class="identity-note" role="note">Names on this host are not verified: anyone using this computer can answer under another name. Sign-in makes these rules hold.</p>':''}<p class="field-help">Anyone who can edit this application can change these rules for later runs; a run keeps the rules of the version it started with.</p></section>`;
+}
+// A change to the policy is saved when the application is valid with it; otherwise it says why.
+function commitReviewPolicy(change){
+  const d=structuredClone(draft()),policy={allow_starter:true,...(d.review_policy||{})};
+  change(policy);
+  if(policy.reviewers&&!policy.reviewers.length)delete policy.reviewers;
+  d.review_policy=policy;
+  try{validateDefinition(d);reviewPolicyIssue='';drafts.set(currentId,d);markDirty();}catch(error){reviewPolicyIssue=error.message;}
+  render();
+}
+function commitAnswersRequired(stepId,value){
+  const d=structuredClone(draft()),step=d.workflow.find(item=>item.id===stepId);if(!step)return;
+  const n=Number(value);if(n===1)delete step.answers_required;else step.answers_required=Number.isFinite(n)?n:value;
+  try{validateDefinition(d);answersIssue=null;drafts.set(currentId,d);markDirty();}catch(error){answersIssue={stepId,message:error.message};}
+  render();
+}
+let answersIssue=null;
+// A step's own time limit, from the inspector's box and two numbers. A value
+// out of range stays in the boxes and says why; the application keeps its last good one.
+let timeLimitIssue=null;
+function commitTimeLimit(index){
+  const d=structuredClone(draft()),step=d.workflow[index];if(!step)return;
+  const read=kind=>$('app').querySelector(`[data-time-limit-${kind}="${index}"]`);
+  const enabled=read('enabled')?.checked,wasOff=!Number.isInteger(step.time_limit_seconds);
+  try{
+    // Turning it on starts from five minutes, a limit that is easy to change.
+    const limit=enabled&&wasOff?300:parseTimeLimit(enabled,read('minutes')?.value,read('seconds')?.value);
+    if(limit===null)delete step.time_limit_seconds;else step.time_limit_seconds=limit;
+    validateDefinition(d);timeLimitIssue=null;drafts.set(currentId,d);markDirty();
+  }catch(error){timeLimitIssue={application:currentId,stepId:step.id,message:error.message,typed:{minutes:read('minutes')?.value??'',seconds:read('seconds')?.value??''}};}
+  render();
+}
 
 function composeCatalogApplication(templateId,roles=[],tools={}){
   const template=templates.find(t=>t.id===templateId),d=template?structuredClone(template.definition):emptyDefinition();
@@ -1623,7 +1844,7 @@ $('app').addEventListener('pointerup',event=>{
 $('app').addEventListener('pointercancel',event=>{if(canvasConnect?.pointer===event.pointerId){canvasConnect=null;clearCanvasConnect();}});
 
 function addConnector(id){const connector=connectorDescriptors.find(c=>c.id===id);if(!connector)throw new Error('Choose a catalog connector.');const d=structuredClone(draft());d.integrations??=[];if(d.integrations.some(c=>c.connector===id)){notify('That service is already in this application’s connections.');return;}d.integrations.push({connector:id,purpose:connector.description,scope:'',mode:connector.default_mode});validateDefinition(d);drafts.set(currentId,d);notify('Connection added to the plan. No account is connected yet.');}
-function connectorSetupMarkup(d){return `<section class="panel"><p class="field-help">Choosing a service here records what the application needs. It does not grant access: an account must be connected, and each member given its tools.</p><span class="connection-status">${(d.integrations||[]).length} selected · ${(d.integrations||[]).filter(item=>connectorDescriptors.find(c=>c.id===item.connector)?.available).length} available</span>${d.connector_requirements?.length?`<details><summary>Suggested for this workflow</summary><ul>${d.connector_requirements.map(r=>`<li>${escape(r.purpose)} · ${escape(connectorDescriptors.find(c=>c.id===r.suggested)?.name||r.suggested)}${r.required?'':' · optional'}</li>`).join('')}</ul></details>`:''}${(d.integrations||[]).map((item,i)=>{const c=connectorDescriptors.find(c=>c.id===item.connector);if(!c)return '';return `<details class="connector-row quiet-row" data-disclosure="connector-${i}"><summary><strong>${escape(c.name)}</strong><span class="field-help">${c.available?'Available':'Not set up on this host'}</span></summary><div class="row-editor">${field('Use for',`integrations.${i}.purpose`,item.purpose)}${field('Choose service',`integrations.${i}.connector`,item.connector,'select',connectorDescriptors.filter(other=>other.group===c.group).map(other=>[other.id,other.name]))}${field('Allowed sources or destination',`integrations.${i}.scope`,item.scope)}${field('Allowed actions',`integrations.${i}.mode`,item.mode,'select',connectorModes(c))}<details><summary>Connection setup</summary><p>${c.available?'This service provides '+escape((c.tools||[]).map(capabilityName).join(', '))+'. Give these tools to the members that need them. Credentials and source limits are managed on the host.':'This service is not set up on this host yet. Whoever runs the host can add it. Never type passwords or access keys into these fields.'}</p></details><button class="icon-button remove" data-remove-connector="${i}" title="Remove this connection from the plan" aria-label="Remove this connection from the plan">${uiIcon('trash')}</button></div></details>`;}).join('')||'<p>No connections yet. Add one when the team needs to read from or write to another service.</p>'}<details class="quiet-details" data-disclosure="start-method"><summary>When to run · ${d.start_mode==='event'?'event':d.start_mode==='schedule'?'on a schedule':'manually'}</summary>${field('Start method','start_mode',d.start_mode||'manual','select',[['manual','Start manually'],...(runtime.features?.events?[['event','When an event arrives']]:d.start_mode==='event'?[['event','Saved event trigger — unavailable',true]]:[]),...(runtime.features?.schedules?[['schedule','On a schedule']]:d.start_mode==='schedule'?[['schedule','Saved schedule — unavailable',true]]:[])])}${runtime.features?.events||runtime.features?.schedules?'':'<p class="field-help">This host can only start runs manually. Event and schedule starts need a host that supports them.</p>'}${d.start_mode==='schedule'?scheduleEditorMarkup(d,{escape,...schedulePreviewFor(d),warnings:scheduleWarnings(d,runtime),zones:scheduleZones(),sources:scheduleSources(),viewer:viewerZone()}):''}</details>${runtime.features?.notifications?notifySectionMarkup(d):''}</section>`;}
+function connectorSetupMarkup(d){return `<section class="panel"><p class="field-help">Choosing a service here records what the application needs. It does not grant access: an account must be connected, and each member given its tools.</p><span class="connection-status">${(d.integrations||[]).length} selected · ${(d.integrations||[]).filter(item=>connectorDescriptors.find(c=>c.id===item.connector)?.available).length} available</span>${d.connector_requirements?.length?`<details><summary>Suggested for this workflow</summary><ul>${d.connector_requirements.map(r=>`<li>${escape(r.purpose)} · ${escape(connectorDescriptors.find(c=>c.id===r.suggested)?.name||r.suggested)}${r.required?'':' · optional'}</li>`).join('')}</ul></details>`:''}${(d.integrations||[]).map((item,i)=>{const c=connectorDescriptors.find(c=>c.id===item.connector);if(!c)return '';return `<details class="connector-row quiet-row" data-disclosure="connector-${i}"><summary><strong>${escape(c.name)}</strong><span class="field-help">${c.available?'Available':'Not set up on this host'}</span></summary><div class="row-editor">${field('Use for',`integrations.${i}.purpose`,item.purpose)}${field('Choose service',`integrations.${i}.connector`,item.connector,'select',connectorDescriptors.filter(other=>other.group===c.group).map(other=>[other.id,other.name]))}${field('Allowed sources or destination',`integrations.${i}.scope`,item.scope)}${field('Allowed actions',`integrations.${i}.mode`,item.mode,'select',connectorModes(c))}<details><summary>Connection setup</summary><p>${c.available?'This service provides '+escape((c.tools||[]).map(capabilityName).join(', '))+'. Give these tools to the members that need them. Credentials and source limits are managed on the host.':'This service is not set up on this host yet. Whoever runs the host can add it. Never type passwords or access keys into these fields.'}</p></details><button class="icon-button remove" data-remove-connector="${i}" title="Remove this connection from the plan" aria-label="Remove this connection from the plan">${uiIcon('trash')}</button></div></details>`;}).join('')||'<p>No connections yet. Add one when the team needs to read from or write to another service.</p>'}<details class="quiet-details" data-disclosure="start-method"><summary>When to run · ${d.start_mode==='event'?'event':d.start_mode==='schedule'?'on a schedule':'manually'}</summary>${field('Start method','start_mode',d.start_mode||'manual','select',[['manual','Start manually'],...(runtime.features?.event_triggers?[['event','When an event arrives']]:d.start_mode==='event'?[['event','Saved event trigger — unavailable',true]]:[]),...(runtime.features?.schedules?[['schedule','On a schedule']]:d.start_mode==='schedule'?[['schedule','Saved schedule — unavailable',true]]:[])])}${runtime.features?.event_triggers||runtime.features?.schedules?'':'<p class="field-help">This host can only start runs manually. Event and schedule starts need a host that supports them.</p>'}${d.start_mode==='event'?eventSettingsMarkup(d,{escape})+eventPanelMarkup({status:eventStatus.get(currentId),secret:eventSecret?.application===currentId?eventSecret.secret:null,confirmRotate:eventRotate===currentId,saved:current()?.definition?.start_mode==='event'&&!!current()?.revision,local:runtime.profile?runtime.profile==='local':true,origin:location.origin},{escape}):''}${d.start_mode==='schedule'?scheduleEditorMarkup(d,{escape,...schedulePreviewFor(d),warnings:scheduleWarnings(d,runtime),zones:scheduleZones(),sources:scheduleSources(),viewer:viewerZone()}):''}</details>${runtime.features?.notifications?notifySectionMarkup(d):''}</section>`;}
 function connectorModes(c){return c.default_mode==='model'?[['model','Run AI roles']]:c.default_mode==='read'?[['read','Read only']]:[['read','Read only'],['draft','Prepare drafts'],['approved','Take action after approval']];}
 $('app').addEventListener('click',event=>{const button=event.target.closest('[data-remove-connector]');if(!button||button.dataset.removeConnector===undefined||saving)return;const d=structuredClone(draft());d.integrations.splice(Number(button.dataset.removeConnector),1);validateDefinition(d);drafts.set(currentId,d);render();});
 
@@ -1887,3 +2108,122 @@ $('app').addEventListener('input',event=>{
   if(waiting.via==='slack')waiting.channel=event.target.value;else if(waiting.via==='email')waiting.address=event.target.value;
   markDirty();ensureNotifyPreview();
 });
+// "Run only when…" in step settings: every change is saved once it is a valid condition.
+$('app').addEventListener('click',event=>{
+  const add=event.target.closest?.('[data-condition-add]'),remove=event.target.closest?.('[data-condition-remove]');
+  if(add){const condition=defaultCondition(draft(),add.dataset.conditionAdd);if(condition)commitCondition(add.dataset.conditionAdd,condition);}
+  else if(remove)commitCondition(remove.dataset.conditionRemove,null);
+});
+$('app').addEventListener('change',event=>{
+  const target=event.target,stepId=target.dataset?.conditionStep;
+  if(!stepId)return;
+  const current=editingCondition(stepId);if(!current)return;
+  if(target.dataset.conditionOption!==undefined)commitCondition(stepId,conditionWithOption(draft(),current,target.dataset.conditionOption,target.checked));
+  else if(target.dataset.conditionPart)commitCondition(stepId,conditionWithPart(draft(),current,target.dataset.conditionPart,target.value));
+});
+// Reviews: who may answer, whether the starter may, and how many people a review needs.
+$('app').addEventListener('click',event=>{
+  const remove=event.target.closest?.('[data-reviewer-remove]'),add=event.target.closest?.('[data-reviewer-add]');
+  if(remove){const entry=remove.dataset.reviewerRemove;commitReviewPolicy(policy=>{policy.reviewers=(policy.reviewers||[]).filter(item=>item!==entry);});}
+  else if(add){const input=$('app').querySelector('[data-reviewer-input]'),entry=input?.value.trim();if(!entry)return;commitReviewPolicy(policy=>{policy.reviewers=[...(policy.reviewers||[]),entry];});}
+});
+$('app').addEventListener('keydown',event=>{
+  if(event.key==='Enter'&&event.target.dataset?.reviewerInput!==undefined){event.preventDefault();$('app').querySelector('[data-reviewer-add]')?.click();}
+});
+$('app').addEventListener('change',event=>{
+  if(event.target.dataset?.reviewAllowStarter!==undefined)commitReviewPolicy(policy=>{policy.allow_starter=event.target.checked;});
+  else if(event.target.dataset?.answersRequired)commitAnswersRequired(event.target.dataset.answersRequired,event.target.value);
+  else{const box=event.target.dataset||{},index=box.timeLimitEnabled??box.timeLimitMinutes??box.timeLimitSeconds;if(index!==undefined)commitTimeLimit(Number(index));}
+});
+// Versions: the list, two compared, a restore. The host says what was kept and what changed.
+let versionsState=null;
+function drawVersions(){
+  const v=versionsState;if(!v)return;
+  let body;
+  if(v.confirm){const kept=v.data.versions.find(item=>item.version===v.confirm.version);body=restoreConfirmMarkup({version:v.confirm.version,current:v.data.current,changes:v.confirm.changes,unsaved:dirty(),scheduled:current().definition.start_mode==='schedule',recovered:!!kept?.recovered_from_run,startedBy:kept?.recovered_started_by,sensitive:v.confirm.sensitive},{escape});}
+  else if(v.comparison)body=comparisonMarkup(v.comparison,{escape,current:v.data.current,definitions:v.definitions});
+  else body=versionsListMarkup(v.data,{escape,name:current().definition.name,chosen:v.chosen});
+  $('versions-content').innerHTML=`${body}${v.error?`<p class="validation" role="alert">${escape(v.error)}</p>`:''}`;
+}
+async function openVersions(compare=null){
+  const data=await request(`/api/applications/${encodeURIComponent(currentId)}/versions`);
+  versionsState={data,chosen:data.versions.slice(0,2).map(item=>item.version),comparison:null,definitions:null,confirm:null,error:''};
+  drawVersions();if(!$('versions-dialog').open)$('versions-dialog').showModal();
+  if(compare)await compareVersions(...compare);
+}
+async function compareVersions(first,second){
+  const [from,to]=[first,second].sort((a,b)=>a-b),base=`/api/applications/${encodeURIComponent(currentId)}/versions`;
+  versionsState.comparison=await request(`${base}/compare?from=${from}&to=${to}`);versionsState.confirm=null;versionsState.definitions=null;drawVersions();
+  const [a,b]=await Promise.all([request(`${base}/${from}`),request(`${base}/${to}`)]);
+  if(versionsState?.comparison?.from===from&&versionsState.comparison.to===to){versionsState.definitions={from:a.definition,to:b.definition};drawVersions();}
+}
+$('close-versions').addEventListener('click',()=>{$('versions-dialog').close();versionsState=null;});
+$('versions-content').addEventListener('change',event=>{
+  const box=event.target.closest('[data-version-choose]');if(!box||!versionsState)return;
+  const number=Number(box.dataset.versionChoose);
+  versionsState.chosen=box.checked?[...versionsState.chosen,number].slice(-2):versionsState.chosen.filter(item=>item!==number);drawVersions();
+});
+$('versions-content').addEventListener('click',async event=>{
+  const v=versionsState,target=event.target.closest('button');if(!v||!target)return;
+  try{
+    v.error='';
+    if(target.dataset.versionCompare!==undefined&&v.chosen.length===2)await compareVersions(...v.chosen);
+    else if(target.dataset.versionBack!==undefined){if(v.confirm)v.confirm=null;else v.comparison=null;drawVersions();}
+    else if(target.dataset.versionRuns){$('versions-dialog').close();versionsState=null;renderHistory(Number(target.dataset.versionRuns));refreshLiveHistory().then(()=>{if($('history-dialog').open)$('history-content').innerHTML=historyMarkup();}).catch(()=>{});}
+    else if(target.dataset.versionRestore){
+      const version=Number(target.dataset.versionRestore),comparison=await request(`/api/applications/${encodeURIComponent(currentId)}/versions/compare?from=${v.data.current}&to=${version}`);
+      v.confirm={version,changes:comparison.count,sensitive:sensitiveChanges(comparison)};drawVersions();
+    }
+    else if(target.dataset.versionSaveFirst!==undefined){await saveApplication();v.data=await request(`/api/applications/${encodeURIComponent(currentId)}/versions`);drawVersions();}
+    else if(target.dataset.versionRestoreConfirm){
+      const version=Number(target.dataset.versionRestoreConfirm);
+      const restored=await request(`/api/applications/${encodeURIComponent(currentId)}/versions/${version}/restore`,{method:'POST',body:JSON.stringify({revision:current().revision,...(target.dataset.versionRecovered!==undefined?{recovered:true}:{})})});
+      applications=applications.map(app=>app.id===restored.id?{role:app.role,open:app.open,...restored}:app);drafts.delete(currentId);
+      $('versions-dialog').close();versionsState=null;render();notify(`Version ${version} restored as version ${restored.revision}.`);
+    }
+  }catch(error){v.error=error.message;drawVersions();}
+});
+// From a run's information: the version it ran, or it compared with the current one.
+$('app').addEventListener('click',event=>{
+  const open=event.target.closest?.('[data-version-open]'),pair=event.target.closest?.('[data-version-compare-pair]');
+  if(open)openVersions().then(()=>{const number=Number(open.dataset.versionOpen);const current=versionsState.data.current;return number===current?null:compareVersions(number,current);}).catch(error=>notify(error.message));
+  else if(pair)openVersions(pair.dataset.versionComparePair.split(',').map(Number)).catch(error=>notify(error.message));
+});
+// Set up: whether an event may replace the task it runs.
+$('app').addEventListener('change',event=>{
+  if(event.target.dataset?.eventOverride===undefined)return;
+  const d=structuredClone(draft());if(!d.event)return;
+  if(event.target.checked)d.event.allow_task_override=true;else delete d.event.allow_task_override;
+  drafts.set(currentId,d);markDirty();render();
+});
+// -- Runs started by an event --------------------------------------------------------
+// The host's word on an application's incoming address, read once per saved
+// version and again after each change here. The secret is kept only until the
+// person says they stored it, and never leaves this page's memory.
+const eventStatus=new Map(),eventStatusKeys=new Map();
+let eventSecret=null,eventRotate=null;
+function ensureEventStatus(force=false){
+  const application=current(),id=currentId;
+  if(!runtime.features?.event_triggers||!application?.revision||application.definition?.start_mode!=='event')return;
+  const key=`${id}:${application.revision}`;
+  if(!force&&eventStatusKeys.get(id)===key)return;
+  eventStatusKeys.set(id,key);
+  request(`/api/applications/${encodeURIComponent(id)}/event`).then(status=>{eventStatus.set(id,status);if(currentId===id)render();}).catch(()=>eventStatusKeys.delete(id));
+}
+async function eventAction(kind){
+  const id=currentId,answer=await request(`/api/applications/${encodeURIComponent(id)}/event`,{method:'POST',body:JSON.stringify({action:kind})});
+  eventSecret={application:id,secret:answer.secret};eventRotate=null;
+  ensureEventStatus(true);notify(kind==='create'?'Events are on. Copy the secret now.':'The secret was replaced. Copy the new one now.');render();
+}
+$('app').addEventListener('click',event=>{
+  const target=event.target.closest?.('button');if(!target)return;
+  const run=kind=>eventAction(kind).catch(error=>notify(error.message));
+  if(target.dataset.eventCreate!==undefined)run('create');
+  else if(target.dataset.eventRotate!==undefined){eventRotate=currentId;render();}
+  else if(target.dataset.eventRotateCancel!==undefined){eventRotate=null;render();}
+  else if(target.dataset.eventRotateConfirm!==undefined)run('rotate');
+  else if(target.dataset.eventSecretDismiss!==undefined){eventSecret=null;render();}
+  else if(target.dataset.runOpen&&target.closest('.event-panel'))openLiveRun(target.dataset.runOpen).catch(error=>notify(error.message));
+  else if(target.dataset.copy!==undefined&&target.closest('.event-panel'))navigator.clipboard?.writeText(target.dataset.copy).then(()=>notify('Copied.')).catch(()=>notify('Copy it from the page.'));
+});
+

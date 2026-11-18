@@ -11,9 +11,12 @@ from datetime import datetime, timezone
 
 import pytest
 
+from conclave.tools import processes
+
 from conclave.tools.changes import Changes, build_change_tools
 
 REAL_RUN = subprocess.run
+REAL_COMMAND = processes.run_command
 
 
 def tools_for(root):
@@ -112,9 +115,9 @@ def fake_gh(monkeypatch, answers, seen):
             if isinstance(answer, int):
                 return subprocess.CompletedProcess(command, answer, "", "gh: failure")
             return subprocess.CompletedProcess(command, 0, json.dumps(answer), "")
-        return REAL_RUN(command, **kwargs)
+        return REAL_COMMAND(command, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(processes, "run_command", run)
 
 
 def test_a_pull_request_is_found_by_its_branches(repo, remote, monkeypatch):

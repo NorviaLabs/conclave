@@ -10,6 +10,7 @@ including nested ones, so a caller can reconstruct the whole tree from the
 stream alone.
 """
 
+import math
 from dataclasses import (
     dataclass,
     fields,
@@ -165,6 +166,40 @@ class BudgetExceeded:
     used: float
 
 
+@dataclass(frozen=True)
+class ModelCalled:
+    """One model call has returned: who asked, on which backend, and its cost.
+
+    Tokens are what the backend measured, or None where it measures nothing;
+    `seconds` is how long the call took. Never the prompt or the reply, so a
+    record of every call can be kept and shown.
+    """
+
+    run_id: str
+    agent: str
+    provider: str
+    model: str
+    input_tokens: int | None
+    output_tokens: int | None
+    seconds: float
+
+    # Bounds on what one call can say, so a loop running elsewhere cannot
+    # fill the run record: a name, a backend's own count, a day.
+    MAX_NAME = 200
+    MAX_TOKENS = 10**12
+    MAX_SECONDS = 86_400
+
+    def __post_init__(self):
+        # Also what a loop running elsewhere reports: checked, not trusted.
+        if not all(isinstance(value, str) and len(value) <= self.MAX_NAME for value in (self.run_id, self.agent, self.provider, self.model)):
+            raise ValueError(f"ModelCalled names must be text of at most {self.MAX_NAME} characters")
+        for value in (self.input_tokens, self.output_tokens):
+            if value is not None and (type(value) is not int or not 0 <= value <= self.MAX_TOKENS):
+                raise ValueError("ModelCalled tokens must be whole numbers within bounds, or None")
+        if type(self.seconds) not in {int, float} or not math.isfinite(self.seconds) or not 0 <= self.seconds <= self.MAX_SECONDS:
+            raise ValueError("ModelCalled seconds must be a finite, nonnegative number of at most a day")
+
+
 Event = Union[
     RunStarted,
     RunFinished,
@@ -177,6 +212,7 @@ Event = Union[
     Delegation,
     StoreChanged,
     BudgetExceeded,
+    ModelCalled,
 ]
 
 
@@ -199,6 +235,7 @@ EVENT_TYPES: dict[str, Any] = {
         Delegation,
         StoreChanged,
         BudgetExceeded,
+        ModelCalled,
     )
 }
 

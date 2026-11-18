@@ -159,6 +159,28 @@ replaying completed steps. `cancel` applies to waiting, paused, stopped and
 interrupted runs, and records the run as cancelled; stop an active CLI run with
 Ctrl+C. The command waits until the run completes or pauses for review.
 
+A reviewer who answers `changes_requested` with a reason sends the reviewed
+step back: it runs again with the reason, and the review is asked again as a
+new round (`revises` and `max_revisions` on the human step choose the steps and
+bound the rounds). A run a model backend stopped — a timeout, an outage, a
+usage limit — is tried again by itself after a backoff
+(`CONCLAVE_RETRY_ATTEMPTS`, `CONCLAVE_RETRY_BASE_SECONDS`,
+`CONCLAVE_RETRY_MAX_SECONDS`), and the command waits through it. Every source a
+record cites is checked against what its step read, and marked `found`,
+`not_found` or `not_checkable`. A step may also declare a `condition` on an
+earlier step's output ("only when triage says bug"): when it does not hold, the
+step and every step only it leads to are skipped, and the run goes on. An
+application's `review_policy` can name who may answer its reviews and keep the
+person who started a run from signing off its own review, and a review step's
+`answers_required` can ask for several different people before the run goes on.
+An application started by an event gets its own incoming address and signing
+secret; a signed event starts one run with the event's data as its input, and
+the same event again starts nothing. Every saved change to an application is
+kept as a version: Studio lists them,
+shows what changed between two, and restores an older one as a new version, and
+each run links to the version it ran. See [REST_API.md](REST_API.md) for the
+details.
+
 **External writes are never sent twice without someone checking.** Every call
 to a tool that needs approval is recorded, with the agent's progress, before it
 is sent. If a run stops mid-write — the host stopped, the service did not answer
@@ -180,6 +202,40 @@ something continues from its last recorded action instead of starting over.
 Interrupted runs recorded before this journal existed cannot be continued.
 The `applications` Python package also exports `run_application` and
 `validate_definition`. Importing `conclave` itself remains a reusable core import.
+
+### Results as files
+
+A step whose output is a document, a dataset or an artifact leaves a real file —
+Markdown, CSV or JSON — made by Conclave from what the step recorded, never by
+the model. The run page shows each file's name, size and first lines with a
+Download button; the download is checked against what was stored before it is
+sent (`GET /api/runs/<run>/files/<file>`). In Set up › Results, "Stored file"
+chooses the format or turns it off.
+
+### A step's own time limit
+
+A step can have its own time limit (Time limit, in its settings; or
+`time_limit_seconds` in the definition, 10 seconds to 24 hours). A step that runs
+over is stopped while it works and recorded as timed out; the run stops once the
+steps beside it finish, and Continue runs the step again with its full limit.
+Time waiting for someone to approve an action does not count.
+
+### Who may use an application
+
+Each application has people with a role — viewer, runner, editor or owner — set
+in **People** on the application. Viewers read its runs and results; runners also
+run it; editors also change it; owners also choose who has access and delete it.
+Whoever creates an application owns it; one saved before roles existed stays open
+to everyone in the workspace until someone limits access. Every application and
+run route checks the caller's role (REST_API.md, "People and roles").
+
+### Compare two runs
+
+In Studio, Run history has a box on every run: choose two and press **Compare 2
+runs** to see, step by step, what each run did — the version it used, steps a
+condition skipped, outputs that changed (a line diff for text, record by record
+otherwise), how each review went, and what each step used. Over REST:
+`GET /api/runs/compare?a=<run>&b=<run>` (see REST_API.md, "Comparing two runs").
 
 ### Run an application on a schedule
 
@@ -656,6 +712,10 @@ lines, so a loop attempt is visible instead of silent.
 - Token and cost dimensions are only enforced when the backend reports them:
   Codex and Ollama report counts, OpenCode reports none, and nothing invents a price
   table.
+- Each model call is recorded (`ModelCalled`: member, backend, measured tokens,
+  seconds — never the prompt or reply), each finished step carries its usage, and
+  a run's record adds them up per step. A limit warns once per run at 80% of it,
+  or at the application's own `budget_warnings` threshold (`null` turns it off).
 - Identical (agent, task) pairs are never delegated twice.
 - If the budget runs out, a final answer is forced from the state gathered so
   far.

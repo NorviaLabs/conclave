@@ -5,7 +5,10 @@ Providers, tools and reviewer identity are owned by the host.
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+import logging
+from contextlib import aclosing, suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import getpass
 import json
 import math
@@ -24,14 +27,115 @@ from .principal import Principal, resolve_principal
 from .profile import LOCAL, resolve_profile
 from .resources import load_resources, register_source_tools, bind_resources, working_folder, SourceTools, SOURCE_TOOLS
 from .storage import RunStore, StoragePaths, tenant_paths, WorkspaceStore
+from .usage import run_usage
+from .run_compare import compare_runs
+from urllib.parse import quote
+
+LOG = logging.getLogger(__name__)
+
 
 def setting(name, default=None):
     return os.environ.get("CONCLAVE_" + name, os.environ.get("STUDIO_" + name, default))
 
 
+# The longest a host may wait before trying a stopped run again, and the most
+# times it may try in a row: a day, and a hundred.
+RETRY_CEILING_SECONDS = 86400
+RETRY_CEILING_ATTEMPTS = 100
 
-def public_record(record):
-    """Keep checkpoint internals on the host; publish actual saved results."""
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """How a host continues a run that a model backend stopped.
+
+    A timeout, an outage or a usage limit stops a run with its checkpoint. The
+    host tries it again after `base_seconds`, doubling each time up to
+    `max_seconds`, at most `attempts` times in a row; a step that completes
+    starts the count again. `attempts=0` leaves every such run for a person.
+    """
+
+    attempts: int = 5
+    base_seconds: float = 30
+    max_seconds: float = 900
+
+    def __post_init__(self):
+        if type(self.attempts) is not int or not 0 <= self.attempts <= RETRY_CEILING_ATTEMPTS:
+            raise ValueError(f"Automatic retry attempts must be a whole number from 0 to {RETRY_CEILING_ATTEMPTS}")
+        for name in ("base_seconds", "max_seconds"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= RETRY_CEILING_SECONDS:
+                raise ValueError(f"Automatic retry {name.replace('_', ' ')} must be more than 0 and at most {RETRY_CEILING_SECONDS}")
+        if self.max_seconds < self.base_seconds:
+            raise ValueError("Automatic retry max seconds must not be less than its base seconds")
+
+    def delay(self, attempt: int) -> float:
+        """Seconds to wait before attempt `attempt` (1 is the first retry)."""
+        return min(self.base_seconds * 2 ** (attempt - 1), self.max_seconds)
+
+
+def retry_policy_from_settings() -> RetryPolicy:
+    """`CONCLAVE_RETRY_ATTEMPTS`, `_BASE_SECONDS` and `_MAX_SECONDS`, or the defaults."""
+    default = RetryPolicy()
+    values = {}
+    for field, name, parse in (("attempts", "RETRY_ATTEMPTS", int), ("base_seconds", "RETRY_BASE_SECONDS", float),
+                               ("max_seconds", "RETRY_MAX_SECONDS", float)):
+        raw = setting(name)
+        if raw is None:
+            values[field] = getattr(default, field)
+            continue
+        try:
+            values[field] = parse(raw.strip())
+        except ValueError:
+            raise ValueError(f"CONCLAVE_{name} must be a number") from None
+    try:
+        return RetryPolicy(**values)
+    except ValueError as error:
+        raise ValueError(f"CONCLAVE_RETRY_*: {error}") from None
+
+
+def pending_retry(record) -> dict | None:
+    """The automatic retry a stopped run is waiting for, if any.
+
+    A retry is pending while it is the last thing the run recorded: anything
+    after it (a resume, a cancel, a person stopping the retry) supersedes it.
+    """
+    if not record["events"]:
+        return None
+    return _pending(record.get("status"), record["events"][-1]["event"])
+
+
+def _pending(status, last) -> dict | None:
+    if status != "stopped" or not last or last.get("type") != "RetryScheduled":
+        return None
+    return {"at": last["retry_at"], "attempt": last["attempt"], "attempts": last["attempts"], "reason": last.get("reason")}
+
+
+
+def answer_standing(record, viewer):
+    """Whether `viewer` may answer the review this run waits for, and if not, why.
+
+    `completes` says whether theirs would be the last answer it needs. None
+    when nothing waits for an answer.
+    """
+    from .runs import review_refusal
+    if viewer is None or record.get("status") != "waiting_for_human":
+        return None
+    review = next((item for item in record["reviews"] if item["status"] == "pending"), None)
+    if review is None:
+        return None
+    answered = [item["reviewer"] for item in review.get("answers", [])]
+    reason = review_refusal(record["request"]["definition"], review["stage"], starter=record.get("started_by"),
+                            answered=answered, reviewer=viewer)
+    if reason:
+        return {"allowed": False, "reason": reason}
+    return {"allowed": True, "reason": "", "completes": len(answered) + 1 >= review.get("required", 1)}
+
+
+def public_record(record, viewer=None):
+    """Keep checkpoint internals on the host; publish actual saved results.
+
+    With `viewer`, also say whether that person may answer the review it waits for.
+    """
     record = dict(record)
     events, metrics, resumable = [], {}, False
     for item in record["events"]:
@@ -56,6 +160,24 @@ def public_record(record):
             metrics = event["metrics"]
         events.append({"sequence": item["sequence"], "event": event})
     record["events"], record["metrics"], record["resumable"] = events, metrics, resumable
+    # Files the run stored from its steps' outputs, each with its checked
+    # download link; the hash they are checked against stays on the host.
+    files = []
+    for item in record.get("files") or []:
+        shown = {key: item[key] for key in ("id", "stage", "output", "round", "name", "format", "media_type", "size",
+                                            "created_at", "preview", "lines", "available")}
+        shown["link"] = f"/api/runs/{quote(record['id'], safe='')}/files/{quote(item['id'], safe='')}"
+        files.append(shown)
+    record["files"] = files
+    # What the run used, step by step and against its limits: counts, never text.
+    record["usage"] = run_usage([item["event"] for item in events], (record.get("request") or {}).get("definition") or {}, metrics)
+    record["retry"] = pending_retry(record)
+    record["can_answer"] = answer_standing(record, viewer)
+    # The saved version this run ran: its definition is the one stored with the run.
+    request = record.get("request") or {}
+    if "application_id" in request and "revision" in request:
+        record["version"] = {"number": request["revision"], "application_id": request["application_id"],
+                             "link": f"/api/applications/{quote(request['application_id'], safe='')}/versions/{request['revision']}"}
     return record
 
 
@@ -100,6 +222,8 @@ class LocalRunHost:
         self.source_extensions = source_extensions
         # The scheduler for this host's schedules, while one is running.
         self.schedules = None
+        # Who may do what with each application, when an API serves roles (see access.py).
+        self.application_access = None
         # "This run is waiting for you": where Studio is served from (for the
         # link), what sends the messages, and the sends still going, which
         # close() waits for a little rather than cutting off.
@@ -110,6 +234,12 @@ class LocalRunHost:
         from .notifier import Notifier
         self.notifier = Notifier(self)
         self.background = set()
+        # Runs a model backend stopped, each waiting for its automatic retry.
+        # A timer per run; the record says when it is due, so a host that
+        # starts again can arm it again (see rearm_retries).
+        self.retry_policy = RetryPolicy()
+        self.retries: dict[str, asyncio.Task] = {}
+        self.clock = lambda: datetime.now(timezone.utc)
 
     def run_tools(self, request, *, owner=None):
         """The tools one run may use, and where its calls actually run.
@@ -148,6 +278,8 @@ class LocalRunHost:
     async def _run_then_notify(self, stream, run_id, notify=True):
         try:
             await self._consume(stream)
+            # Stopped by a backend of the moment: try again later, by itself.
+            self._schedule_retry(run_id)
         finally:
             # The run has stopped. If it now waits for someone and the
             # application says where to tell them, the message goes out on its
@@ -221,6 +353,111 @@ class LocalRunHost:
                 self.pauses.discard(run_id)
 
         task.add_done_callback(forget_task)
+
+    # -- Automatic retry ----------------------------------------------------------
+
+    def _schedule_retry(self, run_id):
+        """Record when a run a backend stopped will be tried again, and arm it.
+
+        Only a stop the run marked transient (a timeout, an outage, a usage
+        limit) is retried, only while no action's outcome is uncertain, and
+        only `retry_policy.attempts` times since a step last completed.
+        """
+        policy = self.retry_policy
+        if not policy.attempts:
+            return
+        # The end of the record only: a long run's events are not read back.
+        facts = self.repository.retry_facts(run_id)
+        finished = facts["stop"]
+        if facts["status"] != "stopped" or not finished.get("transient") or finished.get("budget"):
+            return
+        attempt = facts["tries"] + 1
+        if attempt > policy.attempts or self.repository.journal.uncertain(run_id):
+            return
+        delay = policy.delay(attempt)
+        due = (self.clock() + timedelta(seconds=delay)).isoformat()
+        self.repository._append(run_id, {"type": "RetryScheduled", "attempt": attempt, "attempts": policy.attempts,
+                                         "delay_seconds": delay, "retry_at": due, "reason": finished["transient"]})
+        self._arm_retry(run_id, due)
+
+    def _arm_retry(self, run_id, due, start=None):
+        """Wait for the retry recorded for `due`; `start` is when to begin, if not then."""
+        self._disarm_retry(run_id)
+        task = asyncio.get_running_loop().create_task(self._retry_when_due(run_id, due, start))
+        self.retries[run_id] = task
+
+        def forget(done):
+            if self.retries.get(run_id) is done:
+                self.retries.pop(run_id)
+        task.add_done_callback(forget)
+
+    def _disarm_retry(self, run_id) -> bool:
+        """Stop waiting to retry a run. True when a timer was armed."""
+        task = self.retries.pop(run_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        return task is not None
+
+    async def _retry_when_due(self, run_id, due, start=None):
+        wait = (datetime.fromisoformat(start or due) - self.clock()).total_seconds()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        # The retry this timer was armed for must still be the run's last word:
+        # a resume, a cancel or a person stopping the retry each supersede it.
+        latest = self.repository.latest(run_id)
+        if (_pending(latest["status"], latest["last"]) or {}).get("at") != due:
+            return
+        if self.retries.get(run_id) is asyncio.current_task():
+            self.retries.pop(run_id)
+        # Nobody presses this Continue, so it acts only as someone the
+        # deployment still admits, the way a schedule does.
+        owner = self.run_actor(run_id)
+        admits = getattr(self.schedules, "admits", None)
+        if admits is not None and owner is not None and not admits(owner):
+            self.repository._append(run_id, {"type": "RetryCancelled", "reason": "owner_not_admitted", "by": "host"})
+            return
+        # A scheduled run had nobody to approve its writes, and still has none.
+        approvals = "refuse" if latest["trigger"] == "schedule" else "ask"
+        try:
+            await self._schedule(run_id, resume=True, approvals=approvals)
+        except Exception as error:
+            # It stays stopped and resumable; the person can continue it.
+            LOG.warning("Automatic retry of run %s could not start: %s", run_id, error)
+
+    # Seconds between overdue retries armed again when a host starts.
+    REARM_SPACING = 2.0
+
+    def rearm_retries(self) -> list[str]:
+        """Arm the retries a previous host recorded and did not get to. Returns their runs."""
+        armed, overdue = [], 0
+        now = self.clock()
+        for run_id, event in self.repository.pending_retries():
+            try:
+                due = datetime.fromisoformat(event["retry_at"])
+            except (KeyError, TypeError, ValueError):
+                due = None
+            if due is None or due.tzinfo is None:
+                # A store this host cannot read is left for a person, not a crash.
+                LOG.warning("Skipping the automatic retry of run %s: its retry time cannot be read", run_id)
+                continue
+            if run_id not in self.retries and run_id not in self.tasks:
+                start = None
+                if due <= now:
+                    # Overdue while no host ran: started a little apart, so a
+                    # backend that was just failing is not met by all of them at once.
+                    start, overdue = (now + timedelta(seconds=self.REARM_SPACING * overdue)).isoformat(), overdue + 1
+                self._arm_retry(run_id, event["retry_at"], start)
+                armed.append(run_id)
+        return armed
+
+    async def until_idle(self, run_id):
+        """Wait until a run is neither working nor waiting for an automatic retry."""
+        while True:
+            active = self.tasks.get(run_id)
+            waiting = active[0] if active else self.retries.get(run_id)
+            if waiting is None:
+                return
+            await asyncio.wait({waiting})
 
     async def prepare_run(self, value, actor):
         """The checks every run passes before it is created, whoever starts it.
@@ -348,7 +585,7 @@ class LocalRunHost:
                          # Studio can offer it as the ceiling of Steps at once.
                          "max_parallel_steps": self.repository.max_parallel_steps,
                          "features": {"dag": True, "durable_reviews": True, "manual": True,
-                                      "schedules": self.schedules is not None, "events": streaming, "budget_warnings": True,
+                                      "schedules": self.schedules is not None, "events": streaming, "event_triggers": True, "budget_warnings": True, "run_usage": True, "run_compare": True, "output_files": True, "step_time_limits": True, "application_roles": True,
                                       "notifications": getattr(self, "connections", None) is not None,
                                       "studio_url": bool(self.studio_url)}}
         if command == "refine":
@@ -371,7 +608,7 @@ class LocalRunHost:
             if getattr(self, 'connections', None):
                 self.connections.pin_run(run_id, actor.tenant, actor.name)
             await self._schedule(run_id)
-            return 201, public_record(self.repository.get(run_id))
+            return 201, public_record(self.repository.get(run_id), (principal or self.principal).name)
         if command == "hook":
             # Only a transport that verified the delivery signature reaches here.
             if set(value) != {'connection_id', 'payload', 'definition', 'revision', 'owner', 'inputs'}:
@@ -396,19 +633,55 @@ class LocalRunHost:
             if set(value) != {"application_id"} or not isinstance(value["application_id"], str):
                 raise ValueError("Choose an application")
             runs = self.repository.list(value['application_id'])
+            if self.application_access is not None and not self.application_access.exists(value['application_id']):
+                # Its application is gone: each run shows only to whoever may still open it.
+                runs = [run for run in runs if self._may_open(run['id'], principal)]
             if getattr(self, 'connections', None):
-                runs = [run for run in runs if self.connections.run_owner(run['id'], self.principal.tenant)
-                        in (None, (principal or self.principal).name)]
+                name = (principal or self.principal).name
+                # Their own runs, and any run whose waiting review is for them.
+                runs = [run for run in runs if self.connections.run_owner(run['id'], self.principal.tenant) in (None, name)
+                        or run['status'] == 'waiting_for_human' and self._may_review(run['id'], name)]
             return 200, {'runs': runs}
         if command in {"actions", "check", "settle"}:
             return 200, await self._actions_command(command, value, principal or self.principal)
-        if command in {"get", "resume", "cancel", "pause"}:
+        if command == "file":
+            # A stored file: read by whoever may open the run, and only if it is
+            # still exactly what the run stored.
+            if not isinstance(value, dict) or set(value) != {"run_id", "file_id"} or not all(isinstance(value[key], str) for key in value):
+                raise ValueError("Choose a run and one of its files")
+            self._require_run_owner(value["run_id"], principal, reviewing=True)
+            return 200, await asyncio.to_thread(self.repository.read_file, value["run_id"], value["file_id"])
+        if command == "compare":
+            # Two runs of one application, step by step. Only for whoever may
+            # open both: a person a waiting review is for may not compare.
+            if not isinstance(value, dict) or not {"a", "b"} <= set(value) <= {"a", "b", "order"} \
+                    or not all(isinstance(value[key], str) for key in ("a", "b")):
+                raise ValueError("Choose two runs to compare")
+            for run_id in (value["a"], value["b"]):
+                self._require_run_owner(run_id, principal, reviewing=False, permission="view")
+            viewer = (principal or self.principal).name
+
+            def compare():
+                # Reading two long runs and weighing their outputs takes a
+                # while: done beside the host's loop, so nothing else waits.
+                records = [public_record(self.repository.get(run_id), viewer) for run_id in (value["a"], value["b"])]
+                return compare_runs(*records, order=value.get("order", "time"))
+            return 200, await asyncio.to_thread(compare)
+        if command in {"get", "resume", "cancel", "pause", "cancel_retry"}:
             if set(value) != {"run_id"} or not isinstance(value["run_id"], str):
                 raise ValueError("Choose a saved request")
             run_id = value["run_id"]
-            self._require_run_owner(run_id, principal)
-            self.repository.get(run_id)
-            if command == "pause":
+            self._require_run_owner(run_id, principal, reviewing=command == "get", permission="view" if command == "get" else "run")
+            record = self.repository.get(run_id)
+            by = (principal or self.principal).name
+            if command == "cancel_retry" or command == "pause" and run_id not in self.tasks and pending_retry(record):
+                # "Don't retry", or a pause while it waits to: the run stays
+                # stopped, and Continue still continues it.
+                if pending_retry(record) is None:
+                    raise ValueError("This run has no automatic retry to stop")
+                self._disarm_retry(run_id)
+                self.repository._append(run_id, {"type": "RetryCancelled", "reason": "paused" if command == "pause" else "cancelled", "by": by})
+            elif command == "pause":
                 # Asked between steps: the run finishes the step it is in and
                 # stops with a checkpoint, so resuming continues from there.
                 if run_id not in self.tasks:
@@ -416,6 +689,8 @@ class LocalRunHost:
                 self.pauses.add(run_id)
             elif command == "resume":
                 self._require_provider()
+                # Continue now rather than at the retry's time.
+                self._disarm_retry(run_id)
                 # Whatever was left uncertain is checked with its service
                 # first; the run continues only once everything is settled.
                 if (self.repository.get(run_id)["status"] in {"interrupted", "stopped", "paused", "waiting_for_human"}
@@ -424,6 +699,7 @@ class LocalRunHost:
                 await self._schedule(run_id, resume=True)
             elif command == "cancel":
                 self.pauses.discard(run_id)
+                self._disarm_retry(run_id)
                 active = self.tasks.get(run_id)
                 if active is not None:
                     task, stream = active
@@ -441,24 +717,121 @@ class LocalRunHost:
                         self.repository.stopping.discard(run_id)
                 if active is None or self.repository.get(run_id)["status"] in {"waiting_for_human", "paused"}:
                     self.repository.cancel_waiting(run_id)
-            return 200, public_record(self.repository.get(run_id))
+            return 200, public_record(self.repository.get(run_id), (principal or self.principal).name)
         if command == "review":
             if set(value) != {"run_id", "review_id", "output"} or not isinstance(value["run_id"], str) or not isinstance(value["review_id"], str):
                 raise ValueError("Choose the waiting review and provide your contribution")
             reviewer = (principal or self.principal).name
-            if getattr(self, 'connections', None):
-                owner = self.connections.run_owner(value['run_id'], self.principal.tenant)
-                if owner is not None and owner != reviewer:
-                    raise ValueError('Integration run belongs to another principal')
+            self._require_run_owner(value["run_id"], principal, reviewing=True, permission="run")
             self.repository.submit_review(value["run_id"], value["review_id"], reviewer=reviewer, output=value["output"])
-            return 200, public_record(self.repository.get(value["run_id"]))
+            await self._continue_after_review(value["run_id"])
+            return 200, public_record(self.repository.get(value["run_id"]), (principal or self.principal).name)
         raise ValueError("Unknown local run command")
 
-    def _require_run_owner(self, run_id, principal):
+    async def _continue_after_review(self, run_id):
+        """Continue a run whose review now has every answer it needs.
+
+        Only for an application with a review policy: its reviewers may be
+        people who cannot continue the run, so nobody has to. The run continues
+        as its owner, as a Continue would. An application without a policy is
+        continued by whoever answered, as before; a run with an action still
+        uncertain waits for its owner to settle it.
+        """
+        # Decided from the light read: whether a review still waits needs no events.
+        record = self.repository.review_access(run_id)
+        if ("review_policy" not in record["request"]["definition"] or record["status"] != "waiting_for_human"
+                or record["review"] is not None
+                or self.provider is None or self.repository.journal.uncertain(run_id)):
+            return
+        # Nobody presses this Continue either: it acts only as an owner the
+        # deployment still admits, as a retry and a schedule do.
+        owner = self.run_actor(run_id)
+        admits = getattr(self.schedules, "admits", None)
+        if admits is not None and owner is not None and not admits(owner):
+            self.repository._append(run_id, {"type": "ContinueWithheld", "reason": "owner_not_admitted"})
+            return
+        # Nor as someone whose role no longer lets them run this application.
+        if owner is not None and self.application_access is not None:
+            from .access import role_allows
+            try:
+                role, _ = self.application_access.role_of(self.repository.application_of(run_id), owner)
+            except KeyError:
+                role = None
+            if not role_allows(role, "run"):
+                self.repository._append(run_id, {"type": "ContinueWithheld", "reason": "owner_lacks_role"})
+                return
+        # A scheduled run had nobody to approve its writes, and still has none.
+        approvals = "refuse" if (record["request"].get("trigger") or {}).get("kind") == "schedule" else "ask"
+        try:
+            await self._schedule(run_id, resume=True, approvals=approvals)
+        except Exception as error:
+            # The answer is recorded either way; the run waits for its owner to continue it.
+            LOG.warning("Run %s could not continue after its review: %s", run_id, error)
+
+    def _may_review(self, run_id, name):
+        """Whether `name` is someone this run's waiting review is for: one who may
+        answer it, or who already did. Only while it waits. Reads no events."""
+        from .runs import review_refusal
+        access = self.repository.review_access(run_id)
+        review = access["review"]
+        if access["status"] != "waiting_for_human" or review is None:
+            return False
+        if name.strip().casefold() in {item.casefold() for item in review["answered"]}:
+            return True
+        return review_refusal(access["request"]["definition"], review["stage"], starter=access["started_by"],
+                              answered=review["answered"], reviewer=name) is None
+
+    def _require_run_owner(self, run_id, principal, *, reviewing=False, permission="view"):
+        """Runs with connections are their owner's. A person a waiting review is
+        for may also open it (`reviewing`), and nothing else. Every run is also
+        its application's: the caller's role there must allow `permission`."""
         if getattr(self, 'connections', None):
             owner = self.connections.run_owner(run_id, self.principal.tenant)
-            if owner is not None and owner != (principal or self.principal).name:
+            name = (principal or self.principal).name
+            if owner is not None and owner != name and not (reviewing and self._may_review(run_id, name)):
                 raise ValueError('Integration run belongs to another principal')
+        self._require_run_role(run_id, principal, permission, reviewing=reviewing)
+
+    def _require_run_role(self, run_id, principal, permission, *, reviewing=False):
+        """The caller's role on the run's application, when this host knows roles.
+
+        No role: the run does not exist for them (404), unless a waiting review
+        is for them. A role too low: refused, saying why (403). A run whose
+        application was deleted stays with whoever started it.
+        """
+        from .access import RoleRefused, refusal, role_allows
+        access = getattr(self, "application_access", None)
+        if access is None:
+            return
+        name = (principal or self.principal).name
+        application = self.repository.application_of(run_id)
+        try:
+            role, _ = access.role_of(application, name)
+        except KeyError:
+            # Its application is gone (or never was saved here): the run stays
+            # with whoever started it, and one nobody is recorded as starting
+            # stays as open as it was before roles.
+            starter = self.repository.actor(run_id)
+            role = "owner" if starter is None or starter == name else None
+        if role_allows(role, permission):
+            return
+        if reviewing and self._may_review(run_id, name):
+            return
+        if role is None:
+            raise KeyError(run_id)
+        raise RoleRefused(refusal(role, permission))
+
+    def _may_open(self, run_id, principal):
+        from .access import RoleRefused
+        try:
+            self._require_run_role(run_id, principal, "view")
+            return True
+        except (KeyError, RoleRefused):
+            return False
+
+    def require_run(self, run_id, principal, permission):
+        """For a route outside `handle` that acts on a run."""
+        self._require_run_owner(run_id, principal, permission=permission)
 
     def run_actor(self, run_id):
         """Whom a run acts as, and so who answers its approvals and decisions.
@@ -521,7 +894,7 @@ class LocalRunHost:
         if "note" in value and not isinstance(value["note"], str):
             raise ValueError("A note is text")
         run_id = value["run_id"]
-        self._require_run_owner(run_id, principal)
+        self._require_run_owner(run_id, principal, permission="run")
         # Deciding an action — "send it again" above all — is approving it, so
         # only the person who answers this run's tool approvals may see the
         # details or decide: the connection's owner, or this host's principal.
@@ -614,6 +987,12 @@ class LocalRunHost:
                 for identifier, name, service in choices]
 
     async def close(self):
+        # A retry still waiting stays on the record; a host that starts again arms it.
+        waiting = list(self.retries.values())
+        self.retries.clear()
+        for task in waiting:
+            task.cancel()
+        await asyncio.gather(*waiting, return_exceptions=True)
         active = list(self.tasks.values())
         for task, stream in active:
             task.cancel()
@@ -768,6 +1147,7 @@ def configured_host(*, workspace=None, source_dir=None, principal=None, interact
                         profile=profile, principal=principal, paths=paths, backends=backends,
                         interactive_approvals=interactive_approvals)
     host.studio_url = studio_address(setting("STUDIO_URL"))
+    host.retry_policy = retry_policy_from_settings()
     host.notify_run_interval = whole_number("NOTIFY_RUN_INTERVAL", setting("NOTIFY_RUN_INTERVAL", "600"), minimum=0)
     host.notify_hourly_limit = whole_number("NOTIFY_HOURLY_LIMIT", setting("NOTIFY_HOURLY_LIMIT", "20"), minimum=1)
     key = setting('INTEGRATION_KEY')
@@ -843,3 +1223,4 @@ def goal_question_limit():
     if not value.isdigit() or not 1 <= int(value) <= 20:
         raise ValueError("CONCLAVE_MAX_GOAL_QUESTIONS must be between 1 and 20")
     return int(value)
+

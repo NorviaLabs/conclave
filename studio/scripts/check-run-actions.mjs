@@ -63,12 +63,17 @@ const {pauseControl} = await import('../web/parallel-ui.js');
 const bar = vm.createContext({
   uiIcon: name => `<svg class="ui-icon" data-icon="${name}"></svg>`, pauseControl,
   liveBusy: false, runtime: {available: true}, preview: null,
+  // What the person's role on the application allows (see access-ui.js).
+  allowed: permission => bar.role !== 'viewer' || permission === 'view', role: 'owner',
   console
 });
 vm.runInContext(`${controllerSource}`, bar);
 const controlsFor = preview => vm.runInContext('preview = ' + JSON.stringify(preview) + '; runControllerMarkup()', bar);
 const actions = markup => [...markup.matchAll(/data-action="([^"]+)"/g)].map(match => match[1]);
 assert.deepEqual(actions(controlsFor(null)), ['run'], 'a plan offers Run');
+bar.role = 'viewer';
+assert.match(controlsFor(null), /data-action="run" disabled/, 'a viewer is not offered Run');
+bar.role = 'owner';
 assert.deepEqual(actions(controlsFor({live: true, mode: 'running'})), ['pause-live', 'cancel-live'], 'a going run offers Pause and Stop');
 assert.deepEqual(actions(controlsFor({live: true, mode: 'pending'})), ['pause-live', 'cancel-live'], 'a starting run too');
 // Several steps may be working when pause is pressed: it says so, and is not pressed twice.

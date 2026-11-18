@@ -20,7 +20,7 @@ from conclave.application.profile import HOSTED
 from conclave.application.runs import RunRepository
 from conclave.application.service import LocalRunHost
 from conclave.application.workspace import Workspace
-from conftest import ScriptedProvider
+from conftest import ScriptedProvider, share
 
 DONE = {"type": "final", "content": "Done", "text": "Digest"}
 ANA, MALLORY = Principal("ana@acme.test", "acme"), Principal("mallory@acme.test", "acme")
@@ -40,6 +40,8 @@ async def save(api, value, principal, saved=None):
     if saved is None:
         status, body = await api.dispatch("POST", "/api/applications", {"definition": value}, principal=principal)
         assert status == 201, body
+        # Ana and Mallory work on the same applications.
+        share(api, body["id"], *({ANA.name, MALLORY.name} - {principal.name}))
     else:
         status, body = await api.dispatch("PUT", f"/api/applications/{saved['id']}",
                                           {"definition": value, "revision": saved["revision"]}, principal=principal)
@@ -148,6 +150,8 @@ def test_approvals_on_a_boot_started_tenant_go_to_whoever_started_the_run(tmp_pa
         api.host.tools.register(recorder.tool())
         api.host.provider = ScriptedProvider({"writer": [note(), DONE]})
         saved = await save(api, definition(None, start_mode="manual", tools=("send_note",)), ANA)
+        # Even people who may run it are not asked to approve a run someone else started.
+        share(api, saved["id"], api.host.principal.name, "scheduler", role="runner")
         status, run = await api.dispatch("POST", "/api/runs", {"version": 1, "application_id": saved["id"], "revision": saved["revision"],
                                                                "task": "x", "inputs": {"team": "x"}}, principal=ANA)
         assert status == 201
@@ -182,6 +186,7 @@ def test_uncertain_actions_are_decided_by_the_person_the_run_acts_as(tmp_path):
     async def exercise():
         api = hosted(tmp_path, principal=Principal("host", "acme"))
         saved = await save(api, definition(None, start_mode="manual"), ANA)
+        share(api, saved["id"], "host", role="runner")
         status, run = await api.dispatch("POST", "/api/runs", {"version": 1, "application_id": saved["id"], "revision": saved["revision"],
                                                                "task": "x", "inputs": {"team": "x"}}, principal=ANA)
         await finished(api)

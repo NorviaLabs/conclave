@@ -14,7 +14,7 @@ export {heldDetailNoteMarkup} from '/parallel-ui.js';
 import {planConnections,canvasPositions,currentCanvasMetrics,canvasEdgeCurve,canvasEdgeMidpoint,canvasNodeWidth,canvasNodeHeight,staleRunSteps} from '/definition.js';
 
 const STOPPED=['stopped','failed','cancelled','interrupted'];
-const statusClasses={'Working':'working','Complete':'complete','Finished':'finished','Failed':'failed','Needs input':'needs-input','Needs check':'needs-input','Ready':'ready','Waiting':'waiting','Incomplete':'incomplete'};
+const statusClasses={'Working':'working','Complete':'complete','Finished':'finished','Failed':'failed','Needs input':'needs-input','Needs check':'needs-input','Ready':'ready','Waiting':'waiting','Incomplete':'incomplete','Skipped':'skipped','Timed out':'timed-out'};
 function runStatusClass(status){return statusClasses[status]||'waiting';}
 const flowArrow='<defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/></marker></defs>';
 
@@ -28,19 +28,22 @@ export function runStepStatus(d,run,index){
   const step=d.workflow[index];
   if(!step)return 'Waiting';
   if(run.activeSteps?.includes(index)||run.activeStep===index)return run.mode==='waiting_human'&&run.review?.stage===step.id?'Needs input':run.mode==='waiting_human'&&!run.review?'Needs input':'Working';
+  // A condition skipped it: done, whatever happens to the run afterwards.
+  if(run.skippedSteps&&step.id in run.skippedSteps)return 'Skipped';
   if(run.completedSteps?run.completedSteps.includes(step.id):index<=run.step)return 'Complete';
   // Finished, but waiting for an earlier step before its result joins.
   if(run.finishedSteps?.includes(step.id))return 'Finished';
   // Each step's own end, whichever step the run as a whole names.
   const outcome=run.stepOutcomes?.[step.id];
-  if(outcome)return outcome.status==='failed'?'Failed':'Incomplete';
+  // Stopped by its own time limit while it worked.
+  if(outcome)return outcome.status==='failed'?'Failed':outcome.status==='timed_out'?'Timed out':'Incomplete';
   const finished=run.events?.findLast(event=>event.type==='ApplicationFinished');
   if(run.mode==='failed'&&(finished?.stage||(!finished?run.events?.findLast(event=>event.type==='StageStarted')?.stage:null))===step.id)return 'Failed';
   // A step that was sending something when the run stopped waits on the
   // person: whether that action happened is not known yet.
   if(STOPPED.includes(run.mode)&&run.resumable&&run.needsCheck?.includes(step.id))return 'Needs check';
   if(STOPPED.includes(run.mode))return 'Incomplete';
-  return planConnections(d).filter(edge=>edge.to===step.id).every(edge=>run.completedSteps?.includes(edge.from))?'Ready':'Waiting';
+  return planConnections(d).filter(edge=>edge.to===step.id).every(edge=>run.completedSteps?.includes(edge.from)||edge.from in (run.skippedSteps||{}))?'Ready':'Waiting';
 }
 
 // The backend each step started on, as the run recorded it. A step that has
@@ -93,7 +96,7 @@ export function runHandoffs(d,run){
 // as a diagram. The titles are one hover away, and stay off the canvas.
 function runProduced(d,run,step,index){
   const status=runStepStatus(d,run,index);
-  if(status==='Failed'&&run.stepOutcomes?.[step.id]?.reason)return {text:run.stepOutcomes[step.id].reason,title:''};
+  if(['Failed','Timed out'].includes(status)&&run.stepOutcomes?.[step.id]?.reason)return {text:run.stepOutcomes[step.id].reason,title:''};
   if(!['Complete','Finished'].includes(status))return null;
   // A held step's result is on its StageFinished; it is not in the results yet.
   const value=status==='Finished'?run.heldOutputs?.[step.id]:run?.state?.[step.output],label=(d.state.find(item=>item.key===step.output)?.label||step.output).toLowerCase();
@@ -148,7 +151,7 @@ export function runCanvasMarkup(d,run,selectedId,{escape:e,agentName,outputName,
   const delegated=[...delegations.values()].reduce((total,list)=>total+list.length,0);
   const metrics=currentCanvasMetrics();
   const boardWidth=Math.max(metrics.width||0,...Object.values(positions).map(point=>point.x+canvasNodeWidth+360)),boardHeight=Math.max(metrics.height||0,...Object.values(positions).map(point=>point.y+canvasNodeHeight+80))+delegated*110;
-  const edges=links.map(edge=>{const from=positions[edge.from],to=positions[edge.to];if(!from||!to)return '';const handoff=handoffs.find(item=>item.from===edge.from&&item.to===edge.to),mid=canvasEdgeMidpoint(from,to);return `<g class="canvas-edge run-edge ${handoff?'handed':''}"><path class="edge-line" d="${canvasEdgeCurve(from,to)}" marker-end="url(#flow-arrow)"></path>${handoff&&mid?`<text class="edge-label" x="${mid.x}" y="${mid.y}">${e(handoff.label)}</text>`:''}</g>`;}).join('');
+  const edges=links.map(edge=>{const from=positions[edge.from],to=positions[edge.to];if(!from||!to)return '';const handoff=handoffs.find(item=>item.from===edge.from&&item.to===edge.to),mid=canvasEdgeMidpoint(from,to);return `<g class="${['canvas-edge','run-edge',handoff?'handed':'',edge.from in (run.skippedSteps||{})?'skipped-edge':''].filter(Boolean).join(' ')}"><path class="edge-line" d="${canvasEdgeCurve(from,to)}" marker-end="url(#flow-arrow)"></path>${handoff&&mid?`<text class="edge-label" x="${mid.x}" y="${mid.y}">${e(handoff.label)}</text>`:''}</g>`;}).join('');
   const delegationEdges=[],subagentNodes=[];
   for(const[stage,list]of delegations){const point=positions[stage];if(!point)continue;list.forEach((sub,index)=>{const x=point.x,y=point.y+canvasNodeHeight+40+index*110;delegationEdges.push(`<g class="canvas-edge delegation-edge"><path class="edge-line" d="${delegationCurve(point,{x,y})}" marker-end="url(#flow-arrow)"></path></g>`);subagentNodes.push(`<section class="run-subagent" data-status="${e(runStatusClass(sub.status==='completed'?'Complete':'Working'))}" style="left:${x}px;top:${y}px"><button class="text-button" data-run-step="${e(stage)}" aria-label="Inspect delegation to ${e(agentName(d,sub.agent))}"><strong>${e(agentName(d,sub.agent))}</strong></button><small>delegated by ${e(agentName(d,sub.by))}${sub.depth!==undefined?` · depth ${e(sub.depth)}`:''} · ${e(sub.status)}</small><small>${e(sub.task||'')}</small>${sub.reason?`<small class="run-subagent-reason">${e(sub.reason)}</small>`:''}</section>`);});}
   const nodes=d.workflow.map((step,index)=>{
@@ -167,7 +170,7 @@ export function runCanvasMarkup(d,run,selectedId,{escape:e,agentName,outputName,
     // Not a live region: this text changes every second while a step works, and a
     // screen reader that announced each change would say nothing else.
     const note=outOfDate?'This result came from an earlier version of the plan':workingText;
-    return canvasStepMarkup({id:step.id,index,human,selected:selectedId===step.id,position:positions[step.id],escape:e,mode:'run',status:runStatusClass(status),stale:outOfDate,tested:(run.testedSteps||[]).includes(step.id),header:`<span class="run-node-status" data-status="${e(runStatusClass(status))}"${note?` title="${e(note)}"`:''}><i aria-hidden="true"></i>${e(state)}</span>`,content:`<button class="step-summary" data-run-step="${e(step.id)}" aria-pressed="${selectedId===step.id}"><strong>${e(step.name)}</strong><span class="step-output ${produced?'produced':''}"${produced?.title?` title="${e(produced.title)}"`:''}>${produced?e(produced.text):`Produces ${e(outputName(d,step.output))}`}</span><span class="step-member"><span class="role-symbol small" aria-hidden="true">${e(agent.name.slice(0,1))}</span><span>${e(agentName(d,step.agent))}</span></span><span class="step-backend" title="${recorded?`Runs on ${e(recorded)}`:'Runs on'}">${e(recorded||stepBackendLabel(backends,provider,step,agent))}</span></button>`});
+    return canvasStepMarkup({id:step.id,index,human,selected:selectedId===step.id,position:positions[step.id],escape:e,mode:'run',status:runStatusClass(status),stale:outOfDate,tested:(run.testedSteps||[]).includes(step.id),header:`<span class="run-node-status" data-status="${e(runStatusClass(status))}"${note?` title="${e(note)}"`:''}><i aria-hidden="true"></i>${e(state)}</span>`,content:`<button class="step-summary" data-run-step="${e(step.id)}" aria-pressed="${selectedId===step.id}"><strong>${e(step.name)}</strong>${status==='Skipped'?`<span class="skip-reason">${e(run.skippedSteps[step.id])}</span>`:`<span class="step-output ${produced?'produced':''}"${produced?.title?` title="${e(produced.title)}"`:''}>${produced?e(produced.text):`Produces ${e(outputName(d,step.output))}`}</span>`}<span class="step-member"><span class="role-symbol small" aria-hidden="true">${e(agent.name.slice(0,1))}</span><span>${e(agentName(d,step.agent))}</span></span><span class="step-backend" title="${recorded?`Runs on ${e(recorded)}`:'Runs on'}">${e(recorded||stepBackendLabel(backends,provider,step,agent))}</span></button>`});
   }).join('');
   return `<section class="run-workbench"><div class="canvas-heading"><span>${agents} agents${delegated?` · ${delegated} delegations`:''}${stale.size?` · ${stale.size} results out of date`:''}</span><button class="text-button" data-action="follow-active" aria-pressed="${followActive}">Follow the active step</button></div>${canvasMarkup({mode:'run',width:boardWidth,height:boardHeight,metrics,edges:flowArrow+edges+delegationEdges.join(''),overlay:subagentNodes.join(''),nodes,zoom,dock:canvasDockMarkup({controller:controls,toolsDisabled,selection:selectedId||'',view:'run',escape:e})})}${activityDockMarkup(d,run,{escape:e,agentName,capabilityName,expanded:activityExpanded,filter:activityFilter})}</section>`;
 }

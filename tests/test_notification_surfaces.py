@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from notification_support import ANA, BEA, STUDIO, FakeConnections, api, definition, email, slack, webhook
+from conftest import share
 
 
 def principal(name=ANA, tenant="local"):
@@ -91,6 +92,7 @@ def test_the_status_is_readable_by_the_tenant_and_not_by_another(tmp_path):
     async def exercise():
         service = api(tmp_path, connections=connections())
         _, saved = await service.dispatch("POST", "/api/applications", {"definition": definition(slack())}, principal=principal())
+        share(service, saved["id"], BEA, role="viewer")  # someone on the application's team
         code, body = await service.dispatch("GET", f"/api/applications/{saved['id']}/notifications", principal=principal(BEA))
         assert code == 200 and body["owner"] == ANA and body["configured"] is True
         code, _ = await service.dispatch("GET", f"/api/applications/{saved['id']}/notifications", principal=principal(BEA, "other"))

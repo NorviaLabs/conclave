@@ -36,6 +36,7 @@ from .api import TenantAPIs, reject_nonfinite
 from .identity import GoogleLoginError, cookie_value
 from .application.principal import Principal, resolve_principal
 from .application.service import public_record, setting, request_body_limit
+from .application.output_files import FileDownload
 
 LOG = logging.getLogger(__name__)
 
@@ -70,6 +71,12 @@ class TooLarge(ValueError):
 
 
 def response(status: int, payload=None, *, headers=()) -> dict:
+    if isinstance(payload, FileDownload):
+        # A stored output file: an attachment, never shown in place, never cached.
+        return {"status": status,
+                "headers": [("content-type", payload.media_type), ("content-disposition", f'attachment; filename="{payload.name}"'),
+                            ("cache-control", "no-store"), ("x-content-type-options", "nosniff"), *headers],
+                "body": payload.body}
     body = b"" if payload is None else json.dumps(payload, allow_nan=False).encode()
 
     return {
@@ -97,6 +104,9 @@ def cors_headers(origin, allowed) -> list[tuple[str, str]]:
 
 def request_headers(scope) -> dict[str, str]:
     return {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
+
+
+EVENTS_PREFIX = "/api/events/"
 
 
 def principal_from(scope, headers, *, principal_for=None, fallback=None) -> Principal:
@@ -255,6 +265,28 @@ def application(*, apis=None, token=None, origins=(), principal_for=None, fallba
         if login is not None and urlsplit(target).path in {LOGIN_START, LOGIN_CALLBACK, LOGOUT}:
             return await sign_in_route(login, scope, target, method, headers, extra, send)
 
+        # An application's incoming event address is authenticated by its own
+        # signature: no token, session or origin is asked of the sender, which
+        # is a machine somewhere else. It reaches this deployment's own tenant;
+        # the run acts as whoever turned events on.
+        if method == "POST" and urlsplit(target).path.startswith(EVENTS_PREFIX):
+            endpoint = urlsplit(target).path[len(EVENTS_PREFIX):]
+            if not headers.get("content-type", "").startswith(JSON_TYPE):
+                return await reply(send, response(415, {"error": "Use a JSON request"}, headers=extra))
+            declared = headers.get("content-length", "0")
+            if declared.isdigit() and int(declared) > 100_000:
+                # Refused before anything is read.
+                return await reply(send, response(413, {"error": "An event body is at most 100000 bytes"}, headers=extra))
+            try:
+                raw = await read_body(receive)
+            except TooLarge as error:
+                return await reply(send, response(413, {"error": str(error)}, headers=extra))
+            if not endpoint or "/" in endpoint:
+                return await reply(send, response(404, {"error": "No event address here"}, headers=extra))
+            api = services.for_principal(principal_from(scope, headers, fallback=fallback))
+            status, answer = await api.receive_event(endpoint, headers, raw)
+            return await reply(send, response(status, answer, headers=extra))
+
         # `/api/hooks/` authenticates by signature instead, and only when this
         # deployment configured a hook resolver at all.
         is_hook = hooks is not None and method == "POST" and target.startswith("/api/hooks/")
@@ -407,9 +439,17 @@ async def stream_run(send, api, run_id: str, extra, principal=None) -> None:
 
     watching = api.host.repository.watch(run_id)
 
+    viewer = (principal or api.host.principal).name
     try:
         async for record in watching:
-            body = b"data: " + json.dumps(public_record(record), allow_nan=False).encode() + b"\n\n"
+            # Asked again for every change: a person who may read a run only
+            # while its review waits for them stops hearing about it after.
+            try:
+                api.host._require_run_owner(run_id, principal, reviewing=True)
+            except (KeyError, ValueError):
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                return
+            body = b"data: " + json.dumps(public_record(record, viewer), allow_nan=False).encode() + b"\n\n"
             await send({"type": "http.response.body", "body": body, "more_body": True})
 
     finally:

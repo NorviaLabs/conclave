@@ -21,6 +21,7 @@ EXPECTED = {
     "Delegation",
     "StoreChanged",
     "BudgetExceeded",
+    "ModelCalled",
 }
 
 
@@ -108,6 +109,15 @@ FIELDS = {
         "dimension",
         "limit",
         "used",
+    ],
+    "ModelCalled": [
+        "run_id",
+        "agent",
+        "provider",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "seconds",
     ],
 }
 

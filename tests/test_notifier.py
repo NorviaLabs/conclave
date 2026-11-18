@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import share
 from notification_support import (ANA, BEA, CANARY, STUDIO, FakeConnections, api, definition, email, events, host,
                                   run_request, settle, slack, waiting_event, webhook)
 
@@ -184,6 +185,7 @@ def test_an_owner_without_access_sends_nothing_and_the_run_says_why(tmp_path):
             "team_slack is not granted send_message for this application"]
         # Bea's change makes the notification hers; team_slack is Ana's.
         saved = service.workspace.applications()[0]
+        share(service, saved["id"], BEA)  # Bea works on it with Ana
         service.host.connections.grant("team_slack", saved["id"])
         changed = definition(slack())
         changed["description"] = "Bea's wording"

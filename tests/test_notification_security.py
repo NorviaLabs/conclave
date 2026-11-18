@@ -10,6 +10,7 @@ import asyncio
 import pytest
 
 from notification_support import ANA, BEA, FakeConnections, api, definition, events, settle, slack, webhook
+from conftest import share
 
 
 def principal(name=ANA):
@@ -20,6 +21,9 @@ def principal(name=ANA):
 async def save(service, value, by, saved=None):
     if saved is None:
         code, body = await service.dispatch("POST", "/api/applications", {"definition": value}, principal=principal(by))
+        if code == 201:
+            # Ana and Bea work on the same applications.
+            share(service, body["id"], *({ANA, BEA} - {by}))
     else:
         code, body = await service.dispatch("PUT", f"/api/applications/{saved['id']}",
                                             {"definition": value, "revision": saved["revision"]}, principal=principal(by))

@@ -389,8 +389,10 @@ def test_persisted_decision_controls_downstream_execution(tmp_path, decision):
     output = {"records": [{"id": "decision", "title": "Review", "body": "My explicit decision", "status": decision, "source_refs": []}]}
     repository.submit_review(run_id, review_id, reviewer="person", output=output)
     events = collect(repository.resume(run_id, provider, tools))
-    assert events[-1]["status"] == ("completed" if decision == "approved" else "stopped")
-    assert len(provider.prompts) == (2 if decision == "approved" else 1)
+    # Approval continues, rejection stops, and a request for changes sends the
+    # draft back to work and asks the reviewer again.
+    assert events[-1]["status"] == {"approved": "completed", "rejected": "stopped", "changes_requested": "waiting_for_human"}[decision]
+    assert len(provider.prompts) == (1 if decision == "rejected" else 2)
     assert repository.get(run_id)["reviews"][0]["output"]["records"][0]["status"] == decision
 
 

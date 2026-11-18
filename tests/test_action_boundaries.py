@@ -9,6 +9,8 @@ import subprocess
 
 import pytest
 
+from conclave.tools import processes
+
 from conclave.integrations.transport import IntegrationError, Transport
 
 
@@ -213,7 +215,7 @@ def test_a_local_git_command_that_fails_on_its_own_did_nothing(monkeypatch, tmp_
     from conclave.actions import classify
     from conclave.tools.changes import Changes
 
-    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", "nothing to commit"))
+    monkeypatch.setattr(processes, "run_command", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", "nothing to commit"))
     with pytest.raises(RuntimeError, match="nothing to commit") as error:
         asyncio.run(Changes(tmp_path).git_commit("Fix"))
     assert classify(error.value) == "failed", "a commit is atomic: a refused commit made none"
@@ -228,7 +230,7 @@ def test_a_remote_command_that_fails_is_left_to_its_check(monkeypatch, tmp_path)
             return subprocess.CompletedProcess(command, 128, "", "fatal: the remote end hung up unexpectedly")
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", push_fails)
+    monkeypatch.setattr(processes, "run_command", push_fails)
     with pytest.raises(RuntimeError, match="hung up") as error:
         asyncio.run(Changes(tmp_path).push_branch("fix/issue-7"))
     assert classify(error.value) == "uncertain", "the remote may have taken the push before hanging up"
@@ -241,7 +243,7 @@ def test_a_timed_out_command_is_unknown(monkeypatch, tmp_path):
     def slow(command, **kwargs):
         raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
 
-    monkeypatch.setattr(subprocess, "run", slow)
+    monkeypatch.setattr(processes, "run_command", slow)
     with pytest.raises(subprocess.TimeoutExpired) as error:
         asyncio.run(Changes(tmp_path).merge_pull_request(12))
     assert classify(error.value) == "uncertain"

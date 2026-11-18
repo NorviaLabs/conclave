@@ -98,6 +98,7 @@ def test_the_stream_wraps_the_run(runtime):
     ] == [
         "RunStarted",
         "AgentStarted",
+        "ModelCalled",
         "AgentStep",
         "AgentFinished",
         "RunFinished",

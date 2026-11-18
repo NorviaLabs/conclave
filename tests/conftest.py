@@ -48,6 +48,15 @@ def no_connection(request, timeout=None):
     raise OSError("No test reaches the network")
 
 
+def pytest_configure(config):
+    """A `-k` selection runs a slice of the suite, so it cannot meet the
+    whole-suite coverage gate; the gate applies to the full run only."""
+
+    coverage = config.pluginmanager.getplugin("_cov")
+    if config.getoption("keyword", default="") and coverage is not None:
+        coverage.options.cov_fail_under = 0
+
+
 @pytest.fixture(autouse=True)
 def no_installed_backend(monkeypatch):
     """No test depends on the backends this machine happens to have.
@@ -333,3 +342,15 @@ def runtime(tools):
         )
 
     return build
+
+
+def share(api, application_id, *names, role="editor"):
+    """Give other people a role on an application someone created.
+
+    Applications are their creator's from the start (see test_application_roles):
+    a test about several people working on one application names them, as a
+    team would.
+    """
+    owner = next(item["person"] for item in api.workspace.access(application_id) if item["role"] == "owner")
+    for name in names:
+        api.workspace.grant(application_id, name, role, by=owner)

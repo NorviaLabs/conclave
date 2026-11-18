@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from conclave.tools import processes
+
 from conclave import Capability, ToolRegistry
 from conclave.tools.changes import (
     CHANGE_TOOLS,
@@ -39,7 +41,7 @@ def test_run_tests_reports_the_exit_status_and_clamps_its_timeout(monkeypatch, t
         seen.update(kwargs, command=command)
         return subprocess.CompletedProcess(command, 1, "FAILED test_x", "boom")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(processes, "run_command", fake_run)
     assert asyncio.run(changes.run_tests("pytest -q tests/test_x.py")) == "exit 1\nFAILED test_x\nboom"
     assert seen["command"] == ["pytest", "-q", "tests/test_x.py"]
     assert seen["cwd"] == tmp_path and seen["timeout"] == 600
@@ -59,7 +61,7 @@ def test_commits_pushes_pull_requests_and_merges_use_declared_commands(monkeypat
         missing = 1 if command[1:3] == ["rev-parse", "--verify"] else 0
         return subprocess.CompletedProcess(command, missing, "ok", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(processes, "run_command", fake_run)
 
     async def exercise():
         assert await changes.git_commit("Fix the parser", paths="src/app.py") == "ok"
@@ -97,14 +99,14 @@ def test_a_failed_command_reports_its_own_message(monkeypatch, tmp_path):
     def refusing(command, **kwargs):
         return subprocess.CompletedProcess(command, 128, "", "fatal: not a git repository")
 
-    monkeypatch.setattr(subprocess, "run", refusing)
+    monkeypatch.setattr(processes, "run_command", refusing)
     with pytest.raises(RuntimeError, match="fatal: not a git repository"):
         asyncio.run(changes.git_commit("Fix the parser"))
 
     def silent(command, **kwargs):
         return subprocess.CompletedProcess(command, 1, "", "")
 
-    monkeypatch.setattr(subprocess, "run", silent)
+    monkeypatch.setattr(processes, "run_command", silent)
     with pytest.raises(RuntimeError, match="Command failed: git add --all"):
         asyncio.run(changes.git_commit("Fix the parser"))
 

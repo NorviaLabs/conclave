@@ -10,11 +10,16 @@ import signal
 from typing import NamedTuple
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+import logging
+
+LOG = logging.getLogger(__name__)
 
 from .application.catalogue import configured_data, starter_definitions
 from .application.definition import validate_definition
 from .application.service import configured_host, setting, request_body_limit
 from .application.workspace import Workspace, Conflict
+from .application.output_files import FileChanged, FileDownload
+from .application.access import RoleRefused, refusal, role_allows
 from .application.resources import load_resources
 
 
@@ -137,6 +142,8 @@ def reject_nonfinite(value):
 class ApplicationAPI:
     def __init__(self, host, workspace, *, defaults=None, catalogue=None):
         self.host, self.workspace = host, workspace
+        # Runs are their applications': the host reads roles from here.
+        host.application_access = workspace
         self.defaults = defaults if defaults is not None else configured_data("defaults")
         self.catalogue = catalogue if catalogue is not None else configured_data("catalogue")
         self.proposal_lock = asyncio.Lock()
@@ -257,6 +264,12 @@ class ApplicationAPI:
             return 409, {"error": str(error), **({"actions": error.actions} if hasattr(error, "actions") else {})}
         except KeyError:
             return 404, {"error": "Resource not found"}
+        except RoleRefused as error:
+            # A person with a role on the application, but not one that allows this.
+            return 403, {"error": str(error)}
+        except FileChanged as error:
+            # A stored file that is gone or no longer what was stored is not sent.
+            return 410, {"error": str(error)}
         except ValueError as error:
             return 400, {"error": str(error)}
         except (TypeError, AttributeError):
@@ -275,6 +288,9 @@ class ApplicationAPI:
         if self.host.schedules is None:
             self.host.schedules = ScheduleService(self.host, self.workspace, **options)
             self.host.schedules.start()
+            # Runs a backend stopped are tried again when their time comes,
+            # including the ones a previous host recorded and did not get to.
+            self.host.rearm_retries()
             # A serving host also sends any "waiting for you" message that was
             # due when the last host stopped and never attempted.
             self.host.spawn(self.host.notifier.deliver_all())
@@ -333,6 +349,275 @@ class ApplicationAPI:
                           "time_zone": schedule["time_zone"]})
         return {"times": times}
 
+    # How many runs started by events may be going at once, per application.
+    event_run_limit = 10
+    EVENT_BODY_LIMIT = 100_000
+    # How long an address's lookup is kept to refuse unsigned requests cheaply.
+    EVENT_CACHE_SECONDS = 30.0
+
+    def _event_lookup(self, endpoint, *, fresh=False):
+        """An address's application, owner and secret, and the saved application,
+        or None. Kept briefly, so a flood of unsigned requests costs one lookup;
+        `fresh` reads the stores again (and keeps that)."""
+        import time as clock_module
+        cache = self.__dict__.setdefault("_event_cache", {})
+        entry = cache.get(endpoint)
+        if not fresh and entry is not None and entry[0] > clock_module.monotonic():
+            return entry[1]
+        found = None
+        address = self.host.repository.events.resolve(endpoint)
+        if address is not None:
+            try:
+                found = (address, self.workspace.get(address["application_id"]))
+            except KeyError:
+                found = None
+        if len(cache) > 1000:
+            cache.clear()
+        cache[endpoint] = (clock_module.monotonic() + self.EVENT_CACHE_SECONDS, found)
+        return found
+
+    def _forget_event_address(self, application_id):
+        """Drop what this process keeps about an application's address."""
+        cache = self.__dict__.get("_event_cache", {})
+        for endpoint, (_, found) in list(cache.items()):
+            if found is None or found[0]["application_id"] == application_id:
+                cache.pop(endpoint, None)
+
+    async def receive_event(self, endpoint, headers, body, *, clock=None):
+        """One signed event for an application's incoming address: one run, or why not.
+
+        Answers 201 with the run it started, 200 with the first run when the same
+        event came before, 404 for no such address, 401 when the signature does
+        not hold, 413 for a body over 100 KB, and 400/403/429 with the reason an
+        event was refused. Only events signed by the secret are logged.
+        """
+        import hashlib
+        import time as clock_module
+        from .application.hooks import SignatureRefused, check_signature
+        from .application.principal import Principal
+        from datetime import datetime, timezone
+
+        events = self.host.repository.events
+        headers = {str(key).lower(): value for key, value in (headers or {}).items()}
+
+        def usable(found):
+            return found is not None and found[1]["definition"].get("start_mode") == "event" and "event" in found[1]["definition"]
+
+        def signed_by(found):
+            try:
+                check_signature(found[0]["secret"], headers, body, clock=clock or clock_module.time)
+                return True
+            except SignatureRefused:
+                return False
+
+        # The kept lookup only refuses: a request that fails it is answered at
+        # once. One that passes is checked again against the address and the
+        # application as they are now, so a rotated-out secret or a changed
+        # owner is never acted on, whichever process changed it.
+        found = self._event_lookup(endpoint)
+        if not usable(found):
+            return 404, {"error": "No event address here"}
+        if len(body) > self.EVENT_BODY_LIMIT:
+            return 413, {"error": f"An event body is at most {self.EVENT_BODY_LIMIT} bytes"}
+        if not signed_by(found):
+            return 401, {"error": "The event is not signed with this address's secret"}
+        found = self._event_lookup(endpoint, fresh=True)
+        if not usable(found):
+            return 404, {"error": "No event address here"}
+        if not signed_by(found):
+            return 401, {"error": "The event is not signed with this address's secret"}
+        address, saved = found
+        application, definition, owner = address["application_id"], saved["definition"], address["owner"]
+        try:
+            payload = json.loads(body or b"{}")
+        except ValueError:
+            payload = None
+        header_id, body_id = headers.get("x-conclave-event-id"), payload.get("event_id") if isinstance(payload, dict) else None
+        key = (header_id if isinstance(header_id, str) and 1 <= len(header_id.strip()) <= 200 else
+               body_id if isinstance(body_id, str) and 1 <= len(body_id.strip()) <= 200 else
+               "sha256:" + hashlib.sha256(body).hexdigest()).strip()
+
+        # The signed request itself is claimed too: the signature covers the
+        # timestamp and body but not the identifier header, so a copy of one
+        # request, resent with another identifier, is still the same request.
+        replay = "signature:" + str(headers.get("x-conclave-signature", "")).strip().lower()
+
+        def refuse(status, reason):
+            events.log(application, key, "refused", reason=reason)
+            return status, {"error": reason, "event_id": key}
+
+        if not isinstance(payload, dict):
+            return refuse(400, "An event is one JSON object")
+        with self.host.repository._connect() as connection:
+            first = events.claimed(connection, application, key) or events.claimed(connection, application, replay)
+            if first is not None:
+                events.log(application, key, "duplicate", run_id=first, connection=connection)
+        if first is not None:
+            return 200, {"duplicate": True, "run_id": first, "event_id": key}
+        admits = getattr(self.host.schedules, "admits", None)
+        if admits is not None and not admits(owner):
+            return refuse(403, "Whoever turned events on can no longer use this workspace; someone must turn them on again")
+        # The run acts as whoever turned events on: they must still be able to run it.
+        owner_role, _ = self.workspace.role_of(application, owner)
+        if not role_allows(owner_role, "run"):
+            return refuse(403, "Whoever turned events on no longer has a role that can run this application; "
+                               "someone with owner access must turn them on again")
+        if self.host.provider is None and self.host.backends is None:
+            return refuse(400, "No model backend is available on this host")
+        # The event's own fields, for the request fields this application declares.
+        fields = definition.get("inputs", [])
+        for field in fields:
+            value = payload.get(field["id"])
+            if field["required"] and (value is None or isinstance(value, str) and not value.strip()):
+                return refuse(400, f"Missing required field “{field['id']}”")
+        inputs = {field["id"]: payload[field["id"]] for field in fields if payload.get(field["id"]) not in (None, "")}
+        task = definition["event"]["task"]
+        if definition["event"].get("allow_task_override") and isinstance(payload.get("task"), str) and payload["task"].strip():
+            task = payload["task"]
+        received = datetime.now(timezone.utc).isoformat()
+        try:
+            prepared = await self.host.prepare_run({"version": 1, "application_id": application, "revision": saved["revision"],
+                                                   "definition": definition, "task": task, "inputs": inputs,
+                                                   "trigger": {"kind": "event", "event_id": key, "received_at": received}},
+                                                  Principal(owner, self.host.principal.tenant))
+        except ValueError as error:
+            return refuse(400, str(error))
+        with self.host.repository._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            # Asked again inside the transaction that creates the run: two
+            # copies of one event arriving together start one run.
+            first = events.claimed(connection, application, key, prune=True) or events.claimed(connection, application, replay)
+            if first is not None:
+                events.log(application, key, "duplicate", run_id=first, connection=connection)
+            else:
+                going = self.host.repository.active_event_runs(connection, application)
+                if going >= self.event_run_limit:
+                    run_id = None
+                else:
+                    run_id = self.host.repository._insert_run(connection, prepared, actor=owner)
+                    events.claim(connection, application, key, run_id, received)
+                    if replay != key:
+                        events.claim(connection, application, replay, run_id, received)
+                    events.log(application, key, "started", run_id=run_id, connection=connection)
+        if first is not None:
+            return 200, {"duplicate": True, "run_id": first, "event_id": key}
+        if run_id is None:
+            return refuse(429, f"{self.event_run_limit} runs started by events are still going")
+        connections = getattr(self.host, "connections", None)
+        if connections is not None:
+            connections.pin_run(run_id, self.host.principal.tenant, owner)
+        try:
+            # Nobody watches a run an event started: writes not authorized up front are refused.
+            await self.host._schedule(run_id, approvals="refuse")
+        except Exception as error:
+            self.host.repository._append(run_id, {"type": "ApplicationFinished", "status": "failed",
+                                                  "reason": "The run this event started could not start on this host"})
+            LOG.warning("Event run %s could not start: %s", run_id, error)
+        return 201, {"run_id": run_id, "event_id": key}
+
+    def event_command(self, method, application, value, actor):
+        """An application's incoming address: what it is and what it received, or
+        turning it on and rotating its secret (the secret is answered this once)."""
+        saved = self.workspace.get(application)
+        events = self.host.repository.events
+        endpoint = events.endpoint(application)
+        enabled = endpoint is not None and saved["definition"].get("start_mode") == "event"
+        if method == "GET":
+            shown = {"enabled": enabled, "recent": events.recent(application)}
+            if endpoint is not None:
+                shown.update(address=f"/api/events/{endpoint['endpoint_id']}", owner=endpoint["owner"],
+                             created_at=endpoint["created_at"], rotated_at=endpoint["rotated_at"])
+            return 200, shown
+        if method != "POST":
+            return 405, {"error": "Method not allowed"}
+        self.fields(value, {"action"})
+        if value["action"] not in {"create", "rotate"}:
+            raise ValueError("Choose create or rotate")
+        if saved["definition"].get("start_mode") != "event":
+            raise ValueError("Save this application with the start method 'When an event arrives' before turning events on")
+        made = events.create(application, actor.name) if value["action"] == "create" else events.rotate(application, actor.name)
+        self._forget_event_address(application)
+        return 200, {"address": f"/api/events/{made['endpoint_id']}", "secret": made["secret"], "owner": made["owner"],
+                     "enabled": True}
+
+    @staticmethod
+    def _valid_definition(definition):
+        from .application.definition import validate_definition
+        try:
+            validate_definition(definition)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
+        return True
+
+    def versions_command(self, method, parts, query, value, principal, actor):
+        """An application's kept versions: the list, one version, two compared, a restore."""
+        from .application.versions import compare_definitions, summarize_changes
+        application = parts[2]
+        number = lambda text: int(text) if isinstance(text, str) and text.isdigit() and len(text) <= 9 else None
+        if len(parts) == 4 and method == "GET":
+            current = self.workspace.get(application)["revision"]
+            used = self.host.repository.versions_used(application)
+            # Versions saved before history was kept come back from the runs that
+            # stored them, when what a run stored is a definition this host accepts.
+            # Only versions not kept yet are considered: once history is complete
+            # this does no redaction or validation at all.
+            kept = self.workspace.kept_numbers(application)
+            missing = {n: entry for n, entry in used.items() if isinstance(n, int) and n not in kept}
+            if missing:
+                self.workspace.recover(application, {n: (entry["definition"], entry["run_id"]) for n, entry in missing.items()
+                                                     if self._valid_definition(entry["definition"])})
+            listed = self.workspace.versions(application)
+            # Summaries are kept with their versions; only one kept before they
+            # were (or recovered since) is said now, once, and kept.
+            for index, item in enumerate(listed):
+                if item["summary"] is None:
+                    older = listed[index + 1]["version"] if index + 1 < len(listed) else None
+                    after = self.workspace.version(application, item["version"])["definition"]
+                    if older is not None:
+                        item["summary"] = summarize_changes(self.workspace.version(application, older)["definition"], after)
+                    else:
+                        item["summary"] = "First saved version" if item["version"] == 1 else "Earlier versions were not kept"
+                    self.workspace.keep_summary(application, item["version"], item["summary"])
+            versions = []
+            for index, item in enumerate(listed):
+                versions.append({**item, "saved_at": item["saved_at"] or None, "current": item["version"] == current,
+                                 # Who started the run a version was recovered from: the only
+                                 # account of where that content came from.
+                                 "recovered_started_by": self.host.repository.actor(item["recovered_from_run"]) if item["recovered_from_run"] else None,
+                                 "runs": used.get(item["version"], {}).get("runs", 0)})
+            return 200, {"application_id": application, "current": current, "versions": versions}
+        if len(parts) == 5 and parts[4] == "compare" and method == "GET":
+            pair = [query.get(key, []) for key in ("from", "to")]
+            if any(len(values) != 1 for values in pair) or any(number(values[0]) is None for values in pair):
+                raise ValueError("Compare two saved versions: from and to, each a version number")
+            first, second = (number(values[0]) for values in pair)
+            before, after = self.workspace.version(application, first), self.workspace.version(application, second)
+            return 200, {"from": first, "to": second, **compare_definitions(before["definition"], after["definition"])}
+        if len(parts) == 5 and method == "GET":
+            if number(parts[4]) is None:
+                raise KeyError(parts[4])
+            return 200, self.workspace.version(application, number(parts[4]))
+        if len(parts) == 6 and parts[5] == "restore" and method == "POST":
+            if number(parts[4]) is None:
+                raise KeyError(parts[4])
+            self.fields(value, {"revision"} | ({"recovered"} if isinstance(value, dict) and "recovered" in value else set()))
+            if "recovered" in value and type(value["recovered"]) is not bool:
+                raise ValueError("recovered is true or false")
+            chosen = self.workspace.version(application, number(parts[4]))
+            if chosen["recovered_from_run"] and value.get("recovered") is not True:
+                # Its content came from a run, not a save: whoever restores it says so.
+                raise ValueError(f"Version {chosen['version']} was recovered from a run; Conclave cannot confirm it was ever saved here. "
+                                 "Confirm that you want to restore it anyway")
+            current = self.workspace.get(application)
+            if self.workspace.content_of(chosen["definition"]) == self.workspace.content_of(current["definition"]):
+                raise ValueError(f"This application already does what version {chosen['version']} does")
+            # A restore is a save, with every check a save has; history is added to, never rewritten.
+            self.check_notifications(chosen["definition"], current["definition"], principal)
+            restored = self.workspace.save(chosen["definition"], identifier=application, revision=value["revision"],
+                                           by=actor.name, restored_from=chosen["version"])
+            return 200, {**self.saved(restored, principal, previous=current["definition"]), "restored_from": chosen["version"]}
+        return 404, {"error": "Endpoint not found"}
+
     def saved(self, application, principal, *, previous=None):
         """A saved application's schedule, brought up to date at once.
 
@@ -351,6 +636,11 @@ class ApplicationAPI:
             changed = previous is None or without_layout(previous) != without_layout(definition)
             schedules.reconcile(application["id"], block, owner=(principal or self.host.principal).name,
                                 now=datetime.now(timezone.utc), take_over=changed)
+        # An event address follows the same rule: whoever saves a change to what
+        # runs becomes who its runs act as.
+        if definition.get("start_mode") == "event" and (previous is None or without_layout(previous) != without_layout(definition)):
+            self.host.repository.events.take_over(application["id"], (principal or self.host.principal).name, "changed what runs")
+        self._forget_event_address(application["id"])
         if self.host.schedules is not None:
             self.host.schedules.wake()
         # Whose account sends "this run is waiting for you": the same rule as a
@@ -444,6 +734,66 @@ class ApplicationAPI:
             body["payload"] = message.arguments["payload"]
         return body
 
+    def require(self, application_id, actor, permission):
+        """The caller's role on an application, if it allows `permission`.
+
+        No role at all is answered as if the application did not exist (404);
+        a role that does not allow this says so (403).
+        """
+        role, open_ = self.workspace.role_of(application_id, actor.name)
+        if role is None:
+            raise KeyError(application_id)
+        if not role_allows(role, permission):
+            raise RoleRefused(refusal(role, permission))
+        return role, open_
+
+    @staticmethod
+    def route_permission(method, parts, query, value, actor):
+        """(application, permission) an application route needs, or None for a route that is not one."""
+        if parts[1:2] == ["applications"] and len(parts) >= 3:
+            application, section = parts[2], (parts[3] if len(parts) > 3 else None)
+            if section is None:
+                return application, {"GET": "view", "PUT": "edit", "DELETE": "own"}.get(method, "view")
+            if section in {"versions", "schedule"}:
+                return application, "view" if method == "GET" else "edit"
+            if section == "event":
+                return application, "edit" if method == "GET" else "own"
+            if section in {"fixtures", "tests"}:
+                return application, "edit"
+            if section == "access":
+                # Anyone may take themselves off an application; only an owner changes others.
+                if method == "DELETE" and len(parts) == 5 and parts[4].casefold() == actor.name.casefold():
+                    return application, "view"
+                return application, "view" if method == "GET" else "own"
+            return application, "view"
+        if parts[1:] == ["notifications", "preview"] and isinstance(value, dict) and isinstance(value.get("application_id"), str):
+            # A preview of an application not saved yet reads nothing of anyone's.
+            return value["application_id"], "edit", "if saved"
+        if parts[1:] == ["runs"]:
+            if method == "GET":
+                # Runs of an application no longer saved are each checked on their own.
+                identifiers = query.get("application_id", [])
+                return (identifiers[0], "view", "if saved") if len(identifiers) == 1 else None
+            if method == "POST" and isinstance(value, dict) and isinstance(value.get("application_id"), str):
+                return value["application_id"], "run"
+        return None
+
+    def access_command(self, method, parts, value, actor):
+        """Who may do what with one application: read by its people, changed by its owners."""
+        application = parts[2]
+        if method == "GET" and len(parts) == 4:
+            role, open_ = self.workspace.role_of(application, actor.name)
+            return 200, {"open": open_, "you": role, "people": self.workspace.access(application),
+                         "log": self.workspace.access_log(application)}
+        if method == "POST" and len(parts) == 4:
+            self.fields(value, {"person", "role"})
+            self.workspace.grant(application, value["person"], value["role"], by=actor.name)
+            return 200, {"people": self.workspace.access(application)}
+        if method == "DELETE" and len(parts) == 5:
+            self.workspace.revoke(application, parts[4], by=actor.name)
+            return 200, {"people": self.workspace.access(application)}
+        return 404, {"error": "Endpoint not found"}
+
     @staticmethod
     def fields(value, required):
         if not isinstance(value, dict) or set(value) != set(required):
@@ -459,6 +809,12 @@ class ApplicationAPI:
         actor = principal or self.host.principal
         if actor.tenant != self.host.principal.tenant:
             return 403, {'error': 'Tenant is not authorized'}
+        # Every route about one application checks the caller's role on it first.
+        needed = self.route_permission(method, parts, query, value, actor)
+        if needed is not None and not (needed[2:] == ("if saved",) and not self.workspace.exists(needed[0])):
+            self.require(needed[0], actor, needed[1])
+        if len(parts) >= 4 and parts[1] == "applications" and parts[3] == "access":
+            return self.access_command(method, parts, value, actor)
         if len(parts) >= 4 and parts[1] == 'applications' and parts[3] in {'fixtures', 'tests'}:
             return await self._step_testing(method, parts, query, value, actor)
         if parts[1:2] == ['integrations'] or parts[1:2] == ['connections'] or parts[1:2] == ['hooks']:
@@ -483,6 +839,10 @@ class ApplicationAPI:
                     saved = self.workspace.get(application)
                 except Exception:
                     return 409, {'error': 'The hook connection names an application that is not saved on this host'}
+                # The run acts as the connection's owner: they must still be able to run it.
+                role, _ = self.workspace.role_of(application, record['owner'])
+                if not role_allows(role, "run"):
+                    return 403, {'error': "The hook connection's owner can no longer run this application"}
                 # A delivery supplies only the inputs the application declared,
                 # as bounded text; anything else in the payload is not state.
                 payload = value['payload'] if isinstance(value['payload'], dict) else {}
@@ -602,11 +962,14 @@ class ApplicationAPI:
                 return 200, self.workspace.save_catalogue(value["catalogue"], value["revision"], self.catalogue)
         if path == "/api/applications":
             if method == "GET":
-                return 200, {"applications": self.workspace.applications()}
+                # Only what this person may open, each with their role on it.
+                roles = self.workspace.roles_of(actor.name)
+                return 200, {"applications": [{**item, "role": roles[item["id"]][0], "open": roles[item["id"]][1]}
+                                              for item in self.workspace.applications() if item["id"] in roles]}
             if method == "POST":
                 self.fields(value, {"definition"})
                 self.check_notifications(value["definition"], None, principal)
-                return 201, self.saved(self.workspace.save(value["definition"]), principal)
+                return 201, self.saved(self.workspace.save(value["definition"], by=actor.name), principal)
         if path == "/api/schedules/preview" and method == "POST":
             return 200, self.preview_schedule(value)
         if path == "/api/notifications/preview" and method == "POST":
@@ -615,6 +978,10 @@ class ApplicationAPI:
             return 200, self.notification_status(parts[2], principal)
         if len(parts) == 4 and parts[1] == "applications" and parts[3] == "schedule":
             return await self.schedule_command(method, parts[2], value, principal)
+        if len(parts) == 4 and parts[1] == "applications" and parts[3] == "event":
+            return self.event_command(method, parts[2], value, actor)
+        if len(parts) >= 4 and parts[1] == "applications" and parts[3] == "versions":
+            return self.versions_command(method, parts, query, value, principal, actor)
         if len(parts) == 3 and parts[1] == "applications":
             if method == "GET":
                 return 200, self.workspace.get(parts[2])
@@ -622,11 +989,12 @@ class ApplicationAPI:
                 self.fields(value, {"definition", "revision"})
                 previous = self.workspace.get(parts[2])["definition"]
                 self.check_notifications(value["definition"], previous, principal)
-                return 200, self.saved(self.workspace.save(value["definition"], identifier=parts[2], revision=value["revision"]),
-                                       principal, previous=previous)
+                return 200, self.saved(self.workspace.save(value["definition"], identifier=parts[2], revision=value["revision"],
+                                                           by=actor.name), principal, previous=previous)
             if method == "DELETE":
                 self.fields(value, {"revision"})
                 self.workspace.delete(parts[2], value["revision"])
+                self._forget_event_address(parts[2])
                 self.host.repository.schedules.forget(parts[2])
                 self.host.repository.notification_owners.forget(parts[2])
                 return 204, None
@@ -673,8 +1041,16 @@ class ApplicationAPI:
                     raise Conflict("This application changed. Reload its saved version before starting.")
                 # The backend supplies the durable snapshot; callers cannot swap it.
                 return await self.host.handle("start", {**value, "definition": saved["definition"]}, principal=principal)
+        if path == "/api/runs/compare" and method == "GET":
+            # Before a run's own routes: "compare" is not a run.
+            chosen = {key: query.get(key, []) for key in ("a", "b", "order")}
+            if len(chosen["a"]) != 1 or len(chosen["b"]) != 1 or len(chosen["order"]) > 1 or set(query) - set(chosen):
+                raise ValueError("Choose two runs to compare: ?a=<run>&b=<run>")
+            value = {"a": chosen["a"][0], "b": chosen["b"][0], **({"order": chosen["order"][0]} if chosen["order"] else {})}
+            return await self.host.handle("compare", value, principal=principal)
         if len(parts) == 5 and parts[1] == "runs" and parts[3] == 'tool-approvals' and method == 'GET':
             # One pending approval in full: its preview is fetched once, not polled.
+            self.host.require_run(parts[2], principal, "run")
             await self.host.handle('get', {'run_id': parts[2]}, principal=principal)
             owner = (principal or self.host.principal).name
             return 200, self.host.tool_approvals.get(parts[2], parts[4], owner)
@@ -691,9 +1067,17 @@ class ApplicationAPI:
             if len(parts) == 5 and parts[4] == "check" and method == "POST":
                 self.fields(value, {"action_id"})
                 return await self.host.handle("check", {**value, "run_id": run_id}, principal=principal)
+        if len(parts) == 5 and parts[1] == "runs" and parts[3] == "files" and method == "GET":
+            # A stored output file, checked before it is sent.
+            return await self.host.handle("file", {"run_id": parts[2], "file_id": parts[4]}, principal=principal)
+        if len(parts) == 5 and parts[1] == "runs" and parts[3:] == ["retry", "cancel"] and method == "POST":
+            # "Don't retry": the run stays stopped and can still be continued.
+            self.fields(value, set())
+            return await self.host.handle("cancel_retry", {"run_id": parts[2]}, principal=principal)
         if len(parts) in {3, 4} and parts[1] == "runs":
             run_id = parts[2]
             if len(parts) == 4 and parts[3] == 'tool-approvals':
+                self.host.require_run(run_id, principal, "run")
                 await self.host.handle('get', {'run_id':run_id}, principal=principal)
                 owner = (principal or self.host.principal).name
                 if method == 'GET':
@@ -911,7 +1295,24 @@ async def start_server(api, port=8080, *, token=None, assets=None, app=None):
                 limit = request_body_limit()
                 if limit is not None and length > limit:
                     status, result = 413, {"error": f"Request exceeds host limit of {limit} bytes"}
-                elif headers.get("host") not in valid_hosts:
+                elif app is None and method == "POST" and urlsplit(target).path.startswith("/api/events/"):
+                    # An event's signature is its authentication: the sender is a
+                    # machine elsewhere (through a forwarded address), so the
+                    # local-address, origin and token checks are not asked of it.
+                    # Its size is refused before anything is read.
+                    if length > ApplicationAPI.EVENT_BODY_LIMIT:
+                        status, result = 413, {"error": f"An event body is at most {ApplicationAPI.EVENT_BODY_LIMIT} bytes"}
+                        content = None
+                    else:
+                        content = await reader.readexactly(length)
+                    if content is None:
+                        pass
+                    elif not headers.get("content-type", "").startswith("application/json"):
+                        status, result = 415, {"error": "Use a JSON request"}
+                    else:
+                        status, result = None, ("EVENT", target, content)
+                elif headers.get("host") not in valid_hosts and not (app is not None and method == "POST"
+                                                                     and urlsplit(target).path.startswith("/api/events/")):
                     status, result = 403, {"error": "Use the local Conclave address"}
                 elif app is not None:
                     # The adapter decides everything else, including which
@@ -930,7 +1331,11 @@ async def start_server(api, port=8080, *, token=None, assets=None, app=None):
                     status, result = None, (method, target, value)
             if status is None:
                 method, target, value = result
-                if app is not None:
+                if method == "EVENT":
+                    endpoint = urlsplit(target).path[len("/api/events/"):]
+                    status, result = (await api.receive_event(endpoint, headers, value) if endpoint and "/" not in endpoint
+                                      else (404, {"error": "No event address here"}))
+                elif app is not None:
                     page = None if urlsplit(target).path.startswith(("/api/", "/auth/")) else static_page(None, method, target, assets)
                     if page is not None:
                         status, result = page.status, page

@@ -13,6 +13,8 @@ from contextlib import closing
 
 import pytest
 
+from conclave.tools import processes
+
 from actions_support import Recorder, checker, registry, write_request
 from conclave.application.principal import Principal
 from conclave.application.runs import RunRepository
@@ -267,7 +269,7 @@ def test_a_pull_request_number_cannot_become_an_option(tmp_path, monkeypatch, nu
     from conclave.tools.changes import Changes, build_change_tools
 
     ran = []
-    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: ran.append(command) or subprocess.CompletedProcess(command, 0, "{}", ""))
+    monkeypatch.setattr(processes, "run_command", lambda command, **kwargs: ran.append(command) or subprocess.CompletedProcess(command, 0, "{}", ""))
     with pytest.raises(ValueError):
         asyncio.run(Changes(tmp_path).merge_pull_request(number))
     tools = {tool.name: tool for tool in build_change_tools(Changes(tmp_path))}

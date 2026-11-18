@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from .capture import redact
-from .definition import (_dependency_state, _execution_order, _validated_output,
+from .definition import (_dependency_state, _execution_order, _validated_output, condition_holds, condition_reason,
                          plan_connections, validate_definition, validate_request_inputs)
 
 
@@ -158,3 +158,20 @@ def compare(reference, output):
         old, new = {item['id']: item for item in reference}, {item['id']: item for item in output}
         return {'kind': 'records', 'equal': reference == output, 'changes': [{'id': key, 'reference': old.get(key), 'output': new.get(key)} for key in sorted(old.keys() | new.keys()) if old.get(key) != new.get(key)]}
     return {'kind': 'value', 'equal': reference == output, 'reference': reference, 'output': output}
+
+
+def condition_report(definition, step_id, patches):
+    """Whether the tested step's condition holds on the pinned inputs, or None without one.
+
+    A step test runs its step either way; this says what a real run would do.
+    """
+    step = next(item for item in definition['workflow'] if item['id'] == step_id)
+    condition = step.get('condition')
+    if condition is None:
+        return None
+    if condition['step'] not in patches:
+        return {'holds': False, 'reason': condition_reason(definition, condition, None, skipped=True)}
+    output = patches[condition['step']]
+    holds = condition_holds(condition, output)
+    return {'holds': holds, 'reason': '' if holds else condition_reason(definition, condition, output)}
+

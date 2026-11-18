@@ -97,11 +97,24 @@ provider logs, raw model replies and tool arguments are not exposed in run event
 | POST | `/api/schedules/preview` | `{schedule, definition?, after?}`; the next three times of a schedule being edited, `{times: [{at, local, time_zone}]}`, worked out by the host's rules; 400 with the reason when the schedule is invalid |
 | GET | `/api/runs?application_id={id}` | List recent runs for an application; each row has `trigger` (`{kind: "manual"}` or `{kind: "schedule", scheduled_for}`) |
 | POST | `/api/runs` | `{version:1, application_id, revision, task, inputs, resources?}`; execute the backend's saved snapshot |
-| GET | `/api/runs/{id}` | Persisted status, actual results, metrics, events and reviews |
+| GET | `/api/runs/{id}` | Persisted status, actual results, metrics, `usage` (per step and against limits; see "What a run used"), events and reviews |
+| GET | `/api/runs/{id}/files/{file}` | A file the run stored from a step's output (Markdown, CSV or JSON), as an attachment; `410` when it is missing or no longer what was stored (see "Stored output files") |
+| GET | `/api/runs/compare?a={id}&b={id}[&order=given]` | Two runs of one application compared step by step (see "Comparing two runs"); the earlier run is A unless `order=given` |
 | GET | `/api/runs/{id}/events?after={sequence}` | Poll ordered events after a cursor; returns `next_cursor` and status |
 | GET | `/api/runs/{id}/reviews` | List durable review requests and submitted contributions |
 | POST | `/api/runs/{id}/reviews` | `{review_id, output}`; validate and persist a human contribution |
 | POST | `/api/runs/{id}/resume` | `{}`; continue a waiting, paused, stopped or interrupted run. Uncertain actions are checked first; `409 {error, actions}` names any that still need a decision |
+| GET | `/api/applications/{id}/event` | Whether events start it: address, owner, the latest events received (never the secret) |
+| POST | `/api/applications/{id}/event` | `{action: "create"\|"rotate"}`; the incoming address and its secret, answered once |
+| POST | `/api/events/{endpoint}` | A signed event: one run, or the first run for a repeat (see "Runs started by an event") |
+| GET | `/api/applications/{id}/access` | Who may do what with it: `open`, your role (`you`), `people` and the latest changes (`log`) (see "People and roles") |
+| POST | `/api/applications/{id}/access` | `{person, role}`; add someone or change their role (owner). Limiting an open application starts with yourself as owner |
+| DELETE | `/api/applications/{id}/access/{person}` | `{}`; remove someone (owner), or yourself; the last owner stays |
+| GET | `/api/applications/{id}/versions` | Kept versions, newest first, with who saved each, a summary and run counts |
+| GET | `/api/applications/{id}/versions/{n}` | One kept version and its definition |
+| GET | `/api/applications/{id}/versions/compare?from=a&to=b` | What changed between two versions, by area, in words |
+| POST | `/api/applications/{id}/versions/{n}/restore` | `{revision}`; save version n's content as a new version. `409` when the application changed |
+| POST | `/api/runs/{id}/retry/cancel` | `{}`; stop a pending automatic retry ("Don't retry"). The run stays stopped and resumable; `400` when no retry is pending |
 | POST | `/api/runs/{id}/pause` | `{}`; ask a running run to stop **between steps** and keep a checkpoint |
 | POST | `/api/runs/{id}/cancel` | `{}`; stop active, waiting, paused, stopped or interrupted work. The run is `cancelled` and cannot be continued |
 | GET | `/api/runs/{id}/actions` | The run's external actions: state, check, who decided, and — only while they could be sent again — the arguments |
@@ -724,6 +737,208 @@ one call, which is why a slow backend can also overshoot a wall-clock budget
 between checks. A backend that failed, reported an error or returned an unreadable
 reply is a failure, and a failure is not continued.
 
+**Automatic retry.** Such a stop carries `transient` (`timeout`, `unreachable`
+or `rate_limited`) on its `ApplicationFinished`, and the host continues it by
+itself: it records `RetryScheduled {attempt, attempts, delay_seconds,
+retry_at, reason}` and resumes the run at `retry_at`, from its checkpoint. The
+delay starts at `CONCLAVE_RETRY_BASE_SECONDS` (30) and doubles up to
+`CONCLAVE_RETRY_MAX_SECONDS` (900), for at most `CONCLAVE_RETRY_ATTEMPTS` (5;
+`0` turns it off) tries in a row; a step that completes starts the count again.
+Nothing else is retried: a failure, a run-wide limit, a pause, or any action
+whose outcome is uncertain waits for a person. While a retry is pending the
+record's `retry` is `{at, attempt, attempts, reason}` (otherwise `null`).
+`POST /api/runs/<id>/resume` continues at once; `POST /api/runs/<id>/retry/cancel`
+("Don't retry") and a pause record `RetryCancelled {reason, by}` and leave the run
+stopped and resumable; `cancel` cancels both. A serving host arms again the
+retries a previous host recorded (`conclave serve`); `conclave run` and
+`conclave resume` wait through them. A retry acts as the run's owner only while
+the deployment still admits them (otherwise `RetryCancelled` with reason
+`owner_not_admitted`), and a scheduled run's retry still refuses writes nobody
+authorized up front.
+
+## Revision rounds
+
+A human step whose output is a `decision` collection may answer
+`changes_requested`. The run then does not stop: the steps the review revises
+run again with the reviewer's reason, and the review is asked again as a new
+round. The review revises the AI steps named in its optional `revises` (earlier
+AI steps it depends on), or else the AI steps that feed it directly. Every
+finished step that depends on a revised step runs again too, and the shared
+results are rebuilt without them. A revised step is given the reason and its own
+previous output, marked as data. The run records `RevisionRequested {stage,
+round, revises, reset, comment}` with a checkpoint, so a round survives a restart
+or a stop; the answered review becomes `revised` and the next one carries
+`revision: {round, max, history}` and its `round` in `GET /api/runs/<id>/reviews`.
+`max_revisions` on the human step (0–100, blank for no limit) bounds the rounds (a reason longer than 200,000 characters is kept shortened,
+marked as such, in the checkpoint; the review record keeps all of it);
+reruns are charged to the run budget like any step. `rejected` stops the run, as
+does `changes_requested` with no rounds left or no earlier AI step to revise.
+
+## Runs started by an event
+
+An application whose start method is `event` carries `event: {task,
+allow_task_override?}`: the task each event runs, and whether an event's own
+`task` field may replace it. `POST /api/applications/{id}/event {action:
+"create"}` gives the saved application its own incoming address
+(`/api/events/ev_…`) and signing secret (`ces_…`), answered **this once**;
+`{action: "rotate"}` replaces the secret at once, keeping the address. Whoever
+turns events on is the owner the runs act as; the secret is sealed with the host
+key when there is one. `GET /api/applications/{id}/event` answers whether events
+are on, the address, the owner and the latest 100 events received, never the
+secret. Changing the start method turns the address off (404) until it is set
+back.
+
+`POST /api/events/{endpoint}` is signed like a hook: `x-conclave-timestamp` and
+`x-conclave-signature` = hex HMAC-SHA256(secret, `timestamp.` + body), within
+300 seconds, constant-time. It needs no token or session, and on `conclave
+serve` it is the one path a forwarded address may reach. An event is a JSON
+object of at most 100 KB; its top-level fields matching the application's
+declared request fields become the run's inputs (a missing required one is
+refused: "Missing required field “title”"), and it starts one run with `trigger:
+{kind: "event", event_id, received_at}`, acting as the owner with writes not
+authorized up front refused. The event is identified by `x-conclave-event-id`,
+else its `event_id`, else `sha256:` of the body; the same event within 7 days
+starts nothing and answers `200 {duplicate: true, run_id}` with the first run
+(durable, across restarts and workers). Answers: `201 {run_id, event_id}`, `401`
+for a signature that does not hold (not logged), `404`, `413`, `400`/`403` with
+the reason an event was refused (it holds no claim, so a corrected resend
+starts a run), and `429` when 10 runs started by events are still going.
+
+Whoever turns events on, rotates the secret, or saves a change to what runs (not
+card positions) while events are on becomes the owner the runs act as, as with
+a schedule; each change of owner is in the log. A signed request is accepted
+once: its signature is claimed with the event, so a copy resent with another
+`x-conclave-event-id` answers as a duplicate. A body declared over 100 KB is
+refused before it is read. Each process keeps an address's lookup for 30
+seconds to answer unsigned requests cheaply, and checks a request that passes
+against the address as it is now, so a rotated-out secret or a former owner is
+never acted on; another process may refuse a new secret, or an address just
+switched on, for up to those 30 seconds. `allow_task_override` lets whoever holds
+the secret tell the team what to do with the owner's accounts; it is off unless
+chosen. Events reach the deployment's own tenant: a deployment serving several
+tenants from one address cannot route events to the others.
+
+## Application versions
+
+Every saved change to what an application does is kept as a version, with who
+saved it (the signed-in principal) and when; a save that only moves cards updates
+the current version's layout and makes none. `GET
+/api/applications/{id}/versions` lists them newest first: `version`,
+`saved_at`, `saved_by`, `restored_from`, `recovered_from_run`, `current`, how
+many `runs` used it, and a one-line `summary` of what changed from the previous
+kept version. `GET …/versions/{n}` is one version with its definition, and `GET
+…/versions/compare?from=a&to=b` is what changed between two, grouped by area
+(Application, Team, Steps, Connections, Results, Views, Request form, Limits and
+approvals, Review policy, Schedule, Notifications, Connectors, Requirements, Other
+settings): each change is `added`, `removed` or `changed`, in words, with
+`subject`, `was` and `now` where it has values; card positions are
+`layout_changed`; at most 200 changes are listed (`count`, `truncated`).
+
+`POST …/versions/{n}/restore {revision}` saves version n's content and layout as
+a new version (`restored_from: n`), through every check a save has; `409` when
+the application changed since `revision`, `400` when it already does what
+version n does. Runs keep the version they started with; a run's record names it
+(`version: {number, application_id, link}`). A store from before versions were
+kept starts from each application's current version, and older versions come
+back from the runs that stored them (`recovered_from_run`); nothing is made up
+for a version no run kept. Deleting an application deletes its versions.
+
+History is kept with secret-looking values redacted (`Bearer …`, `sk-…`,
+`api_key=…`, `password=…`, as step-test captures are), so a credential pasted
+into an application and then removed is not kept or restored; the application's
+current definition is as saved. A version is recovered only from a run whose
+stored definition this host accepts, and says who started that run
+(`recovered_started_by`); restoring one needs `{"revision": n, "recovered":
+true}`, because Conclave cannot confirm it was ever saved here. Studio names the
+changes a restore makes to what keeps a team in check (who may answer reviews,
+limits and autonomous execution, conditions, members' tools, connectors) before
+it is confirmed. Every saved change is kept, so history grows with each save;
+there is no retention limit.
+
+## Who may answer reviews
+
+A definition may carry `review_policy: {reviewers?, allow_starter?}`:
+`reviewers` lists 1–50 different people as they sign in, or whole domains
+(`@acme.com`), compared without case; leaving it out lets anyone who can open
+the run answer. `allow_starter` (default `false` once a policy exists) says
+whether the person who started the run — for a scheduled run, the schedule's
+owner — may answer its reviews. A human step may set `answers_required` (1–50;
+above 1 needs a decision output, and with only named reviewers no more than the
+people named). An application without a policy behaves as before.
+
+The host enforces this where every answer is recorded, whoever submits it:
+`POST /api/runs/<id>/reviews` answers `400` with the reason — "You started this
+run, so someone else must answer its review", "Only ana@acme.com or anyone at
+@ops.acme.com may answer this review", "You already answered this review; it
+needs a different person". Each answer is kept (`reviews[].answers`: reviewer,
+output, time; `reviews[].required`) and recorded as `HumanReviewSubmitted
+{answers, required, complete}`. A review completes when `answers_required`
+different people have answered, or at once on the first rejection; its output is
+every answer's records together. Any rejection stops the run, any request for
+changes starts a revision with every comment (each round needs its answers
+again), and otherwise the run goes on — for an application with a policy, by
+itself, as its owner, unless an action's outcome is still uncertain. A run's
+record carries `started_by` and, for the person asking, `can_answer: {allowed,
+reason, completes?}`. Where connections make runs their owner's, a person a
+waiting review is for may also list and open that run and answer it, and
+nothing else; once nothing waits for them, it is the owner's alone again — a
+stream they opened ends then too. An automatic continue acts only as an owner
+the deployment still admits (otherwise `ContinueWithheld {reason:
+"owner_not_admitted"}`), keeps a scheduled run's writes refused, and never turns
+a recorded answer into an error if it cannot start.
+
+**Limits.** These rules are as strong as the names the host records. Hosted,
+names come from a verified sign-in; on a local host they are whoever the
+operating system or `CONCLAVE_PRINCIPAL` says, so anyone at that computer can
+answer under another name (Studio says so beside a policy). There are no
+per-application edit permissions yet: whoever can save an application can change
+its policy for later runs. A run keeps the policy of the version it started
+with, and its review shows which one.
+
+## Conditional steps
+
+A step may carry `condition: {step, field, operator, value}`: it runs only when
+the output of `step` — one of the steps it depends on — satisfies it. `field` is
+`text` for a text output, or `status` or a declared record field; `operator` is
+`equals`, `not_equals`, `in`, `not_in` (with a list of 1–20 values) or
+`contains`; values are nonblank text of at most 200 characters, and an enum
+field's or status's values must be among its options. Comparisons ignore case
+and surrounding spaces, numbers and booleans compare by their text, and records
+hold when any one of them matches. No output, or no record with the field, does
+not hold.
+
+When a step's prerequisites are done, it is **skipped** instead of started if its
+condition does not hold, if the step its condition checks was skipped, or if
+every step leading to it was skipped: `StageSkipped {stage, agent, reason,
+condition?}`, with the reason in words ("Triage the issue: type was “feature”,
+not bug or regression"). A skipped step has no output, costs no budget and asks
+nobody; it counts as done, so a step joining a skipped branch with one that ran
+still runs, and the run completes. A skipped **human** step is the exception:
+nothing after a review that did not happen runs, even where another branch joins
+it, because a condition is decided by a model's output and must never route work
+around a person (Studio warns before a run when a condition decides a review). The checkpoint's `skipped` lists them, so a
+resumed run does not decide again; a revision that resets a step asks again.
+A step test runs the step it tests whatever its condition says, and reports
+`condition: {holds, reason}` for the pinned inputs.
+
+## Source checks
+
+Each record's `source_checks` lists, one per `source_refs` entry, whether the
+step that wrote it read what the source names: `found`, `not_found` or
+`not_checkable`. Evidence is the step's successful calls, including delegated
+members': files read with `read_file` or matched by `search_files`, pages
+fetched with `web_fetch`, issues and pull requests opened with `github_issue`
+or `github_pr` (by number and by their URL), commits shown with `git_show`, and
+the IDs of records the step was given. A link seen only in `web_search`
+results, or a file only in `list_files`, is not found. Free text, a person's
+citations, and anything unmatched by a step that also read through a tool whose
+reads cannot be interpreted (a connection, an extension) are not checkable.
+URLs compare without case in scheme and host, default port, fragment or trailing
+slash; paths compare without `./`, a leading `/`, `#…` or `:line` anchors.
+`source_checks` is reserved: an agent cannot supply it. Tool output is read
+while the step runs and is never recorded. Records from earlier runs carry no
+`source_checks`.
+
 A host taking over its store marks any run left `running` by a process that is
 gone as `interrupted`, with the reason recorded. Every external action it was
 still sending becomes **uncertain** (an `ActionUncertain` event names it): it may
@@ -743,6 +958,205 @@ is forgotten — which also means a run stopped on a limit needs that limit rais
 before resuming is useful. A `failed` or `cancelled` run is not resumable; an
 action it left uncertain is listed as an unknown outcome. Runs recorded before
 the action journal existed cannot be continued after an interruption.
+
+## What a run used
+
+`GET /api/runs/<id>` carries `usage`, added up from the run's own events:
+
+```json
+{"recorded": true,
+ "steps": {"research": {"model_calls": 7, "measured_calls": 7, "member_calls": 0, "input_tokens": 21400,
+                        "output_tokens": 3100, "tool_calls": 12, "tool_failures": 1, "tool_denied": 0,
+                        "seconds": 108.2, "runs": 1, "unmeasured": []}},
+ "total": {"model_calls": 14, "measured_calls": 12, "tokens": 41200, "tool_calls": 18, "seconds": 255.0, "cost_usd": null, "...": 0},
+ "unmeasured_backends": ["opencode"],
+ "limits": {"tokens": {"limit": 50000, "used": 41200, "warn_at": 40000}},
+ "warnings": [{"dimension": "tokens", "used": 41200, "threshold": 40000, "limit": 50000, "automatic": true, "stage": "draft"}]}
+```
+
+Each model call is recorded as a `ModelCalled` event — the member, backend,
+model, the tokens the backend measured (`null` where it measures none) and how
+long it took; never the prompt or the reply. An output-repair call carries
+`repair: true`. Every `StageFinished` carries the step's `usage`: its model
+calls (`member_calls` are those of members it asked), tokens, tool calls
+(`tool_failures` failed, `tool_denied` were refused) and working seconds. A step
+that ran more than once — a revision, a retry — adds up every time it ran, and
+`runs` says how many. Tokens are totalled only where measured: `measured_calls`
+below `model_calls` means the total is a lower bound, and `unmeasured` names the
+backends that measured nothing. Cost is `null` unless a backend reports it.
+
+A limit warns once per run, resumes included, with a `BudgetWarning` event
+(`dimension`, `used`, `threshold`, `limit`, `automatic`). The threshold is the
+application's own in `budget_warnings`, or 80% of the `run_budget` limit;
+`budget_warnings.<dimension>: null` turns that warning off, and a dimension with
+no limit does not warn. Runs recorded before steps carried their usage have
+`recorded: false`, no `steps`, and only the run-wide totals they kept. The
+runtime reports `features.run_usage`.
+
+Per-step counts come from the run's events. For an agent loop running behind a
+boundary (a sandbox), those are what the loop reported: bounded (names up to 200
+characters, at most 10¹² tokens and a day per call) but not re-measured. The
+limit bars, warnings and the limits themselves use the host's own accounting —
+the calls it answered and the tokens its backends measured — so a loop cannot
+misreport its way past a limit.
+
+## Comparing two runs
+
+`GET /api/runs/compare?a=<run>&b=<run>` compares two runs of the same
+application. The earlier run is A; `order=given` keeps the order asked for
+(Studio's Swap). Runs of different applications, or a run with itself, are
+`400`; a run that does not exist or cannot be opened is `404`. Only whoever may
+open both runs may compare them: the access a waiting review gives its reviewer
+is not enough.
+
+```json
+{"application_id": "release", "name": "Release notes",
+ "runs": {"a": {"id": "…", "created_at": "…", "status": "completed", "version": 5, "started_by": "ana@acme.com",
+                "trigger": {"kind": "schedule"}, "task": "…", "in_progress": false}, "b": {"...": "…"}},
+ "version": {"a": 5, "b": 7, "same": false, "changes": {"count": 3, "areas": ["…"]},
+             "link": "/api/applications/release/versions/compare?from=5&to=7"},
+ "request": {"task": {"a": "…", "b": "…"}, "inputs": [{"key": "milestone", "label": "Milestone", "a": "4.1", "b": "4.2"}]},
+ "steps": [{"id": "draft", "name": "Draft the notes", "names": {"a": "…", "b": "…"}, "agent": "Writer", "kind": "ai",
+            "presence": "both", "status": {"a": {"status": "completed", "reason": ""}, "b": {"status": "skipped", "reason": "…"}},
+            "output": {"kind": "text", "lines": [{"kind": "del", "text": "…"}, {"kind": "add", "text": "…"}], "more": 0},
+            "review": null, "usage": {"a": {"model_calls": 5, "tokens": 13700, "tool_calls": 6, "seconds": 100, "measured": true},
+                                      "b": {"...": 0}, "delta": {"tokens": 3000, "tokens_percent": 22, "...": 0}},
+            "tags": [{"kind": "output_changed", "text": "Output changed"}], "differs": true}],
+ "summary": {"steps": 7, "differing": 4, "token_change": 18, "text": "4 of 7 steps differ: …"}}
+```
+
+Steps are matched by id, in B's plan order, then steps only A's version had
+(`presence` `only_a`/`only_b`, status `not_in_version`). A step's `status` is
+`completed`, `skipped` (with the routing reason), `failed`, `stopped`,
+`running`, `waiting`, `not_reached` or `not_in_version`; a step a reviewer sent
+back counts from its last round. `output` compares each step's own final output:
+text as a line diff with two lines of context and counted gaps (`gap`), up to
+400 lines — when what differs between the shared start and end is too large to
+weigh line by line (over 250,000 line pairs for one step, or 1,000,000 for the
+whole comparison), it is one changed block and `coarse` is true; a line longer
+than 1,000 characters is cut short (`shortened`); records by id — `added`, `removed`, or `changed` with the fields that
+changed, with was/now values of at most 80 characters (never a body) — up to 200,
+with `more` counting the rest. Which run wrote a record and its source checks are
+not compared. A person's step has `review` for each run: decision, who answered,
+rounds, whether changes were asked for first (`first_comment`) and the last
+comment, shortened to 280 characters. `usage` comes from each run's recorded
+usage (`null` for a run recorded before it was kept). `differs` is true when the
+step ran in one version only, ended differently, produced a different output or
+its review went differently; using more or fewer tokens is tagged (`usage`,
+from a 10% change) but is not a difference in outcome. A run not yet finished is
+compared as it stands (`in_progress`). The comparison is built from the records
+the caller may read and never includes a checkpoint. The runtime reports
+`features.run_compare`.
+
+## Stored output files
+
+A step whose output is a **document**, **dataset** or **artifact** leaves a real
+file, made by the host from the step's validated output when it joins the
+results: a document as Markdown (`.md`, the text as written), a dataset as CSV
+(`.csv`: `id, title, body, status, sources`, then each field by its label) and an
+artifact as JSON (`.json`: the records, without `contributions`). An output's
+`file` setting chooses another format its kind allows — `{"format": "json"}` for
+a dataset — or `false` for none; other kinds have no file. The name comes from
+the output's label (lowercase letters, digits and hyphens, at most 60
+characters); the model names no file, path or link. In CSV, text that a
+spreadsheet would run as a formula (`= + - @`, tab, carriage return) is prefixed
+with `'`. A file over 10 MB is not stored: the run records `OutputFileSkipped`
+with the reason and continues; so does a file that cannot be written (a full
+disk, a folder it may not write), recorded as "The file could not be written"
+while the details go to the host's log.
+
+Files live beside the run database under `run-files/<run>/<id>` (the folder
+`0700`, each file `0600`), written to a temporary name and renamed, and are
+recorded in the same transaction as an `OutputFileStored` event (`stage`,
+`output`, `file_id`, `name`, `format`, `size`, `round`); a file that could not be
+recorded is removed. Each time a step runs — a revision round, a retry — it
+stores a new file; `round` counts them. A person's step stores its file too; a
+step test stores none.
+
+The run record lists `files`: `id`, `stage`, `output`, `round`, `name`,
+`format`, `media_type`, `size`, `created_at`, `preview` (the first 20 lines, at
+most 2,000 characters), `lines`, `link` and `available` (the file is there at the
+size stored). `GET /api/runs/<run>/files/<file>` is answered for whoever may open
+the run, only for that run's own files, and only after the file's size and
+SHA-256 match what was stored: `200` with `content-type`, `content-disposition:
+attachment; filename="…"`, `x-content-type-options: nosniff` and
+`cache-control: no-store`; `404` for a file the run does not have; `410` when it
+is missing or was changed. The hash is never published. Runs from before files
+were stored have none. The runtime reports `features.output_files`.
+
+Files are kept as long as their run is: there is no quota or clean-up across
+runs yet, so a deployment that keeps many runs should watch the size of
+`run-files/`. In CSV, header cells (field labels) are guarded against formulas
+like every other cell.
+
+## A step's time limit
+
+A plan step may set `time_limit_seconds`: a whole number from 10 to 86,400 (a
+day). A person's step may not — it waits for the person. The limit bounds the
+step's real working time: its model calls, tool calls, the members it asks and
+any output repair; time spent waiting for someone to approve one of its actions
+does not count. When the step has worked that long it is stopped where it is:
+the model call under way is abandoned, a tool call under way is cancelled, and
+a loop running elsewhere is closed. Nothing it had half-written is kept, and
+what it spent is recorded. A write that was being sent when it stopped becomes
+uncertain, as any interrupted write does, and is checked before the run goes on.
+
+The step's `StageFinished` has `status: "timed_out"`, the `reason` ("“Draft”
+ran past its time limit (5 m)"), `time_limit_seconds`, `elapsed_seconds` and its
+`usage`. Steps already running beside it finish; then the run ends `stopped`,
+with `timed_out: true`, the `stage`, `time_limit_seconds` and a checkpoint, and
+`resumable` is true. A timeout is not a backend fault, so no retry is scheduled;
+Continue (`POST /api/runs/<id>/resume`) runs the step again with its full limit,
+and so does each revision round. It is independent of the run-wide
+`wall_clock_seconds` limit. A command a step's tool was running (git, a test
+run) runs in a process group of its own, and the group is killed with the step,
+so nothing it started keeps working after it stopped. For an agent loop running
+behind a boundary, approvals are answered outside the step's own task, so the
+clock does not pause for them: a sandboxed step waiting long for a person may
+time out. A version comparison says "Step “Draft”: time limit
+was 5 m, now 10 m"; a run comparison gives the step status `timed_out`. The
+runtime reports `features.step_time_limits`.
+
+## People and roles
+
+Each application names its people, each with one role, and every application and
+run route checks it. Roles are ranked; each includes everything below it:
+
+| Role | May |
+| --- | --- |
+| `viewer` | open the application, its versions, schedule and notification status, its runs, their events, reviews, files and comparisons, and who has access |
+| `runner` | start, continue, pause and cancel runs, stop a pending retry, decide uncertain actions, answer tool approvals and reviews |
+| `editor` | save the plan, restore a version, change the schedule, see the event setup, preview its notifications, and use saved examples and step tests |
+| `owner` | add people and change roles, turn events on and rotate their secret, and delete it |
+
+Someone with no role on an application is answered as if it did not exist
+(`404`), for the application and for each of its runs; someone whose role is too
+low is told why (`403`, "Your role on this application is viewer; running it
+needs runner"). `GET /api/applications` lists only what the caller may open, each
+with their `role` and whether it is `open`. A review policy's named reviewers may
+answer the review they are named for without a role, as before.
+
+Whoever creates an application is its owner. An application that names nobody —
+saved before roles existed — is **open**: everyone in the tenant has owner
+access, and `GET …/access` says `open: true`. Limiting it starts with the caller
+as owner (`POST …/access` with their own name and `owner`); after that only its
+people see it. An application always has an owner: the last one cannot be
+removed or made anything less. Anyone may remove themselves. People are matched
+whatever the capitals of their sign-in name (`Ana@Acme.com` is `ana@acme.com`),
+so nobody is listed twice; an application names at most 200 people. Every change
+is kept (`log`: when, by whom, to whom, and what; the latest 500). Deleting an application removes its
+people; its runs stay with whoever started them (and runs that name nobody stay
+as open as they were).
+
+Work that acts as someone needs them to still be able to run the application: a
+schedule whose owner can no longer run it records why and waits for someone to
+turn it on; an event whose owner can no longer run it is refused and logged; a
+hook connection's owner must be able to run it; and a run is not continued after
+a review on behalf of an owner who can no longer run it (`ContinueWithheld`,
+`owner_lacks_role`). Tenant-wide routes — the member library, catalogue,
+proposals, validation, settings, connections, runtime and `/api/me` — are not
+about one application and are unchanged. The runtime reports
+`features.application_roles`.
 
 ## Telling someone a run waits
 

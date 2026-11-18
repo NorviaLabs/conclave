@@ -286,7 +286,10 @@ provider-specific inbound formats (Slack events, Jira webhooks and similar).
 Applications can run on a schedule (interval, daily or weekly times; see
 `REST_API.md`, "Scheduled applications"), but an inbound hook does not queue or
 retry its delivery, and hook replay protection is process-local, so a
-multi-worker deployment needs sticky routing or a shared delivery store.
+multi-worker deployment needs sticky routing or a shared delivery store. An
+application's own event address (`/api/events/…`, see `REST_API.md`, "Runs
+started by an event") is separate from connection hooks, and its dedup is
+durable.
 
 `tests/test_integration_workflows.py` runs six representative workflows (A–F)
 through the real runtime with a scripted provider and a recording HTTP

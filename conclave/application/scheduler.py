@@ -148,6 +148,16 @@ class ScheduleService:
             # Nobody owns it now: it waits until a current member turns it on.
             self.store.disown(application_id)
             return outcome
+        # It runs as its owner, who must still be able to run this application.
+        access = getattr(self.host, "application_access", None)
+        if access is not None:
+            from .access import role_allows
+            role, _ = access.role_of(application_id, row["owner"])
+            if not role_allows(role, "run"):
+                outcome = recorded("failed", {"reason": "The schedule's owner can no longer run this application. "
+                                                        "Someone with a role that can must turn it on again"})
+                self.store.disown(application_id)
+                return outcome
         if self.host.provider is None and self.host.backends is None:
             return recorded("failed", {"reason": "No model backend is available on this host"})
         definition = application["definition"]

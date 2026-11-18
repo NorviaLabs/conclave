@@ -180,6 +180,8 @@ export function historyRows(runs=[],slots=[]){
 export function triggerText(run,zone){
   const trigger=run?.trigger;
   if(!trigger)return '';
+  // An event says which one: the identifier its sender gave, or its body's hash.
+  if(trigger.kind==='event')return `Event · ${trigger.event_id}`;
   if(trigger.kind!=='schedule')return 'Started manually';
   return `Scheduled · ${localText(trigger.scheduled_for,zone)}`;
 }

@@ -10,6 +10,8 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import processes
+
 
 # =============================================================================
 # Reading text out of a repository
@@ -295,44 +297,38 @@ class LocalTools:
         self,
         command: list[str],
     ) -> str:
-        def run() -> str:
-            completed = subprocess.run(
-                command,
-                cwd=self.repo,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
+        # Beside the loop, and stopped with the step that asked for it.
+        completed = await processes.run_stoppable(
+            command,
+            cwd=self.repo,
+            timeout=60,
+        )
 
-            output = (
-                completed.stdout.strip()
-            )
+        output = (
+            completed.stdout.strip()
+        )
 
-            error = (
-                completed.stderr.strip()
-            )
+        error = (
+            completed.stderr.strip()
+        )
 
-            if (
-                completed.returncode
-                != 0
-            ):
-                raise RuntimeError(
-                    error
-                    or (
-                        "Command failed: "
-                        + " ".join(
-                            command
-                        )
+        if (
+            completed.returncode
+            != 0
+        ):
+            raise RuntimeError(
+                error
+                or (
+                    "Command failed: "
+                    + " ".join(
+                        command
                     )
                 )
-
-            return (
-                output
-                or "(no output)"
             )
 
-        return await asyncio.to_thread(
-            run
+        return (
+            output
+            or "(no output)"
         )
 
     async def git_status(

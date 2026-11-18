@@ -14,7 +14,7 @@ from conclave.application.principal import Principal
 from conclave.application.runs import RunRepository
 from conclave.application.service import LocalRunHost
 from conclave.application.workspace import Workspace
-from conftest import ScriptedProvider
+from conftest import ScriptedProvider, share
 
 
 def api_for(tmp_path, **host_options):
@@ -192,6 +192,7 @@ def test_only_the_owner_pauses_resumes_or_turns_on(tmp_path):
     async def exercise():
         api = api_for(tmp_path)
         application = await saved_schedule(api)
+        share(api, application, "Mallory")  # she may edit it, but the schedule is Ana's
         route = f"/api/applications/{application}/schedule"
         assert (await api.dispatch("POST", route, {"action": "pause"}, principal=Principal("Mallory")))[0] == 400
         status, body = await api.dispatch("POST", route, {"action": "pause"}, principal=Principal("Ana Ruiz"))

@@ -56,6 +56,7 @@ from .events import (
     BudgetExceeded,
     Delegation,
     Event,
+    ModelCalled,
     NoteRecorded,
     RunFinished,
     RunStarted,
@@ -136,6 +137,35 @@ class _Delegation:
     task: str = ""
     descendants: list[dict[str, Any]] = field(
         default_factory=list
+    )
+
+
+def model_called(
+    run_id: str,
+    spec: AgentSpec,
+    completion: Any,
+    seconds: float,
+) -> ModelCalled:
+    """What one model call cost, as the backend measured it: never its text."""
+
+    usage = completion.usage
+
+    def measured(value: Any) -> int | None:
+        # A backend's own count, when it is one; anything else is unmeasured
+        # rather than a reason to fail the call that already returned.
+        return value if type(value) is int and 0 <= value <= ModelCalled.MAX_TOKENS else None
+
+    def name(value: Any) -> str:
+        return str(value or "")[:ModelCalled.MAX_NAME]
+
+    return ModelCalled(
+        run_id=name(run_id),
+        agent=name(spec.name),
+        provider=name(spec.provider),
+        model=name(spec.model),
+        input_tokens=measured(getattr(usage, "input_tokens", None)),
+        output_tokens=measured(getattr(usage, "output_tokens", None)),
+        seconds=min(ModelCalled.MAX_SECONDS, max(0.0, float(seconds))),
     )
 
 
@@ -379,6 +409,8 @@ class ToolAgentRuntime:
                 private,
             )
 
+            called_at = time.monotonic()
+
             completion = (
                 await self.authority.complete(
                     ModelCall(
@@ -394,6 +426,13 @@ class ToolAgentRuntime:
             response = completion.text
 
             now = time.monotonic()
+
+            yield model_called(
+                run_id,
+                spec,
+                completion,
+                now - called_at,
+            )
 
             for event in await self.charge(
                 run_id,
@@ -862,6 +901,8 @@ class ToolAgentRuntime:
         whether an answer was actually produced.
         """
 
+        called_at = time.monotonic()
+
         completion = await self.authority.complete(
             ModelCall(
                 run_id=run_id,
@@ -880,8 +921,14 @@ class ToolAgentRuntime:
 
         now = time.monotonic()
 
-        charged = list(
-            await self.charge(
+        charged = [
+            model_called(
+                run_id,
+                spec,
+                completion,
+                now - called_at,
+            ),
+            *await self.charge(
                 run_id,
                 [
                     (
@@ -897,8 +944,8 @@ class ToolAgentRuntime:
                         now - last_check,
                     ),
                 ],
-            )
-        )
+            ),
+        ]
 
         try:
             action = extract_json(

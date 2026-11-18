@@ -9,7 +9,7 @@ from conclave.api import ApplicationAPI
 from conclave.application.workspace import Workspace
 from conclave.application.runs import RunRepository
 from conclave.application.service import LocalRunHost
-from conftest import ScriptedProvider
+from conftest import ScriptedProvider, share
 from test_api import make_api
 
 
@@ -159,6 +159,7 @@ def test_fixture_edits_and_scope_are_checked(tmp_path):
         # Another owner cannot see or run it.
         from conclave.application.principal import Principal
         other = Principal('someone-else', 'local')
+        share(api, application, other.name)  # on the application's team, but the fixture is not theirs
         assert (await api.dispatch('GET', f'/api/applications/{application}/fixtures', principal=other))[1]['fixtures'] == []
         assert (await api.dispatch('POST', f'/api/applications/{application}/tests', {'fixture_id': fixture['id'], 'scope': 'step'}, principal=other))[0] == 404
 

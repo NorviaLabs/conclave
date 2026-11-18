@@ -46,6 +46,9 @@ export function cutShortText(dimension) {
 export function runProgressText(d, run, {agentName = memberName} = {}) {
   const total = (run.definition || d).workflow.length, active = run.activeSteps || [];
   let text = `${(run.completedSteps || []).length} of ${total} steps complete`;
+  // Steps a condition skipped are done too, and said so.
+  const skippedCount = Object.keys(run.skippedSteps || {}).length;
+  if (skippedCount) text += ` · ${skippedCount} skipped`;
   if (run.mode === 'stopped' && run.budgetStop) return `${text} · stopped at the ${LIMIT_WORDS[run.budgetStop.dimension] || 'limit'}`;
   if (run.pausing && ['pending', 'running'].includes(run.mode))
     return `${text} · ${plural(run.pausing.running, 'step finishing', 'steps finishing')} · no new step will start`;
@@ -98,6 +101,23 @@ export function finishedBesideFailure(d, run) {
 }
 
 // A failed run: why, and which work beside the failure was kept.
+// A step stopped by its own time limit: what happened, and how to go on.
+// Durations are shown short and heard in words, as in time-limit-ui.js.
+const parts = seconds => { const whole = Math.max(0, Math.round(Number(seconds) || 0)); return [Math.floor(whole / 3600), Math.floor(whole % 3600 / 60), whole % 60]; };
+const words = seconds => { const [h, m, s] = parts(seconds); return [h ? plural(h, 'hour', 'hours') : '', m ? plural(m, 'minute', 'minutes') : '', s ? plural(s, 'second', 'seconds') : ''].filter(Boolean).join(' ') || '0 seconds'; };
+const short = seconds => { const [h, m, s] = parts(seconds); return [h ? `${h} h` : '', m ? `${m} m` : '', s ? `${s} s` : ''].filter(Boolean).join(' ') || '0 s'; };
+const clock = seconds => { const [h, m, s] = parts(seconds), pad = value => String(value).padStart(2, '0'); return h ? `${h} h ${pad(m)} m` : m ? `${m} m ${pad(s)} s` : `${s} s`; };
+const spoken = (shown, seconds) => `<span aria-hidden="true">${shown}</span><span class="sr-only">${words(seconds)}</span>`;
+export function timedOutNoteMarkup(d, run, {escape: e = identity} = {}) {
+  const [stageId, outcome] = Object.entries(run.timedOut || {})[0] || [];
+  if (!stageId) return '';
+  const done = (run.completedSteps || []).length;
+  const cont = run.resumable ? '<button class="button primary" data-action="resume-live">Continue</button>' : '';
+  return `<strong>“${e(stepName(d, stageId))}” ran past its time limit (${spoken(short(outcome.limit), outcome.limit)}).</strong>`
+    + `<p>It was stopped after ${spoken(clock(outcome.elapsed), outcome.elapsed)}, while it worked. ${plural(done, 'completed step remains', 'completed steps remain')} in this run.${run.resumable ? ' Continue runs it again with its full limit.' : ''}</p>`
+    + `<div class="note-actions">${cont}<button class="button" data-action="view-results">View saved work</button></div>`;
+}
+
 export function failedRunNoteMarkup(d, run, {escape: e = identity} = {}) {
   const last = run.events?.findLast(event => event.type === 'ApplicationFinished');
   const beside = finishedBesideFailure(d, run).map(id => `<em>${e(stepName(d, id))}</em>`);

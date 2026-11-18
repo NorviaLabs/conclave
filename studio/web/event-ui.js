@@ -1,0 +1,32 @@
+// Runs started by an event: the settings in Set up, the incoming address and its
+// secret (shown once), what arrived, and how a run's trigger reads. Everything is
+// read from the definition and the host's answers. Imports nothing.
+const plural=(count,one,many)=>`${count} ${count===1?one:many}`;
+const time=at=>{const date=at?new Date(at):null;return date&&!Number.isNaN(date.getTime())?date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';};
+
+// Set up: the task each event runs, whether an event may replace it, and the fields it fills.
+export function eventSettingsMarkup(d,{escape:e}){
+  const event=d.event||{task:''},fields=d.inputs||[];
+  return `<div class="event-settings"><div class="field"><label for="event-task">Task for each event</label><textarea id="event-task" data-path="event.task" rows="2" maxlength="20000">${e(event.task)}</textarea></div><label class="event-override"><input type="checkbox" data-event-override ${event.allow_task_override?'checked':''}> <span>Let an event replace the task with its own <code>task</code> field<span class="field-help">Whoever holds the secret can then tell the team what to do, with its owner’s accounts. Leave it off unless the sender is as trusted as you.</span></span></label><p class="field-label">${fields.length?'An event fills these request fields from its top-level JSON fields':'This application declares no request fields; an event only starts it'}</p>${fields.length?`<ul class="event-inputs" aria-label="Request fields an event fills">${fields.map(field=>`<li>${e(field.id)}${field.required?' · required':''}</li>`).join('')}</ul>`:''}<p class="field-help">Other fields in an event are ignored. An event missing a required field is refused, and says which.</p></div>`;
+}
+
+// The trigger of a run, in a run list: "Event · gh-1432".
+export function eventTriggerText(trigger){return trigger?.kind==='event'?`Event · ${trigger.event_id}`:'';}
+
+// The incoming address: turning it on, its secret this once, how to send an event,
+// rotating, and what arrived. `saved` says whether the saved application is in
+// event mode; `local` whether this host is only reachable from its own computer.
+export function eventPanelMarkup({status,secret=null,confirmRotate=false,saved=false,local=false,origin=''},{escape:e}){
+  const head='<section class="panel event-panel" aria-labelledby="event-panel-title"><h3 id="event-panel-title">Incoming events</h3>';
+  if(!saved)return `${head}<p class="field-help">Save this application with the start method “When an event arrives” to turn events on.</p></section>`;
+  if(!status)return `${head}<p class="field-help">Loading…</p></section>`;
+  if(!status.address)return `${head}<p class="field-help">Turning events on gives this application its own address and a secret to sign events with. You become the one its event runs act as.</p><button type="button" class="button primary" data-event-create>Turn on events</button></section>`;
+  const address=`${origin}${status.address}`;
+  const secretBox=secret?`<div class="event-secret" role="alert"><strong>Copy the signing secret now. It will not be shown again.</strong><code data-event-secret>${e(secret)}</code><div class="actions"><button class="button primary" type="button" data-copy="${e(secret)}">Copy secret</button><button class="text-button" type="button" data-event-secret-dismiss>I have stored it</button></div></div>`:'';
+  const example=`body='{"event_id":"example-1"}'\nts=$(date +%s)\nsig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$SECRET" -hex | cut -d' ' -f2)\ncurl -X POST ${address} \\\n  -H 'content-type: application/json' \\\n  -H "x-conclave-timestamp: $ts" -H "x-conclave-signature: $sig" \\\n  -d "$body"`;
+  const rotate=confirmRotate?`<div class="restore-confirm" role="alertdialog" aria-labelledby="rotate-title"><strong id="rotate-title">Rotate the signing secret?</strong><p>A new secret replaces the old one at once: senders using the old one are refused until they change.</p><div class="actions"><button type="button" class="button primary" data-event-rotate-confirm>Rotate now</button><button type="button" class="text-button" data-event-rotate-cancel>Cancel</button></div></div>`
+    :`<div class="actions"><button class="button" type="button" data-event-rotate>Rotate secret…</button><span class="field-help">A new secret replaces the old one at once.</span></div>`;
+  const rows=(status.recent||[]).map(item=>`<tr><td>${e(time(item.received_at))}</td><td class="event-key">${e(item.event_id.length>40?item.event_id.slice(0,39)+'…':item.event_id)}</td><td><span class="event-outcome ${e(item.outcome)}">${e({started:'Started',duplicate:'Duplicate',refused:'Refused',owner:'Owner changed'}[item.outcome]||item.outcome)}</span>${item.run_id?` · <button type="button" class="text-button" data-run-open="${e(item.run_id)}">${item.outcome==='duplicate'?'already started this run':'Open run'}</button>`:''}${item.reason?` · ${e(item.reason)}`:''}</td></tr>`).join('');
+  return `${head}<p class="field-label">Address</p><div class="event-address"><code>${e(address)}</code><button class="button" type="button" data-copy="${e(address)}">Copy</button></div>${local?'<p class="field-help">This host is reachable only from this computer. To receive events from elsewhere, forward this address to it.</p>':''}${status.enabled?'':'<p class="validation">Events are off: the saved application is not started by events, so this address answers “not found”.</p>'}${secretBox}<details class="quiet-details" data-disclosure="event-example"><summary>How to send an event</summary><pre class="code">${e(example)}</pre><p class="field-help">One event starts one run. The same <code>event_id</code> (or <code>x-conclave-event-id</code>, or the same body) within 7 days starts nothing and answers with the first run.</p></details><p class="field-help">Runs started by events act as ${e(status.owner)}, who turned events on. Nobody watches them, so writes not authorized up front are refused.</p>${rotate}<p class="field-help">To stop events, change the start method and save; the address answers “not found” until it is set back.</p><h4>Recent events</h4>${rows?`<table class="event-log"><thead><tr><th>Received</th><th>Event</th><th>Outcome</th></tr></thead><tbody>${rows}</tbody></table>`:'<p class="field-help">No events yet.</p>'}<p class="field-help">Signatures that do not match are answered, not listed: anyone can send those.</p></section>`;
+}
+

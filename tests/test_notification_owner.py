@@ -10,6 +10,7 @@ import asyncio
 import pytest
 
 from notification_support import ANA, BEA, FakeConnections, api, definition, email, slack
+from conftest import share
 
 ana_principal = None
 
@@ -28,7 +29,11 @@ def connections():
 
 async def save(service, value, by, saved=None):
     if saved is None:
-        return await service.dispatch("POST", "/api/applications", {"definition": value}, principal=principal(by))
+        code, body = await service.dispatch("POST", "/api/applications", {"definition": value}, principal=principal(by))
+        if code == 201:
+            # Ana and Bea work on the same applications.
+            share(service, body["id"], *({ANA, BEA} - {by}))
+        return code, body
     return await service.dispatch("PUT", f"/api/applications/{saved['id']}", {"definition": value, "revision": saved["revision"]},
                                   principal=principal(by))
 

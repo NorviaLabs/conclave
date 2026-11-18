@@ -26,6 +26,19 @@ function noticeText(event){
   const what=!step?'':event.waiting==='pause'?` that the run is paused before ${step}`:` that “${step}” is waiting`;
   return {tone:'sent',title:`Told ${target}${what}`,detail:[noticeLabel[event.via]||event.via||'',event.connection,event.sent_as?`sent as ${event.sent_as}`:''].filter(Boolean).join(' · ')};
 }
+// A limit the run came close to, in words: usage-ui.js says the same in the
+// run's overview; a copy here keeps this module loading on its own.
+const WARNED={tokens:['token limit','tokens','Token use'],tool_calls:['tool-use limit','tool uses','Tool use'],
+  wall_clock_seconds:['time limit','seconds','Working time'],cost_usd:['cost limit','USD','Cost']};
+export function budgetWarningText(event){
+  const [limitName,unit,subject]=WARNED[event.dimension]||['limit','','Use'],count=value=>Number(value||0).toLocaleString('en-US',{maximumFractionDigits:2});
+  if(Number(event.limit)>0)return {text:`Close to the ${limitName} · ${Math.round(Number(event.used||0)/Number(event.limit)*100)}%`,detail:`${count(event.used)} of ${count(event.limit)} ${unit}`};
+  return {text:`${subject} passed its warning level`,detail:`${count(event.used)} ${unit}; warns at ${count(event.threshold)}`};
+}
+// A step's time limit, short: "5 m", "1 m 30 s" (time-limit-ui.js says the same).
+const limitText=seconds=>{const whole=Math.max(0,Math.round(Number(seconds)||0)),h=Math.floor(whole/3600),m=Math.floor(whole%3600/60),s=whole%60;return [h?`${h} h`:'',m?`${m} m`:'',s?`${s} s`:''].filter(Boolean).join(' ')||'0 s';};
+// When a retry is due, on this computer's clock, from the time the host recorded.
+export function retryTime(at){const date=at?new Date(at):null;return date&&!Number.isNaN(date.getTime())?`at ${date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`:'';}
 // Descriptions use only durable events; routine repeated tool calls share a row.
 export function runActivities(d,run,{agentName,capabilityName}){
   const rows=[];
@@ -38,8 +51,10 @@ export function runActivities(d,run,{agentName,capabilityName}){
       // Steps run side by side: each says when it ends, and how.
       case 'StageFinished':
         if(event.status==='completed'){text=`${agent} finished ${step?.name||event.stage}`;if(event.cut_short)detail=`Cut short at the ${{tokens:'token limit',wall_clock_seconds:'time limit',cost_usd:'cost limit'}[event.cut_short]||'limit'}`;}
+        else if(event.status==='timed_out'){text=`“${step?.name||event.stage}” timed out · ${limitText(event.time_limit_seconds)} limit`;detail='Stopped while it worked; the run stops once the steps beside it finish';important=true;}
         else{text=`${step?.name||event.stage} ${event.status==='failed'?'failed':'stopped'}`;detail=event.reason||'';important=true;}
         break;
+      case 'StageSkipped':text=`Skipped · ${step?.name||event.stage}`;detail=event.reason||'';break;
       case 'PauseRequested':{const count=(event.running||[]).length;text=`Pausing · ${count} running ${count===1?'step':'steps'} will finish first`;break;}
       case 'ApplicationStateChanged':{
         const value=event.patch,label=d.state.find(item=>item.key===step?.output)?.label||'output';
@@ -63,6 +78,12 @@ export function runActivities(d,run,{agentName,capabilityName}){
       case 'NoteRecorded':text=`${agent} recorded a finding`;detail=event.note||'';break;
       case 'HumanInputRequested':text=`${agent} needs your input`;important=true;break;
       case 'HumanReviewSubmitted':text=`${event.reviewer||agent} submitted a review`;break;
+      // A reviewer asked for changes: the reviewed steps run again, then the review returns.
+      case 'RevisionRequested':{const names=(event.revises||[]).map(id=>d.workflow.find(item=>item.id===id)?.name||id);
+        text=`Changes requested · round ${event.round}`;detail=`${names.join(', ')} ${names.length===1?'runs':'run'} again with the reviewer’s reason; ${step?.name||event.stage} waits for ${names.length===1?'it':'them'}`;important=true;break;}
+      case 'RetryScheduled':text=`Trying again automatically · attempt ${event.attempt} of ${event.attempts}`;detail=retryTime(event.retry_at);important=true;break;
+      case 'ContinueWithheld':text='The review is complete, but the run did not continue';detail=event.reason==='owner_not_admitted'?'Whoever started it can no longer sign in here, so nothing runs as them.':'';important=true;break;
+      case 'RetryCancelled':text=event.reason==='paused'?'Automatic retry stopped by a pause':`${event.by||'Someone'} stopped the automatic retry`;break;
       case 'ActionUncertain':text=`Outcome of ${actionName(event.tool)} is uncertain`;detail=event.reason||'';important=true;break;
       case 'ActionChecked':text=`Conclave checked ${actionName(event.tool)}`;detail=event.summary||'';important=event.result!=='found';break;
       case 'ActionSettled':text=(event.settled_kind||(event.settled_by==='check'?'check':'person'))==='check'
@@ -71,7 +92,8 @@ export function runActivities(d,run,{agentName,capabilityName}){
       case 'ActionDecisionUndone':text=`${event.undone_by} undid the decision on ${actionName(event.tool)}`;break;
       case 'ApplicationFinished':text=`Request ${String(event.status||'finished').replaceAll('_',' ')}`;detail=event.reason||'';important=event.status!=='completed';break;
       case 'NotificationSent':case 'NotificationFailed':case 'NotificationUncertain':{const said=noticeText(event);text=said.title;detail=said.detail;notice=said.tone;important=said.tone!=='sent';break;}
-      case 'BudgetWarning':case 'BudgetExceeded':text=`${agent}: ${String(event.dimension||'execution').replaceAll('_',' ')} ${event.type==='BudgetExceeded'?'limit reached':'warning'}`;important=true;break;
+      case 'BudgetWarning':{const said=budgetWarningText(event);text=said.text;detail=said.detail;important=true;break;}
+      case 'BudgetExceeded':text=`${agent}: ${String(event.dimension||'execution').replaceAll('_',' ')} limit reached`;important=true;break;
       default:continue;
     }
     if(event.connection_id)detail=`Connection ${event.connection_id} · ${String(event.operation||'').replaceAll('_',' ')}${detail?' · '+detail:''}`;

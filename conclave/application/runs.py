@@ -6,6 +6,10 @@ Providers, tools, credentials and approval callbacks remain host-owned.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
+import os
+import re
 import copy
 import json
 import sqlite3
@@ -17,7 +21,10 @@ from pathlib import Path
 from .definition import (LIMIT_NAMES, MAX_PARALLEL_STEPS, run_application, validate_definition, validate_request_inputs, validate_human_output,
                          action_label, _request_fingerprint)
 from .journal import ActionJournal
+from . import output_files
 from .errors import Conflict
+
+LOG = logging.getLogger(__name__)
 
 
 # Statuses a run cannot come back from: what was uncertain in them stays on
@@ -32,6 +39,54 @@ IN_FLIGHT_REASONS = {
     "interrupted": "The host stopped while this was being sent",
     "cancelled": "The run was stopped while this was being sent",
 }
+
+
+def _who(entries: list[str]) -> str:
+    """"ana@acme.com or anyone at @ops.acme.com"."""
+    words = [f"anyone at {entry}" if entry.startswith("@") else entry for entry in entries]
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " or " + words[-1]
+
+
+def answers_required(definition: dict, stage_id: str) -> int:
+    step = next((item for item in definition["workflow"] if item["id"] == stage_id), {})
+    return step.get("answers_required", 1)
+
+
+def review_refusal(definition: dict, stage_id: str, *, starter: str | None, answered: list[str], reviewer: str) -> str | None:
+    """Why `reviewer` may not answer this review, or None when they may.
+
+    The application's `review_policy` names who may answer (people, or whole
+    `@domain`s) and whether the person who started the run may; nobody answers
+    one review twice. Names compare without case.
+    """
+    policy = definition.get("review_policy")
+    key = reviewer.strip().casefold()
+    if key in {item.casefold() for item in answered}:
+        return "You already answered this review; it needs a different person"
+    if policy is None:
+        return None
+    if not policy.get("allow_starter", False) and starter is not None and key == starter.strip().casefold():
+        return "You started this run, so someone else must answer its review"
+    reviewers = policy.get("reviewers")
+    if reviewers is not None and not any(key == entry.casefold() if not entry.startswith("@") else key.endswith(entry.casefold())
+                                         for entry in reviewers):
+        return f"Only {_who(reviewers)} may answer this review"
+    return None
+
+
+def _combined(outputs: list[dict]) -> dict:
+    """Every answer's records together, each keeping an id of its own."""
+    if len(outputs) == 1:
+        return outputs[0]
+    records, seen = [], set()
+    for output in outputs:
+        for record in output["records"]:
+            record, identifier, suffix = dict(record), record["id"], 2
+            while record["id"] in seen:
+                record["id"], suffix = f"{identifier}-{suffix}", suffix + 1
+            seen.add(record["id"])
+            records.append(record)
+    return {"records": records}
 
 
 class ActionsUnsettled(Conflict):
@@ -51,16 +106,22 @@ def validate_run_request(request: dict) -> dict:
     if not isinstance(request, dict) or not required <= set(request) or set(request) - required - {"resources", "trigger"}:
         raise ValueError("Use the version 1 run request fields")
     if "trigger" in request:
-        # A schedule started this run, for this time. Manual runs carry none.
+        # A schedule started this run, for this time, or an event did, when it
+        # was received. Manual runs carry none.
         trigger = request["trigger"]
-        if not isinstance(trigger, dict) or set(trigger) != {"kind", "scheduled_for"} or trigger["kind"] != "schedule":
-            raise ValueError("A run trigger names the schedule and the time it was for")
+        kind = trigger.get("kind") if isinstance(trigger, dict) else None
+        when_key, fields = {"schedule": ("scheduled_for", {"kind", "scheduled_for"}),
+                            "event": ("received_at", {"kind", "event_id", "received_at"})}.get(kind, (None, None))
+        if fields is None or set(trigger) != fields:
+            raise ValueError("A run trigger names the schedule and the time it was for, or the event and when it was received")
+        if kind == "event" and (not isinstance(trigger["event_id"], str) or not 1 <= len(trigger["event_id"]) <= 200):
+            raise ValueError("An event trigger names its event in at most 200 characters")
         try:
-            scheduled = datetime.fromisoformat(trigger["scheduled_for"]) if isinstance(trigger["scheduled_for"], str) else None
+            moment = datetime.fromisoformat(trigger[when_key]) if isinstance(trigger[when_key], str) else None
         except ValueError:
-            scheduled = None
-        if scheduled is None or scheduled.tzinfo is None:
-            raise ValueError("A run trigger names the schedule and the time it was for")
+            moment = None
+        if moment is None or moment.tzinfo is None:
+            raise ValueError("A run trigger names the schedule and the time it was for, or the event and when it was received")
     resources = request.get("resources", {})
     if not isinstance(resources, dict) or set(resources) - {"source", "source_revision"} or "source_revision" in resources and "source" not in resources or any(not isinstance(value, str) or not value or len(value) > 64 for value in resources.values()):
         raise ValueError("Run resources must contain a named source resource, not a path")
@@ -124,7 +185,7 @@ class RunRepository:
                 );
             """ + "".join((migrations / name).read_text() + "\n" for name in
                           ("0001_reviews.sql", "0002_actions.sql", "0003_transcript.sql", "0004_schedules.sql",
-                           "0005_run_actors.sql", "0006_notices.sql")) + "COMMIT;")
+                           "0005_run_actors.sql", "0006_notices.sql", "0008_review_answers.sql", "0009_events.sql", "0010_run_status.sql", "0011_run_files.sql")) + "COMMIT;")
             # Added after the journal first shipped: who settled an action, as a
             # kind rather than a name (a person named "check" is a person).
             if "settled_kind" not in {row[1] for row in connection.execute("PRAGMA table_info(studio_run_actions)")}:
@@ -135,11 +196,18 @@ class RunRepository:
             # hands. A store made before that has the table without it.
             if "owner_since" not in {row[1] for row in connection.execute("PRAGMA table_info(studio_schedules)")}:
                 connection.execute("ALTER TABLE studio_schedules ADD COLUMN owner_since TEXT")
+            # Added with revision rounds: a review asked again is a new row for
+            # the same step. A store that still allows one review per step is
+            # rebuilt once, keeping its reviews.
+            if "round" not in {row[1] for row in connection.execute("PRAGMA table_info(studio_run_reviews)")}:
+                connection.executescript("BEGIN;\n" + (migrations / "0007_review_rounds.sql").read_text() + "\nCOMMIT;")
         # What a run was sending, and where it was, can name people and hold
         # message text: the database is this user's alone, and the details in
         # it are sealed with the host key when there is one.
         self.path.chmod(0o600)
         self.journal = ActionJournal(self._connect, key=key)
+        from .event_store import EventStore
+        self.events = EventStore(self, key=key)
         from .schedule_store import ScheduleStore
         self.schedules = ScheduleStore(self)
         from .notices import NoticeStore, NotificationOwners
@@ -210,15 +278,59 @@ class RunRepository:
             if row is None:
                 raise KeyError(run_id)
             events = connection.execute("SELECT sequence, payload FROM studio_run_events WHERE run_id = ? ORDER BY sequence", (run_id,)).fetchall()
-            reviews = connection.execute("SELECT id, stage, request, status, reviewer, output, submitted_at FROM studio_run_reviews WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
+            reviews = connection.execute("SELECT id, stage, request, status, reviewer, output, submitted_at, round FROM studio_run_reviews WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
+            answers: dict[str, list] = {}
+            for review_id, reviewer, output, submitted in connection.execute(
+                    "SELECT review_id, reviewer, output, submitted_at FROM studio_run_review_answers WHERE run_id = ? ORDER BY rowid", (run_id,)):
+                answers.setdefault(review_id, []).append({"reviewer": reviewer, "output": json.loads(output), "submitted_at": submitted})
+            starter = connection.execute("SELECT actor FROM studio_run_actors WHERE run_id = ?", (run_id,)).fetchone()
             counts = self.journal.counts_for([run_id], connection)[run_id]
+            files = self._files(connection, run_id)
         parsed = [{"sequence": sequence, "event": json.loads(payload)} for sequence, payload in events]
-        return {"id": run_id, "request": json.loads(row[0]), "status": row[1], "created_at": row[2],
+        request = json.loads(row[0])
+        return {"id": run_id, "request": request, "status": row[1], "created_at": row[2], "started_by": starter[0] if starter else None,
                 "journal": self._journaled(parsed), "actions": self._action_counts(row[1], counts),
-                "events": parsed,
+                "events": parsed, "files": files,
                 "reviews": [{"id": review[0], "stage": review[1], "request": json.loads(review[2]), "status": review[3],
                              "reviewer": review[4], "output": json.loads(review[5]) if review[5] else None,
-                             "submitted_at": review[6]} for review in reviews]}
+                             "submitted_at": review[6], "round": review[7], "answers": answers.get(review[0], []),
+                             "required": answers_required(request["definition"], review[1])} for review in reviews]}
+
+    # Runs an event started that are still going, for one application: through
+    # the status index, so only runs still going are read.
+    ACTIVE_EVENT_RUNS = ("SELECT COUNT(*) FROM studio_runs WHERE status IN ('pending', 'running', 'paused', 'waiting_for_human') "
+                         "AND json_extract(request, '$.application_id') = ? AND json_extract(request, '$.trigger.kind') = 'event'")
+
+    def active_event_runs(self, connection, application_id: str) -> int:
+        return connection.execute(self.ACTIVE_EVENT_RUNS, (application_id,)).fetchone()[0]
+
+    def application_of(self, run_id: str) -> str:
+        """The application a run belongs to, without reading its events."""
+        with self._connect() as connection:
+            row = connection.execute("SELECT json_extract(request, '$.application_id') FROM studio_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return row[0]
+
+    def review_access(self, run_id: str) -> dict:
+        """What deciding who a waiting review is for needs, without the run's events.
+
+        Status, definition, who started it, and the review it waits for (its
+        step, how many answers it needs, and who has answered).
+        """
+        with self._connect() as connection:
+            row = connection.execute("SELECT status, request FROM studio_runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            starter = connection.execute("SELECT actor FROM studio_run_actors WHERE run_id = ?", (run_id,)).fetchone()
+            review = connection.execute("SELECT id, stage FROM studio_run_reviews WHERE run_id = ? AND status = 'pending' "
+                                        "ORDER BY rowid DESC LIMIT 1", (run_id,)).fetchone()
+            answered = [item[0] for item in connection.execute(
+                "SELECT reviewer FROM studio_run_review_answers WHERE review_id = ? ORDER BY rowid", (review[0],))] if review else []
+        request = json.loads(row[1])
+        return {"status": row[0], "request": request, "started_by": starter[0] if starter else None,
+                "review": {"id": review[0], "stage": review[1], "answered": answered,
+                           "required": answers_required(request["definition"], review[1])} if review else None}
 
     def run_state(self, run_id: str) -> dict | None:
         """A run's status and its action counts, without reading its events."""
@@ -364,15 +476,35 @@ class RunRepository:
             if row is None:
                 raise ValueError("This review is not waiting for input")
             review = json.loads(row[0])
+            definition = json.loads(connection.execute("SELECT request FROM studio_runs WHERE id = ?", (run_id,)).fetchone()[0])["definition"]
+            starter = connection.execute("SELECT actor FROM studio_run_actors WHERE run_id = ?", (run_id,)).fetchone()
+            answered = [item[0] for item in connection.execute(
+                "SELECT reviewer FROM studio_run_review_answers WHERE review_id = ? ORDER BY rowid", (review_id,))]
+            refusal = review_refusal(definition, review["stage"], starter=starter[0] if starter else None, answered=answered, reviewer=reviewer)
+            if refusal:
+                raise ValueError(refusal)
             payload = validate_human_output(output, review["output"], {"agent": review["agent"], "stage": review["stage"], "run_id": review_id})
             normalized = {"text" if review["output"]["type"] == "text" else "records": payload}
             timestamp = datetime.now(timezone.utc).isoformat()
-            connection.execute(
-                "UPDATE studio_run_reviews SET status = 'submitted', reviewer = ?, output = ?, submitted_at = ? WHERE id = ?",
-                (reviewer, json.dumps(normalized, allow_nan=False), timestamp, review_id),
-            )
+            outputs = [json.loads(item[0]) for item in connection.execute(
+                "SELECT output FROM studio_run_review_answers WHERE review_id = ? ORDER BY rowid", (review_id,))] + [normalized]
+            if sum(len(item.get("records", [])) for item in outputs) > 200:
+                raise ValueError("This review's answers cannot hold more than 200 records together")
+            connection.execute("INSERT INTO studio_run_review_answers VALUES (?, ?, ?, ?, ?, ?)",
+                               (review_id, run_id, reviewer, reviewer.strip().casefold(), json.dumps(normalized, allow_nan=False), timestamp))
+            required = answers_required(definition, review["stage"])
+            # Complete once it has the answers it needs, or at the first
+            # rejection: more answers could not change a rejection.
+            rejected = any(record.get("status") == "rejected" for record in normalized.get("records", []))
+            complete = len(outputs) >= required or rejected
+            if complete:
+                connection.execute(
+                    "UPDATE studio_run_reviews SET status = 'submitted', reviewer = ?, output = ?, submitted_at = ? WHERE id = ?",
+                    (reviewer, json.dumps(_combined(outputs), allow_nan=False), timestamp, review_id),
+                )
             self._insert_event(connection, run_id, {"type": "HumanReviewSubmitted", "review_id": review_id,
-                                                  "stage": review["stage"], "reviewer": reviewer, "submitted_at": timestamp})
+                                                  "stage": review["stage"], "reviewer": reviewer, "submitted_at": timestamp,
+                                                  "answers": len(outputs), "required": required, "complete": complete})
         self._notify(run_id)
 
     def resume(self, run_id: str, provider, tools, *, approver=None, loop=None, pause_requested=None):
@@ -467,6 +599,60 @@ class RunRepository:
             if changed != 1:
                 raise ValueError("Only a pending run can start; interrupted runs require explicit recovery")
         return self.get(run_id)["request"], None, {}
+
+    def retry_facts(self, run_id: str) -> dict:
+        """What deciding an automatic retry needs, read from the end of the record.
+
+        The run's status, its last stop, and the retries since a step last
+        completed: only those fields, event by event backwards, stopping at
+        that step, so a long run costs what its last step recorded.
+        """
+        with self._connect() as connection:
+            row = connection.execute("SELECT status FROM studio_runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            stop, tries = None, 0
+            for kind, status, transient, budget in connection.execute(
+                    "SELECT json_extract(payload, '$.type'), json_extract(payload, '$.status'), json_extract(payload, '$.transient'), "
+                    "json_extract(payload, '$.budget') FROM studio_run_events WHERE run_id = ? ORDER BY sequence DESC", (run_id,)):
+                if kind == "StageFinished" and status == "completed":
+                    break
+                if stop is None and kind == "ApplicationFinished":
+                    stop = {"transient": transient, "budget": budget}
+                tries += kind == "RetryScheduled"
+        return {"status": row[0], "stop": stop or {}, "tries": tries}
+
+    def latest(self, run_id: str) -> dict:
+        """A run's status, how it was started, and its last event, without the rest."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT r.status, json_extract(r.request, '$.trigger.kind'), "
+                "(SELECT payload FROM studio_run_events WHERE run_id = r.id ORDER BY sequence DESC LIMIT 1) "
+                "FROM studio_runs r WHERE r.id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return {"status": row[0], "trigger": row[1], "last": json.loads(row[2]) if row[2] else None}
+
+    def versions_used(self, application_id: str) -> dict[int, dict]:
+        """For each saved version of an application its runs used: how many, and
+        one run's stored definition (the earliest), to recover it from."""
+        used: dict[int, dict] = {}
+        with self._connect() as connection:
+            for run_id, revision, definition in connection.execute(
+                    "SELECT id, json_extract(request, '$.revision'), json_extract(request, '$.definition') FROM studio_runs "
+                    "WHERE json_extract(request, '$.application_id') = ? ORDER BY created_at, id", (application_id,)):
+                entry = used.setdefault(revision, {"runs": 0, "run_id": run_id, "definition": definition})
+                entry["runs"] += 1
+        return {revision: {**entry, "definition": json.loads(entry["definition"])} for revision, entry in used.items()}
+
+    def pending_retries(self) -> list[tuple[str, dict]]:
+        """Stopped runs whose last event is an automatic retry, with that event."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT r.id, e.payload FROM studio_runs r JOIN studio_run_events e ON e.run_id = r.id "
+                "WHERE r.status = 'stopped' AND e.sequence = (SELECT MAX(sequence) FROM studio_run_events WHERE run_id = r.id) "
+                "AND json_extract(e.payload, '$.type') = 'RetryScheduled'").fetchall()
+        return [(run_id, json.loads(payload)) for run_id, payload in rows]
 
     def sweep_abandoned(self) -> list[str]:
         """Mark runs nothing is executing as interrupted, and say so.
@@ -565,7 +751,23 @@ class RunRepository:
                 if not watching:
                     self.watchers.pop(run_id, None)
 
-    def _append(self, run_id: str, event: dict) -> None:
+    def _append(self, run_id: str, event: dict, *, prepared=None) -> None:
+        # A step's output that is stored as a file is written first, outside
+        # the transaction, and recorded with the event in it; if that fails,
+        # the file is removed, so neither exists without the other. A run
+        # writes it beforehand, beside its loop (`prepared`).
+        if prepared is not None:
+            stored = prepared["stored"]
+        else:
+            stored = self._write_output_file(run_id, event) if event["type"] == "ApplicationStateChanged" else None
+        try:
+            self._append_recorded(run_id, event, stored)
+        except BaseException:
+            if stored is not None and stored.get("path") is not None:
+                stored["path"].unlink(missing_ok=True)
+            raise
+
+    def _append_recorded(self, run_id: str, event: dict, stored: dict | None) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if event["type"] == "ApplicationFinished":
@@ -582,15 +784,27 @@ class RunRepository:
                     self.journal.purge(run_id, connection)
             if event["type"] == "HumanInputRequested":
                 event["review_id"] = uuid.uuid4().hex
-                connection.execute("INSERT INTO studio_run_reviews (id, run_id, stage, request, status) VALUES (?, ?, ?, ?, 'pending')",
-                                   (event["review_id"], run_id, event["stage"], json.dumps(event, allow_nan=False)))
+                connection.execute("INSERT INTO studio_run_reviews (id, run_id, stage, request, status, round) VALUES (?, ?, ?, ?, 'pending', ?)",
+                                   (event["review_id"], run_id, event["stage"], json.dumps(event, allow_nan=False),
+                                    (event.get("revision") or {}).get("round", 1)))
             if event["type"] == "ApplicationStateChanged":
                 connection.execute("UPDATE studio_run_reviews SET status = 'consumed' WHERE run_id = ? AND stage = ? AND status IN ('pending', 'submitted')", (run_id, event["stage"]))
+            if event["type"] == "RevisionRequested":
+                # Answered, and sent the work back: the next round is a new review.
+                connection.execute("UPDATE studio_run_reviews SET status = 'revised' WHERE run_id = ? AND stage = ? AND status IN ('pending', 'submitted')", (run_id, event["stage"]))
             if event["type"] == "HumanInputRecorded":
-                review = connection.execute("SELECT id, reviewer FROM studio_run_reviews WHERE run_id = ? AND stage = ?", (run_id, event["stage"])).fetchone()
+                # The latest round of this step's review is the one just answered.
+                review = connection.execute("SELECT id, reviewer FROM studio_run_reviews WHERE run_id = ? AND stage = ? ORDER BY rowid DESC LIMIT 1", (run_id, event["stage"])).fetchone()
                 if review:
                     event["review_id"], event["reviewer"] = review
+                    # Everyone whose answer it is, in the order they gave it.
+                    answered = [item[0] for item in connection.execute(
+                        "SELECT reviewer FROM studio_run_review_answers WHERE review_id = ? ORDER BY rowid", (review[0],))]
+                    if answered:
+                        event["reviewers"] = answered
             sequence = self._insert_event(connection, run_id, event)
+            if stored is not None:
+                self._record_output_file(connection, run_id, stored)
             if event["type"] == "ApplicationFinished":
                 connection.execute("UPDATE studio_runs SET status = ? WHERE id = ?", (event["status"], run_id))
                 if event.get("status") in {"waiting_for_human", "paused"}:
@@ -605,6 +819,114 @@ class RunRepository:
         # finished run, the status it set.
         self._notify(run_id)
 
+    # --- Stored output files ---------------------------------------------------------------------
+
+    @property
+    def files_root(self) -> Path:
+        return self.path.parent / "run-files"
+
+    def _file_path(self, run_id: str, file_id: str) -> Path:
+        # Only ids this store made name a file; anything else names nothing.
+        if not re.fullmatch(r"[0-9a-f]{32}", file_id or "") or not re.fullmatch(r"[0-9a-f]{32}", run_id or ""):
+            raise KeyError(file_id)
+        return self.files_root / run_id / file_id
+
+    def _write_output_file(self, run_id: str, event: dict) -> dict | None:
+        """Write the file a step's output becomes, if it becomes one; say why not if it cannot."""
+        stage, patch = event.get("stage"), event.get("patch")
+        if not stage or patch is None:
+            return None
+        with self._connect() as connection:
+            row = connection.execute("SELECT request FROM studio_runs WHERE id = ?", (run_id,)).fetchone()
+        definition = json.loads(row[0])["definition"] if row else {}
+        step = next((item for item in definition.get("workflow") or [] if item["id"] == stage), None)
+        collection = next((item for item in definition.get("state") or [] if step and item["key"] == step["output"]), None)
+        if collection is None or output_files.file_format(collection) is None:
+            return None
+        try:
+            name, media_type, body = output_files.render_file(collection, patch)
+        except ValueError as error:
+            return {"skipped": str(error), "stage": stage, "output": collection["key"], "path": None}
+        file_id = uuid.uuid4().hex
+        folder = self.files_root / run_id
+        path, temporary = folder / file_id, folder / (file_id + ".partial")
+        try:
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.files_root.chmod(0o700)
+            folder.chmod(0o700)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(body)
+                os.replace(temporary, path)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+        except OSError as error:
+            # A full disk or a folder it may not write costs the file, not the
+            # step's result: the run goes on and says so. What went wrong, and
+            # where, is for whoever runs this host.
+            LOG.warning("Run %s: the file for step %s could not be written: %s", run_id, stage, error)
+            return {"skipped": "The file could not be written", "stage": stage, "output": collection["key"], "path": None}
+        shown, lines = output_files.preview(body)
+        return {"id": file_id, "path": path, "stage": stage, "output": collection["key"], "name": name,
+                "format": output_files.file_format(collection), "media_type": media_type, "size": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(), "preview": shown, "lines": lines}
+
+    def _record_output_file(self, connection, run_id: str, stored: dict) -> None:
+        if "skipped" in stored:
+            self._insert_event(connection, run_id, {"type": "OutputFileSkipped", "stage": stored["stage"], "output": stored["output"],
+                                                    "reason": stored["skipped"]})
+            return
+        round_ = connection.execute("SELECT COUNT(*) FROM studio_run_files WHERE run_id = ? AND stage = ?",
+                                    (run_id, stored["stage"])).fetchone()[0] + 1
+        connection.execute("INSERT INTO studio_run_files (id, run_id, stage, output, round, name, format, media_type, size, sha256, preview, lines, created_at) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (stored["id"], run_id, stored["stage"], stored["output"], round_, stored["name"], stored["format"],
+                            stored["media_type"], stored["size"], stored["sha256"], stored["preview"], stored["lines"],
+                            datetime.now(timezone.utc).isoformat()))
+        self._insert_event(connection, run_id, {"type": "OutputFileStored", "stage": stored["stage"], "output": stored["output"],
+                                                "file_id": stored["id"], "name": stored["name"], "format": stored["format"],
+                                                "size": stored["size"], "round": round_})
+
+    FILE_COLUMNS = ("id", "stage", "output", "round", "name", "format", "media_type", "size", "sha256", "preview", "lines", "created_at")
+
+    def _files(self, connection, run_id: str) -> list[dict]:
+        rows = connection.execute(f"SELECT {', '.join(self.FILE_COLUMNS)} FROM studio_run_files WHERE run_id = ? ORDER BY rowid",
+                                  (run_id,)).fetchall()
+        files = []
+        for row in rows:
+            item = dict(zip(self.FILE_COLUMNS, row))
+            # Cheap: there, and the size it was. The bytes are checked on download.
+            try:
+                item["available"] = self._file_path(run_id, item["id"]).stat().st_size == item["size"]
+            except (OSError, KeyError):
+                item["available"] = False
+            files.append(item)
+        return files
+
+    def files(self, run_id: str) -> list[dict]:
+        """The files a run stored, oldest first."""
+        with self._connect() as connection:
+            return self._files(connection, run_id)
+
+    def read_file(self, run_id: str, file_id: str) -> "output_files.FileDownload":
+        """One stored file, only from its own run, and only if it is still exactly what was stored."""
+        path = self._file_path(run_id, file_id)
+        with self._connect() as connection:
+            row = connection.execute("SELECT name, media_type, size, sha256 FROM studio_run_files WHERE id = ? AND run_id = ?",
+                                     (file_id, run_id)).fetchone()
+        if row is None:
+            raise KeyError(file_id)
+        name, media_type, size, digest = row
+        try:
+            body = path.read_bytes()
+        except OSError:
+            raise output_files.FileChanged("This file is missing or was changed since the run stored it") from None
+        if len(body) != size or hashlib.sha256(body).hexdigest() != digest:
+            raise output_files.FileChanged("This file is missing or was changed since the run stored it")
+        return output_files.FileDownload(body=body, media_type=media_type, name=name)
+
     async def execute(self, run_id: str, provider, tools, *, approver=None, human_handler=None, resume=False, loop=None, pause_requested=None):
         """Start once, recording safe adapter events and a durable waiting review.
 
@@ -615,7 +937,7 @@ class RunRepository:
         if resume and human_handler is not None:
             raise ValueError("Review resume uses persisted contributions")
         request, checkpoint, human_inputs = self._claim_resume(run_id) if resume else self._claim(run_id)
-        finished = False
+        finished = started = False
         progress = self.journal.progress(run_id) if resume else {}
         try:
             async for event in run_application(
@@ -625,11 +947,24 @@ class RunRepository:
                 pause_requested=pause_requested, log=self.journal.for_run(run_id), progress=progress,
                 max_parallel_steps=self.max_parallel_steps,
             ):
-                self._append(run_id, event)
+                started = True
+                if event["type"] == "ApplicationStateChanged":
+                    # Making and writing the file can take a while for a large
+                    # output: done beside the loop, so the host keeps answering.
+                    stored = await asyncio.to_thread(self._write_output_file, run_id, event)
+                    self._append(run_id, event, prepared={"stored": stored})
+                else:
+                    self._append(run_id, event)
                 finished = event["type"] == "ApplicationFinished"
                 yield event
         except Exception as error:
-            event = {"type": "ApplicationFinished", "status": "failed", "reason": f"Run could not execute on the runtime host ({type(error).__name__})"}
+            if resume and not started and isinstance(error, ValueError):
+                # Refused before anything ran: the run is left as it was, and
+                # a person decides, rather than a saved run being failed for good.
+                event = {"type": "ApplicationFinished", "status": "stopped",
+                         "reason": "This run's saved checkpoint could not be restored, so nothing was run. Cancel it, or start a new run."}
+            else:
+                event = {"type": "ApplicationFinished", "status": "failed", "reason": f"Run could not execute on the runtime host ({type(error).__name__})"}
             self._append(run_id, event)
             finished = True
             yield event

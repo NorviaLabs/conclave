@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ..actions import ActionNotPerformed, Check, CheckResult
+from . import processes
 from ..spec import (
     Capability,
     Tool,
@@ -145,17 +146,12 @@ class Changes:
         command: list[str],
         timeout: int,
     ):
-        def run():
-            return subprocess.run(
-                command,
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-
-        return await asyncio.to_thread(
-            run
+        # Beside the loop, and stopped with the step that asked for it: a
+        # step over its time limit does not leave a push or a test run going.
+        return await processes.run_stoppable(
+            command,
+            cwd=self.root,
+            timeout=timeout,
         )
 
     async def _checked(

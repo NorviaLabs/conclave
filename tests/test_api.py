@@ -288,7 +288,8 @@ def test_rest_validation_proposals_cancellation_and_redacted_errors(tmp_path):
         assert (await api.dispatch("DELETE", "/api/members/missing", {}))[0] == 404
         assert (await api.dispatch("PUT", "/api/applications/missing", {"definition": definition, "revision": 1}))[0] == 404
         assert (await api.dispatch("DELETE", "/api/applications/missing", {"revision": 1}))[0] == 404
-        assert (await api.dispatch("DELETE", "/api/applications/missing", {"revision": 0}))[0] == 400
+        # An application that is not there is not there, whatever the request says.
+        assert (await api.dispatch("DELETE", "/api/applications/missing", {"revision": 0}))[0] == 404
         assert (await api.dispatch("PUT", "/api/catalogue", {"catalogue": {"version": 1, "roles": [], "starters": [], "outputs": []}, "revision": -1}))[0] == 400
         _, saved = await api.dispatch("POST", "/api/applications", {"definition": definition})
         prefix = "/api/applications/" + saved["id"]

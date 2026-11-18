@@ -7,7 +7,7 @@ from dataclasses import replace
 from conclave import Capability
 from .capture import redact
 from .definition import run_application
-from .step_testing import compare, test_scope
+from .step_testing import compare, condition_report, test_scope
 
 
 class MockExecutor:
@@ -33,11 +33,16 @@ async def execute_test(store, application, owner, record, fixture, provider, too
     definition = record['request']['definition']
     selected, seeds, warnings = test_scope(fixture, definition, record['scope'])
     record['warnings'] = warnings
+    # The tested step runs whatever its condition says; the record says what a real run would do.
+    condition = condition_report(definition, fixture['step_id'], fixture['patches'])
+    if condition is not None:
+        record['condition'] = condition
     record['status'] = 'running'
     store.save(application, owner, 'test', record)
     async def consume():
         stream = run_application(definition, provider, safe_tools(tools, record.get('mocks', {})), fixture['task'],
-            inputs=fixture['inputs'], execution_steps=selected, seed_patches=seeds, approver=lambda request: False)
+            inputs=fixture['inputs'], execution_steps=selected, seed_patches=seeds, approver=lambda request: False,
+            unconditional={fixture['step_id']})
         async with aclosing(stream):
             async for event in stream:
                 event = {key: value for key, value in event.items() if key != 'checkpoint'}

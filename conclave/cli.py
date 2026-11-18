@@ -90,9 +90,9 @@ async def execute(args):
                 views = {item["id"]: item for item in (await host.handle("actions", {"run_id": args.run_id}))[1]["actions"]}
                 error.details = [views[identifier] for identifier in error.actions if identifier in views]
                 raise
-        active = host.tasks.get(record["id"])
-        if active:
-            await active[0]
+        # Through any automatic retry: the command waits until the run completes,
+        # waits for a person, or stops with nothing more to try.
+        await host.until_idle(record["id"])
         _, record = await host.handle("get", {"run_id": record["id"]})
         if args.format == "text":
             print(render_run(record), end="")

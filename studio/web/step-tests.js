@@ -2,7 +2,7 @@ import {projectLiveRun} from '/live.js';
 import {planConnections} from '/definition.js';
 import {runCanvasMarkup} from '/run-canvas.js';
 
-export function createStepTestsController({request,getContext,escape:e,agentName,outputName,capabilityName,onTestsChanged=()=>{}}){
+export function createStepTestsController({request,getContext,escape:e,agentName,outputName,capabilityName,onTestsChanged=()=>{},wouldStore=()=>''}){
   const dialog=document.createElement('dialog');dialog.className='step-test-dialog';document.body.append(dialog);
   let context,fixtures=[],record=null,mode='setup',scope='step',error='',timer=null,generation=0,preview=null;
   const base=()=>`/api/applications/${encodeURIComponent(context.applicationId)}`;
@@ -62,7 +62,7 @@ export function createStepTestsController({request,getContext,escape:e,agentName
     // a comparison is never shown against a reference that does not exist.
     const provenance=record.authored?'Written for this test; no source run.':'Pinned from run '+e(record.source_run);
     const comparison=record.reference_recorded?`<section class="test-comparison"><div><h3>Reference output</h3><pre>${e(text(record.reference))}</pre></div><div><h3>New result</h3><pre>${e(text(record.output??'Not produced yet'))}</pre></div></section><h3>Changes</h3><p>Exact data differences only; no semantic equivalence claim.</p><pre>${e(record.comparison?.diff||JSON.stringify(record.comparison||{},null,2))}</pre>`:`<section class="test-comparison"><div><h3>New result</h3><pre>${e(text(record.output??'Not produced yet'))}</pre></div></section><h3>Changes</h3><p>This fixture recorded no reference output, so there is nothing to compare against. Read the result on its own merits.</p>`;
-    return `<strong>TEST · ${e(record.status)}</strong><p>${provenance} · Tested: ${e(record.tested_steps.join(', '))} · Prerequisites supplied: ${e(record.seeded_steps.join(', ')||'none')}</p>${record.error?`<p class="validation">${e(record.error)}</p>`:''}${(record.warnings||[]).map(w=>`<p class="validation">${e(w)}</p>`).join('')}<div class="test-canvas">${canvas}</div>${comparison}<details><summary>Validation, tools, provider and usage</summary><pre>${e(JSON.stringify(record.events,null,2))}</pre><p>Cost: not reported. Tokens: ${e(record.metrics?.tokens??'not reported')}</p></details><button data-test-again>Test again</button>`;
+    return `<strong>TEST · ${e(record.status)}</strong><p>${provenance} · Tested: ${e(record.tested_steps.join(', '))} · Prerequisites supplied: ${e(record.seeded_steps.join(', ')||'none')}</p>${record.error?`<p class="validation">${e(record.error)}</p>`:''}${(record.warnings||[]).map(w=>`<p class="validation">${e(w)}</p>`).join('')}<div class="test-canvas">${canvas}</div>${comparison}${wouldStore(record.request.definition,record.tested_steps||[])}<details><summary>Validation, tools, provider and usage</summary><pre>${e(JSON.stringify(record.events,null,2))}</pre><p>Cost: not reported. Tokens: ${e(record.metrics?.tokens??'not reported')}</p></details><button data-test-again>Test again</button>`;
   }
   async function poll(token){
     try{const result=await request(`${base()}/tests/${record.id}`);if(token!==generation||!dialog.open)return;record=result;error='';render();if(['pending','running'].includes(record.status))timer=setTimeout(()=>poll(token),600);}catch(err){if(token===generation){error=err.message;render();}}
